@@ -1,0 +1,199 @@
+openapi: 3.1.0
+info:
+  title: Call-a-Vet Chat WebSocket
+  version: 0.1.0
+  description: >
+    JSON messages over WebSocket. Connect via HTTP GET upgrade to `/ws/chat`.
+    Auth with Supabase JWT in `Authorization: Bearer <token>` during upgrade.
+servers:
+  - url: wss://ws.dev.callavet.mx
+    description: Development
+  - url: wss://ws.staging.callavet.mx
+    description: Staging
+  - url: wss://ws.callavet.mx
+    description: Production
+paths:
+  /ws/chat:
+    get:
+      summary: WebSocket upgrade for chat
+      description: >
+        On connect, server sends `system.welcome`. All messages are JSON objects with fields:
+        `type` (string), `ts` (ISO string), and a `data` payload shaped per event.
+      parameters:
+        - in: header
+          name: Authorization
+          required: true
+          schema: { type: string, example: "Bearer eyJhbGciOi..." }
+        - in: query
+          name: sessionId
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "101":
+          description: Switching Protocols
+        "401":
+          description: Unauthorized
+
+components:
+  schemas:
+    Envelope:
+      type: object
+      required: [type, ts]
+      properties:
+        type: { type: string, description: Event type (see below) }
+        ts: { type: string, format: date-time }
+        data: { type: object, additionalProperties: true }
+
+    # -------- Client → Server events --------
+    client.message.send:
+      type: object
+      required: [sessionId, role, content]
+      properties:
+        sessionId: { type: string, format: uuid }
+        role: { type: string, enum: [user, vet] }
+        content: { type: string, description: Plain text content }
+        attachments:
+          type: array
+          items:
+            type: object
+            properties:
+              url: { type: string, format: uri }
+              mime: { type: string }
+
+    client.message.edit:
+      type: object
+      required: [sessionId, messageId, content]
+      properties:
+        sessionId: { type: string, format: uuid }
+        messageId: { type: string, format: uuid }
+        content: { type: string }
+
+    client.message.delete:
+      type: object
+      required: [sessionId, messageId]
+      properties:
+        sessionId: { type: string, format: uuid }
+        messageId: { type: string, format: uuid }
+
+    client.typing:
+      type: object
+      required: [sessionId, isTyping]
+      properties:
+        sessionId: { type: string, format: uuid }
+        isTyping: { type: boolean }
+
+    client.read.receipt:
+      type: object
+      required: [sessionId, messageId]
+      properties:
+        sessionId: { type: string, format: uuid }
+        messageId: { type: string, format: uuid }
+
+    client.video.signal:
+      type: object
+      required: [sessionId, signal]
+      properties:
+        sessionId: { type: string, format: uuid }
+        signal: { type: object, additionalProperties: true }
+
+    # Vector-only semantic retrieve (NO keyword search)
+    client.vector.retrieve:
+      type: object
+      required: [sessionId, target, query_embedding, topK]
+      properties:
+        sessionId: { type: string, format: uuid }
+        target:
+          type: string
+          enum: [messages, notes, kb]
+          description: Table/collection to NN-search.
+        query_embedding:
+          type: array
+          items: { type: number }
+          minItems: 32
+          description: Pre-computed embedding floats (e.g., 1536-dim OpenAI/Local).
+        topK: { type: integer, default: 8, maximum: 50 }
+        filter_ids:
+          type: array
+          items: { type: string, format: uuid }
+          description: Optional allow-list of ids to restrict search space.
+
+    # -------- Server → Client events --------
+    system.welcome:
+      type: object
+      required: [sessionId, userId]
+      properties:
+        sessionId: { type: string, format: uuid }
+        userId: { type: string, format: uuid }
+
+    server.message.appended:
+      type: object
+      required: [message]
+      properties:
+        message: { $ref: "#/components/schemas/Message" }
+
+    server.message.edited:
+      type: object
+      required: [message]
+      properties:
+        message: { $ref: "#/components/schemas/Message" }
+
+    server.message.deleted:
+      type: object
+      required: [messageId]
+      properties:
+        messageId: { type: string, format: uuid }
+
+    server.typing:
+      type: object
+      required: [actorId, isTyping]
+      properties:
+        actorId: { type: string, format: uuid }
+        isTyping: { type: boolean }
+
+    server.read.receipt:
+      type: object
+      required: [messageId, readerId]
+      properties:
+        messageId: { type: string, format: uuid }
+        readerId: { type: string, format: uuid }
+
+    server.video.signal:
+      type: object
+      required: [signal]
+      properties:
+        signal: { type: object, additionalProperties: true }
+
+    # Vector-only results
+    server.vector.results:
+      type: object
+      required: [target, topK, results]
+      properties:
+        target: { type: string, enum: [messages, notes, kb] }
+        topK: { type: integer }
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              score: { type: number, description: Cosine similarity (higher is nearer) }
+              snippet: { type: string }
+              metadata: { type: object, additionalProperties: true }
+
+    # Common entities
+    Message:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid }
+        sender_id: { type: string, format: uuid }
+        role: { type: string, enum: [user, vet, ai] }
+        content: { type: string }
+        created_at: { type: string, format: date-time }
+        attachments:
+          type: array
+          items:
+            type: object
+            properties:
+              url: { type: string, format: uri }
+              mime: { type: string }
