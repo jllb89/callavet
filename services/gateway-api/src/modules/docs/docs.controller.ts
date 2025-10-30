@@ -38,6 +38,10 @@ function tryResolveAlt(name: string): string | null {
     // If copied next to dist (covers dist/public and dist/src/public)
     resolve(__dirname, `../../public/${name}`),
     resolve(__dirname, `../../../public/${name}`),
+    resolve(__dirname, `../public/${name}`),
+    // Variants using cwd
+    resolve(process.cwd(), `dist/public/${name}`),
+    resolve(process.cwd(), `dist/src/public/${name}`),
     // If copied to app root public
     resolve(process.cwd(), `public/${name}`),
   ];
