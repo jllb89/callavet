@@ -25,6 +25,13 @@ function resolveSpecPath(): string {
 }
 
 function tryResolveAlt(name: string): string | null {
+  // Allow explicit overrides via env vars
+  if (name === 'openapi-chat-ws.yaml' && process.env.OPENAPI_CHAT_WS_SPEC_PATH && existsSync(process.env.OPENAPI_CHAT_WS_SPEC_PATH)) {
+    return process.env.OPENAPI_CHAT_WS_SPEC_PATH;
+  }
+  if (name === 'openapi-webhooks.yaml' && process.env.OPENAPI_WEBHOOKS_SPEC_PATH && existsSync(process.env.OPENAPI_WEBHOOKS_SPEC_PATH)) {
+    return process.env.OPENAPI_WEBHOOKS_SPEC_PATH;
+  }
   const candidates = [
     resolve(process.cwd(), `../../../docs/openapi/${name}`),
     resolve(__dirname, `../../../../docs/openapi/${name}`),

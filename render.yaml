@@ -14,6 +14,10 @@ services:
         value: staging
       - key: OPENAPI_SPEC_PATH
         value: /app/public/openapi.yaml
+      - key: OPENAPI_CHAT_WS_SPEC_PATH
+        value: /app/public/openapi-chat-ws.yaml
+      - key: OPENAPI_WEBHOOKS_SPEC_PATH
+        value: /app/public/openapi-webhooks.yaml
       - key: DATABASE_URL
         sync: false
       - key: SUPABASE_JWT_SECRET
