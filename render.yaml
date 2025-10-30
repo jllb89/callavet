@@ -12,6 +12,8 @@ services:
     envVars:
       - key: NODE_ENV
         value: staging
+      - key: OPENAPI_SPEC_PATH
+        value: /app/public/openapi.yaml
       - key: DATABASE_URL
         sync: false
       - key: SUPABASE_JWT_SECRET
