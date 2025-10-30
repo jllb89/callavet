@@ -28,7 +28,11 @@ function tryResolveAlt(name: string): string | null {
   const candidates = [
     resolve(process.cwd(), `../../../docs/openapi/${name}`),
     resolve(__dirname, `../../../../docs/openapi/${name}`),
+    // If copied next to dist (covers dist/public and dist/src/public)
     resolve(__dirname, `../../public/${name}`),
+    resolve(__dirname, `../../../public/${name}`),
+    // If copied to app root public
+    resolve(process.cwd(), `public/${name}`),
   ];
   for (const p of candidates) if (existsSync(p)) return p;
   return null;
