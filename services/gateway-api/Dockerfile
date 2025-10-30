@@ -2,8 +2,9 @@
 FROM node:20-alpine AS base
 WORKDIR /app
 RUN corepack enable
-COPY package.json tsconfig.json ./
-COPY src ./src
+# When Render builds with repo root as context, copy from monorepo paths
+COPY services/gateway-api/package.json services/gateway-api/tsconfig.json ./
+COPY services/gateway-api/src ./src
 RUN corepack prepare pnpm@9.12.0 --activate && pnpm install && pnpm build
 
 FROM node:20-alpine
