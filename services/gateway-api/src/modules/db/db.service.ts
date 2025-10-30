@@ -1,12 +1,14 @@
 import { Injectable } from '@nestjs/common';
 import { Pool } from 'pg';
 import dns from 'node:dns';
+import { lookup as dnsLookup } from 'node:dns/promises';
 import fs from 'node:fs';
 import { RequestContext } from '../auth/request-context.service';
 
 @Injectable()
 export class DbService {
   private pool?: Pool;
+  private initPromise?: Promise<void>;
   constructor(private readonly rc: RequestContext){
     const url = process.env.DATABASE_URL;
     if (url) {
@@ -25,29 +27,38 @@ export class DbService {
           ssl = { rejectUnauthorized: true };
         }
       }
-      // Force IPv4 to avoid ENETUNREACH when IPv6 routes are unavailable in some hosts
-      const lookup: any = (hostname: string, options: any, callback: any) => {
-        return dns.lookup(hostname, { family: 4, all: false }, callback);
-      };
-      // Parse URL to explicit fields to ensure our lookup is used
+      // Defer creating the Pool until first use so we can pre-resolve IPv4 address asynchronously
       const u = new URL(url);
-      const cfg: any = {
-        host: u.hostname,
-        port: u.port ? Number(u.port) : 5432,
-        database: decodeURIComponent(u.pathname.replace(/^\//, '')),
-        user: decodeURIComponent(u.username),
-        password: decodeURIComponent(u.password),
-        ssl,
-        lookup,
+      this.initPromise = undefined;
+      const createPool = async () => {
+        // Prefer IPv4; resolve the hostname ourselves and pass IPv4 literal to pg
+        let host = u.hostname;
+        try {
+          const res = await dnsLookup(u.hostname, { family: 4, all: false });
+          host = typeof res === 'string' ? res : res.address;
+        } catch {
+          // Fallback: try forcing ipv4-first at runtime
+          try { (dns as any).setDefaultResultOrder?.('ipv4first'); } catch {}
+        }
+        const cfg: any = {
+          host,
+          port: u.port ? Number(u.port) : 5432,
+          database: decodeURIComponent(u.pathname.replace(/^\//, '')),
+          user: decodeURIComponent(u.username),
+          password: decodeURIComponent(u.password),
+          ssl,
+        };
+        this.pool = new Pool(cfg);
       };
-      this.pool = new Pool(cfg);
+      this.initPromise = createPool();
     }
   }
   get isStub(){ return !this.pool; }
   async query<T = any>(text: string, params?: any[]): Promise<{ rows: T[] }>{
     if (!this.pool) {
+      if (this.initPromise) await this.initPromise;
       // Stubbed response for local dev without DB
-      return { rows: [] as T[] };
+      if (!this.pool) return { rows: [] as T[] };
     }
     // Use broad typing to keep it simple; callers can cast
     return (this.pool.query as any)(text, params) as Promise<{ rows: T[] }>;
@@ -55,7 +66,8 @@ export class DbService {
 
   async runInTx<T>(fn: (q: <R = any>(sql: string, args?: any[]) => Promise<{ rows: R[] }>) => Promise<T>): Promise<T> {
     if (!this.pool) {
-      return fn(async () => ({ rows: [] })) as any;
+      if (this.initPromise) await this.initPromise;
+      if (!this.pool) return fn(async () => ({ rows: [] })) as any;
     }
     const client = await this.pool.connect();
     try {
