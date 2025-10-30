@@ -17,6 +17,7 @@ COPY --from=base /app/dist ./dist
 # Copy public assets into final image at both /app/public and /app/dist/public
 COPY --from=base /app/public ./public
 COPY --from=base /app/public ./dist/public
+COPY --from=base /app/public ./dist/src/public
 RUN corepack enable && corepack prepare pnpm@9.12.0 --activate && pnpm install --prod
 EXPOSE 4000
 CMD ["node","dist/main.js"]
