@@ -7,6 +7,8 @@ build
 .env*
 !.env.example
 !**/.env*.example
+.turbo/
+**/*.tsbuildinfo
 .DS_Store
 **/build
 **/.dart_tool

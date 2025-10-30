@@ -2,6 +2,7 @@ services:
   - type: web
     name: cav-gateway-staging
     env: docker
+    registryCredentialName: image-registry-docker-config
     branch: main
     autoDeploy: true
     region: ohio
@@ -20,6 +21,7 @@ services:
   - type: web
     name: cav-webhooks-staging
     env: docker
+    registryCredentialName: image-registry-docker-config
     branch: main
     autoDeploy: true
     region: ohio
@@ -35,6 +37,7 @@ services:
   - type: web
     name: cav-chat-staging
     env: docker
+    registryCredentialName: image-registry-docker-config
     branch: main
     autoDeploy: true
     region: ohio
