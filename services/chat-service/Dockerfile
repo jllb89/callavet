@@ -2,9 +2,8 @@
 FROM node:20-alpine AS base
 WORKDIR /app
 RUN corepack enable
-# Monorepo path copies to support repo-root build context on Render
-COPY services/chat-service/package.json services/chat-service/tsconfig.json ./
-COPY services/chat-service/src ./src
+COPY package.json tsconfig.json ./
+COPY src ./src
 RUN corepack prepare pnpm@9.12.0 --activate && pnpm install && pnpm build
 
 FROM node:20-alpine

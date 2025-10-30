@@ -2,9 +2,8 @@
 FROM node:20-alpine AS base
 WORKDIR /app
 RUN corepack enable
-# Monorepo path copies to support repo-root build context on Render
-COPY services/webhooks/package.json services/webhooks/tsconfig.json ./
-COPY services/webhooks/src ./src
+COPY package.json tsconfig.json ./
+COPY src ./src
 RUN corepack prepare pnpm@9.12.0 --activate && pnpm install && pnpm build
 
 FROM node:20-alpine

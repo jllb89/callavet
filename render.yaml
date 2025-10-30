@@ -6,6 +6,7 @@ services:
     branch: main
     autoDeploy: true
     region: ohio
+    dockerContext: services/gateway-api
     healthCheckPath: /health
     dockerfilePath: services/gateway-api/Dockerfile
     envVars:
@@ -25,6 +26,7 @@ services:
     branch: main
     autoDeploy: true
     region: ohio
+    dockerContext: services/webhooks
     dockerfilePath: services/webhooks/Dockerfile
     envVars:
       - key: NODE_ENV
@@ -41,6 +43,7 @@ services:
     branch: main
     autoDeploy: true
     region: ohio
+    dockerContext: services/chat-service
     dockerfilePath: services/chat-service/Dockerfile
     envVars:
       - key: NODE_ENV
