@@ -1,0 +1,66 @@
+openapi: 3.1.0
+info:
+  title: Call-a-Vet Webhooks
+  version: 0.1.0
+  description: >
+    Minimal Express service. Stripe webhook expects raw signed payload.
+servers:
+  - url: https://hooks.dev.callavet.mx
+    description: Development
+  - url: https://hooks.staging.callavet.mx
+    description: Staging
+  - url: https://hooks.callavet.mx
+    description: Production
+
+paths:
+  /health:
+    get:
+      summary: Health
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean } } }
+
+  /stripe/webhook:
+    post:
+      summary: Stripe webhook (raw body, signed)
+      description: >
+        Verify `Stripe-Signature` with `STRIPE_WEBHOOK_SECRET`. Body must be **raw**.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Raw Stripe event (shape varies by type)
+      responses:
+        "200":
+          description: Acknowledge
+          content:
+            application/json:
+              schema: { type: object, properties: { received: { type: boolean } } }
+        "400":
+          description: Signature verification failed
+
+  /internal/ingest/stripe:
+    post:
+      summary: Normalize Stripe event into Gateway/Supabase
+      description: Internal call from webhooks to Gateway (secured with Bearer or HMAC).
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                type: { type: string }
+                data: { type: object, additionalProperties: true }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object, properties: { ok: { type: boolean } } } } } }
+
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }

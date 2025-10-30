@@ -1,0 +1,38 @@
+{
+  "name": "@cav/gateway-api",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "dev": "ts-node-dev --transpile-only --ignore-watch node_modules --respawn src/main.ts",
+    "build": "tsc",
+    "start:dev": "node --enable-source-maps dist/main.js",
+    "start:prod": "node dist/main.js",
+  "e2e:subscriptions": "node e2e/subscriptions-usage.e2e.js",
+    "e2e": "pnpm run e2e:subscriptions"
+  },
+  "dependencies": {
+    "@nestjs/common": "^10.4.7",
+    "@nestjs/config": "^3.2.3",
+    "@nestjs/core": "^10.4.7",
+    "@nestjs/platform-express": "^10.4.7",
+    "@nestjs/websockets": "^10.4.7",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.2",
+  "cors": "^2.8.5",
+  "jsonwebtoken": "^9.0.2",
+    "express": "^4.19.2",
+    "pg": "^8.12.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.7.4",
+  "@types/pg": "^8.11.10",
+  "@types/jsonwebtoken": "^9.0.6",
+    "ts-node": "^10.9.2",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.6.3"
+  }
+}

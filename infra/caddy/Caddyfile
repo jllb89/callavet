@@ -1,0 +1,24 @@
+# Staging domain
+staging.call-a-vet.app {
+  encode gzip
+
+  @openapi path /openapi.yaml /docs* /health /vector/* /sessions/* /centers/* /subscriptions/*
+  handle @openapi {
+    reverse_proxy 127.0.0.1:4000
+  }
+
+  # Optional: expose webhooks under a path prefix
+  handle_path /webhooks/* {
+    reverse_proxy 127.0.0.1:4200
+  }
+
+  # Optional: expose chat service directly if needed
+  handle_path /chat/* {
+    reverse_proxy 127.0.0.1:4100
+  }
+
+  # Default fallback to gateway
+  handle {
+    reverse_proxy 127.0.0.1:4000
+  }
+}

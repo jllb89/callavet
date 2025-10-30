@@ -1,0 +1,32 @@
+version: "3.9"
+
+services:
+  gateway:
+    image: ghcr.io/${REGISTRY_OWNER}/cav-gateway:${TAG:-staging}
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    environment:
+      - NODE_ENV=staging
+      - NODE_OPTIONS=--dns-result-order=ipv4first
+      - PORT=4000
+      - DATABASE_URL=${DATABASE_URL}
+      - SUPABASE_JWT_SECRET=${SUPABASE_JWT_SECRET}
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+  chat:
+    image: ghcr.io/${REGISTRY_OWNER}/cav-chat:${TAG:-staging}
+    restart: unless-stopped
+    ports:
+      - "4100:4100"
+    environment:
+      - NODE_ENV=staging
+      - PORT=4100
+  webhooks:
+    image: ghcr.io/${REGISTRY_OWNER}/cav-webhooks:${TAG:-staging}
+    restart: unless-stopped
+    ports:
+      - "4200:4200"
+    environment:
+      - NODE_ENV=staging
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}

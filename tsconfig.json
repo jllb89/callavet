@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    { "path": "services/gateway-api" },
+    { "path": "services/chat-service" },
+    { "path": "services/webhooks" },
+    { "path": "packages/sdk" },
+    { "path": "packages/types" }
+  ]
+}

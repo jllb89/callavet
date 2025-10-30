@@ -1,0 +1,36 @@
+services:
+  gateway:
+    build: ../services/gateway-api
+    working_dir: /app
+    ports: ["4000:4000"]
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - NODE_OPTIONS=--dns-result-order=ipv4first
+      - PORT=4000
+      - DATABASE_URL=${DATABASE_URL}
+      - SUPABASE_JWT_SECRET=${SUPABASE_JWT_SECRET}
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+    command: pnpm start:prod
+  chat:
+    build: ../services/chat-service
+    working_dir: /app
+    ports: ["4100:4100"]
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=4100
+    command: pnpm start:prod
+  webhooks:
+    build: ../services/webhooks
+    working_dir: /app
+    ports: ["4200:4200"]
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
+    command: pnpm start
+
+  # Example .env values (do not commit secrets):
+  # DATABASE_URL=postgres://USER:PASS@host:5432/db_name
+  # SUPABASE_JWT_SECRET=your_supabase_jwt_secret
+  # STRIPE_SECRET_KEY=sk_test_...
+  # STRIPE_WEBHOOK_SECRET=whsec_...

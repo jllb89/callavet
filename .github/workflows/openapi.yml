@@ -1,0 +1,35 @@
+name: OpenAPI lint and SDK codegen
+
+on:
+  pull_request:
+    paths:
+      - 'docs/openapi/**'
+      - 'packages/sdk/**'
+      - 'services/gateway-api/**'
+  push:
+    branches: [ main ]
+    paths:
+      - 'docs/openapi/**'
+      - 'packages/sdk/**'
+      - 'services/gateway-api/**'
+
+jobs:
+  openapi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - name: Lint OpenAPI
+        run: pnpm openapi:lint
+      - name: Generate SDK types
+        run: pnpm openapi:codegen
+      - name: Typecheck workspace
+        run: pnpm typecheck

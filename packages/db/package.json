@@ -1,0 +1,12 @@
+{
+	"name": "@cav/db",
+	"version": "0.1.0",
+	"scripts": {
+		"migrate:dev": "sh -c 'test -n \"$DATABASE_URL\" || { echo \"Error: set DATABASE_URL first\"; exit 1; }; psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f migrations/0001_init.sql'",
+		"seed:dev": "sh -c 'test -n \"$DATABASE_URL\" || { echo \"Error: set DATABASE_URL first\"; exit 1; }; psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f migrations/0002_seed.sql'",
+		"setup:dev": "pnpm run migrate:dev && pnpm run seed:dev",
+		"migrate:staging": "sh -c 'test -n \"$STAGING_DATABASE_URL\" || { echo \"Error: set STAGING_DATABASE_URL first\"; exit 1; }; psql \"$STAGING_DATABASE_URL\" -v ON_ERROR_STOP=1 -f migrations/0001_init.sql'",
+		"seed:staging": "sh -c 'test -n \"$STAGING_DATABASE_URL\" || { echo \"Error: set STAGING_DATABASE_URL first\"; exit 1; }; psql \"$STAGING_DATABASE_URL\" -v ON_ERROR_STOP=1 -f migrations/0002_seed.sql'",
+		"migrate:prod": "sh -c 'test -n \"$PROD_DATABASE_URL\" || { echo \"Error: set PROD_DATABASE_URL first\"; exit 1; }; psql \"$PROD_DATABASE_URL\" -v ON_ERROR_STOP=1 -f migrations/0001_init.sql'"
+	}
+}

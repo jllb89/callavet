@@ -1,0 +1,44 @@
+services:
+  - type: web
+    name: cav-gateway-staging
+    env: docker
+    branch: main
+    autoDeploy: true
+    region: ohio
+    healthCheckPath: /health
+    dockerfilePath: services/gateway-api/Dockerfile
+    envVars:
+      - key: NODE_ENV
+        value: staging
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+
+  - type: web
+    name: cav-webhooks-staging
+    env: docker
+    branch: main
+    autoDeploy: true
+    region: ohio
+    dockerfilePath: services/webhooks/Dockerfile
+    envVars:
+      - key: NODE_ENV
+        value: staging
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+
+  - type: web
+    name: cav-chat-staging
+    env: docker
+    branch: main
+    autoDeploy: true
+    region: ohio
+    dockerfilePath: services/chat-service/Dockerfile
+    envVars:
+      - key: NODE_ENV
+        value: staging

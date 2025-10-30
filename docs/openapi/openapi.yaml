@@ -1,0 +1,1535 @@
+openapi: 3.1.0
+info:
+  title: Call-a-Vet Gateway API
+  version: 0.1.0
+  description: >
+    Public+private HTTP API for Call-a-Vet. Auth via Supabase JWT (Bearer).
+    RLS enforced at the DB layer. Idempotency on critical mutations via `Idempotency-Key`.
+
+servers:
+  - url: https://api.dev.callavet.mx
+    description: Development
+  - url: https://api.staging.callavet.mx
+    description: Staging
+  - url: https://api.callavet.mx
+    description: Production
+
+tags:
+  - name: System
+  - name: Auth & Profile
+  - name: Billing
+  - name: Pets
+  - name: Vets
+  - name: Centers
+  - name: Plans & Subscriptions
+  - name: Entitlements
+  - name: Payments & Invoices
+  - name: Sessions
+  - name: Messages
+  - name: Video
+  - name: Notes & Care Plans
+  - name: Image Cases
+  - name: Appointments
+  - name: Knowledge Base & Search
+  - name: Ratings
+  - name: Notifications
+  - name: Files
+  - name: Admin
+  - name: Webhooks
+  - name: AI (internal)
+
+paths:
+
+  /health:
+    get:
+      tags: [System]
+      summary: Liveness probe
+      responses: { "200": { $ref: "#/components/responses/Ok" } }
+
+  /version:
+    get:
+      tags: [System]
+      summary: API version & commit hash
+      responses: { "200": { $ref: "#/components/responses/Ok" } }
+
+  /time:
+    get:
+      tags: [System]
+      summary: Server time
+      responses:
+        "200":
+          description: OK
+          content: { application/json: { schema: { type: object, properties: { now: { type: string, format: date-time } } } } }
+
+  /me:
+    get:
+      tags: [Auth & Profile]
+      summary: Get current user profile + billing + active subscription snapshot
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/Me" } }
+    patch:
+      tags: [Auth & Profile]
+      summary: Update profile fields
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/MePatch" }
+      responses: { "200": { $ref: "#/components/responses/Me" } }
+
+  /me/security/sessions:
+    get:
+      tags: [Auth & Profile]
+      summary: List recent auth sessions/devices
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/List" } }
+
+  /me/security/logout-all:
+    post:
+      tags: [Auth & Profile]
+      summary: Invalidate other sessions
+      security: [{ bearerAuth: [] }]
+      responses: { "204": { description: No Content } }
+
+  /me/billing-profile:
+    get:
+      tags: [Billing]
+      summary: Get billing profile
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/BillingProfile" } }
+    put:
+      tags: [Billing]
+      summary: Upsert billing profile
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/BillingProfile" }
+      responses: { "200": { $ref: "#/components/responses/BillingProfile" } }
+
+  /me/billing/payment-method/attach:
+    post:
+      tags: [Billing]
+      summary: Start attach flow (Stripe SetupIntent)
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/StripeSetup" } }
+
+  /me/billing/payment-method/{pmId}:
+    delete:
+      tags: [Billing]
+      summary: Detach payment method
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: pmId
+          required: true
+          schema: { type: string }
+      responses: { "204": { description: No Content } }
+
+  /pets:
+    get:
+      tags: [Pets]
+      summary: List my pets
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/ListPets" } }
+    post:
+      tags: [Pets]
+      summary: Create a pet
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/PetUpsert" }
+      responses: { "201": { $ref: "#/components/responses/Pet" } }
+
+  /pets/{petId}:
+    get:
+      tags: [Pets]
+      summary: Get a pet
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/petId" } ]
+      responses: { "200": { $ref: "#/components/responses/Pet" } }
+    patch:
+      tags: [Pets]
+      summary: Update a pet
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/petId" } ]
+      requestBody: { $ref: "#/components/requestBodies/PetUpsert" }
+      responses: { "200": { $ref: "#/components/responses/Pet" } }
+    delete:
+      tags: [Pets]
+      summary: Archive a pet
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/petId" } ]
+      responses: { "204": { description: No Content } }
+
+  /pets/{petId}/files/signed-url:
+    post:
+      tags: [Files, Pets]
+      summary: Create signed upload URL for pet assets
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/petId" } ]
+      requestBody: { $ref: "#/components/requestBodies/SignedUrl" }
+      responses: { "200": { $ref: "#/components/responses/SignedUrl" } }
+
+  /vets:
+    get:
+      tags: [Vets]
+      summary: Public vet directory with filters
+      parameters:
+        - in: query
+          name: country
+          schema:
+            type: string
+        - in: query
+          name: specialties
+          schema:
+            type: string
+        - in: query
+          name: languages
+          schema:
+            type: string
+      responses: { "200": { $ref: "#/components/responses/ListVets" } }
+
+  /vets/{vetId}:
+    get:
+      tags: [Vets]
+      summary: Public vet profile
+      parameters: [ { $ref: "#/components/parameters/vetId" } ]
+      responses: { "200": { $ref: "#/components/responses/Vet" } }
+
+  /me/vet:
+    get:
+      tags: [Vets]
+      summary: Get my vet profile
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/Vet" } }
+    put:
+      tags: [Vets]
+      summary: Upsert my vet profile
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/VetUpsert" }
+      responses: { "200": { $ref: "#/components/responses/Vet" } }
+
+  /me/vet/availability:
+    get:
+      tags: [Vets, Appointments]
+      summary: List weekly slots
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/VetAvailability" } }
+    put:
+      tags: [Vets, Appointments]
+      summary: Replace weekly template
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/VetAvailability" }
+      responses: { "200": { $ref: "#/components/responses/VetAvailability" } }
+
+  /me/vet/availability/overrides:
+    post:
+      tags: [Vets, Appointments]
+      summary: Add an availability override
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/VetOverride" }
+      responses: { "201": { $ref: "#/components/responses/VetOverride" } }
+
+  /me/vet/availability/overrides/{id}:
+    delete:
+      tags: [Vets, Appointments]
+      summary: Delete an availability override
+      security: [{ bearerAuth: [] }]
+      parameters: [ { in: path, name: id, required: true, schema: { type: string, format: uuid } } ]
+      responses: { "204": { description: No Content } }
+
+  /centers/near:
+    get:
+      tags: [Centers]
+      summary: Find nearby centers
+      parameters:
+        - in: query
+          name: lat
+          required: true
+          schema:
+            type: number
+        - in: query
+          name: lng
+          required: true
+          schema:
+            type: number
+        - in: query
+          name: radius
+          schema:
+            type: number
+            default: 10
+      responses: { "200": { $ref: "#/components/responses/ListCenters" } }
+
+  /plans:
+    get:
+      tags: [Plans & Subscriptions]
+      summary: List active plans
+      responses: { "200": { $ref: "#/components/responses/ListPlans" } }
+
+  /plans/{code}:
+    get:
+      tags: [Plans & Subscriptions]
+      summary: Get plan by code
+      parameters: [ { in: path, name: code, required: true, schema: { type: string } } ]
+      responses: { "200": { $ref: "#/components/responses/Plan" } }
+
+  /subscriptions/my:
+    get:
+      tags: [Plans & Subscriptions]
+      summary: My subscriptions
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/ListSubscriptions" } }
+
+  /subscriptions/usage/current:
+    get:
+      tags: [Plans & Subscriptions]
+      summary: Current-period usage snapshot
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/Usage" } }
+
+  /subscriptions/checkout:
+    post:
+      tags: [Plans & Subscriptions]
+      summary: Start Stripe Checkout for a plan
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/Checkout" }
+      responses: { "200": { $ref: "#/components/responses/StripeCheckout" } }
+
+  /subscriptions/portal:
+    post:
+      tags: [Plans & Subscriptions]
+      summary: Create Stripe Billing Portal session
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/StripePortal" } }
+
+  /subscriptions/cancel:
+    post:
+      tags: [Plans & Subscriptions]
+      summary: Cancel at period end
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/Subscription" } }
+
+  /subscriptions/resume:
+    post:
+      tags: [Plans & Subscriptions]
+      summary: Resume subscription
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/Subscription" } }
+
+  /subscriptions/change-plan:
+    post:
+      tags: [Plans & Subscriptions]
+      summary: Change plan (prorated)
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/ChangePlan" }
+      responses: { "200": { $ref: "#/components/responses/Subscription" } }
+
+  /entitlements/reserve:
+    post:
+      tags: [Entitlements]
+      summary: Reserve a unit (chat|video)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          schema:
+            type: string
+      requestBody: { $ref: "#/components/requestBodies/EntitlementReserve" }
+      responses: { "200": { $ref: "#/components/responses/EntitlementReserve" } }
+
+  /entitlements/commit:
+    post:
+      tags: [Entitlements]
+      summary: Finalize a reservation
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          schema:
+            type: string
+      requestBody: { $ref: "#/components/requestBodies/EntitlementCommit" }
+      responses: { "200": { $ref: "#/components/responses/Ok" } }
+
+  /entitlements/release:
+    post:
+      tags: [Entitlements]
+      summary: Roll back a pending reservation
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          schema:
+            type: string
+      requestBody: { $ref: "#/components/requestBodies/EntitlementRelease" }
+      responses: { "200": { $ref: "#/components/responses/Ok" } }
+
+  /payments:
+    get:
+      tags: [Payments & Invoices]
+      summary: List my payments
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/ListPayments" } }
+
+  /payments/{paymentId}:
+    get:
+      tags: [Payments & Invoices]
+      summary: Payment detail
+      security: [{ bearerAuth: [] }]
+      parameters: [ { in: path, name: paymentId, required: true, schema: { type: string, format: uuid } } ]
+      responses: { "200": { $ref: "#/components/responses/Payment" } }
+
+  /payments/one-off/checkout:
+    post:
+      tags: [Payments & Invoices]
+      summary: Checkout for one-off (overage)
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/OneOffCheckout" }
+      responses: { "200": { $ref: "#/components/responses/StripeCheckout" } }
+
+  /invoices:
+    get:
+      tags: [Payments & Invoices]
+      summary: List my invoices
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/ListInvoices" } }
+
+  /invoices/{invoiceId}:
+    get:
+      tags: [Payments & Invoices]
+      summary: Invoice detail
+      security: [{ bearerAuth: [] }]
+      parameters: [ { in: path, name: invoiceId, required: true, schema: { type: string, format: uuid } } ]
+      responses: { "200": { $ref: "#/components/responses/Invoice" } }
+
+  /sessions/start:
+    post:
+      tags: [Sessions]
+      summary: Start session (chat or video)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          schema:
+            type: string
+      requestBody: { $ref: "#/components/requestBodies/StartSession" }
+      responses: { "200": { $ref: "#/components/responses/SessionStart" } }
+
+  /sessions/end:
+    post:
+      tags: [Sessions]
+      summary: End session and commit entitlement
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          schema:
+            type: string
+      requestBody: { $ref: "#/components/requestBodies/EndSession" }
+      responses: { "200": { $ref: "#/components/responses/Session" } }
+
+  /sessions:
+    get:
+      tags: [Sessions]
+      summary: List my sessions (user or vet)
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/ListSessions" } }
+
+  /sessions/{sessionId}:
+    get:
+      tags: [Sessions]
+      summary: Get session detail
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/sessionId" } ]
+      responses: { "200": { $ref: "#/components/responses/Session" } }
+    patch:
+      tags: [Sessions]
+      summary: Update status (no_show, etc.)
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/sessionId" } ]
+      requestBody: { $ref: "#/components/requestBodies/SessionPatch" }
+      responses: { "200": { $ref: "#/components/responses/Session" } }
+
+  /sessions/{sessionId}/messages:
+    get:
+      tags: [Messages]
+      summary: List messages in a session
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/sessionId" }, { $ref: "#/components/parameters/pagingLimit" }, { $ref: "#/components/parameters/pagingCursor" } ]
+      responses: { "200": { $ref: "#/components/responses/ListMessages" } }
+    post:
+      tags: [Messages]
+      summary: Append message
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/sessionId" } ]
+      requestBody: { $ref: "#/components/requestBodies/MessageCreate" }
+      responses: { "201": { $ref: "#/components/responses/Message" } }
+
+  /sessions/{sessionId}/transcript:
+    get:
+      tags: [Messages]
+      summary: Export transcript
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/sessionId" } ]
+      responses: { "200": { $ref: "#/components/responses/Transcript" } }
+
+  /video/rooms:
+    post:
+      tags: [Video]
+      summary: Create room + grant token (internal)
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/VideoRoomCreate" }
+      responses: { "200": { $ref: "#/components/responses/VideoRoom" } }
+
+  /video/rooms/{roomId}/end:
+    post:
+      tags: [Video]
+      summary: End/lock a room
+      security: [{ bearerAuth: [] }]
+      parameters: [ { in: path, name: roomId, required: true, schema: { type: string } } ]
+      responses: { "200": { $ref: "#/components/responses/Ok" } }
+
+  /sessions/{sessionId}/notes:
+    get:
+      tags: [Notes & Care Plans]
+      summary: Get vet notes for a session
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/sessionId" } ]
+      responses: { "200": { $ref: "#/components/responses/Notes" } }
+    post:
+      tags: [Notes & Care Plans]
+      summary: Upsert vet notes (SOAP/summary)
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/sessionId" } ]
+      requestBody: { $ref: "#/components/requestBodies/NotesUpsert" }
+      responses: { "200": { $ref: "#/components/responses/Notes" } }
+
+  /pets/{petId}/care-plans:
+    get:
+      tags: [Notes & Care Plans]
+      summary: List care plans
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/petId" } ]
+      responses: { "200": { $ref: "#/components/responses/ListCarePlans" } }
+    post:
+      tags: [Notes & Care Plans]
+      summary: Create care plan
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/petId" } ]
+      requestBody: { $ref: "#/components/requestBodies/CarePlanCreate" }
+      responses: { "201": { $ref: "#/components/responses/CarePlan" } }
+
+  /care-plans/{planId}/items:
+    get:
+      tags: [Notes & Care Plans]
+      summary: List care plan items
+      security: [{ bearerAuth: [] }]
+      parameters: [ { in: path, name: planId, required: true, schema: { type: string, format: uuid } } ]
+      responses: { "200": { $ref: "#/components/responses/ListCarePlanItems" } }
+    post:
+      tags: [Notes & Care Plans]
+      summary: Add care plan item
+      security: [{ bearerAuth: [] }]
+      parameters: [ { in: path, name: planId, required: true, schema: { type: string, format: uuid } } ]
+      requestBody: { $ref: "#/components/requestBodies/CarePlanItemCreate" }
+      responses: { "201": { $ref: "#/components/responses/CarePlanItem" } }
+
+  /care-plans/items/{itemId}:
+    patch:
+      tags: [Notes & Care Plans]
+      summary: Update/fulfill care plan item
+      security: [{ bearerAuth: [] }]
+      parameters: [ { in: path, name: itemId, required: true, schema: { type: string, format: uuid } } ]
+      requestBody: { $ref: "#/components/requestBodies/CarePlanItemPatch" }
+      responses: { "200": { $ref: "#/components/responses/CarePlanItem" } }
+
+  /pets/{petId}/image-cases:
+    get:
+      tags: [Image Cases]
+      summary: List image cases (Phase 2)
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/petId" } ]
+      responses: { "200": { $ref: "#/components/responses/ListImageCases" } }
+    post:
+      tags: [Image Cases]
+      summary: Create image case
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/petId" } ]
+      requestBody: { $ref: "#/components/requestBodies/ImageCaseCreate" }
+      responses: { "201": { $ref: "#/components/responses/ImageCase" } }
+
+  /image-cases/{id}:
+    get:
+      tags: [Image Cases]
+      summary: Get image case detail
+      security: [{ bearerAuth: [] }]
+      parameters: [ { in: path, name: id, required: true, schema: { type: string, format: uuid } } ]
+      responses: { "200": { $ref: "#/components/responses/ImageCase" } }
+
+  /appointments:
+    get:
+      tags: [Appointments]
+      summary: List my appointments (user or vet)
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/ListAppointments" } }
+    post:
+      tags: [Appointments]
+      summary: Book an appointment
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/AppointmentCreate" }
+      responses: { "201": { $ref: "#/components/responses/Appointment" } }
+
+  /appointments/{id}:
+    patch:
+      tags: [Appointments]
+      summary: Update appointment status
+      security: [{ bearerAuth: [] }]
+      parameters: [ { in: path, name: id, required: true, schema: { type: string, format: uuid } } ]
+      requestBody: { $ref: "#/components/requestBodies/AppointmentPatch" }
+      responses: { "200": { $ref: "#/components/responses/Appointment" } }
+
+  /vets/{vetId}/availability/slots:
+    get:
+      tags: [Appointments]
+      summary: Generated slots (template + overrides)
+      parameters:
+        - { $ref: "#/components/parameters/vetId" }
+        - in: query
+          name: from
+          required: true
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: to
+          required: true
+          schema:
+            type: string
+            format: date-time
+      responses: { "200": { $ref: "#/components/responses/ListSlots" } }
+
+  /kb:
+    get:
+      tags: [Knowledge Base & Search]
+      summary: Browse KB
+      parameters:
+        - in: query
+          name: species
+          schema:
+            type: string
+        - in: query
+          name: tags
+          schema:
+            type: string
+      responses: { "200": { $ref: "#/components/responses/ListKB" } }
+    post:
+      tags: [Knowledge Base & Search]
+      summary: Create/update KB item
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/KBUpsert" }
+      responses: { "201": { $ref: "#/components/responses/KBItem" } }
+
+  /kb/{id}:
+    get:
+      tags: [Knowledge Base & Search]
+      summary: Get KB item
+      parameters: [ { in: path, name: id, required: true, schema: { type: string, format: uuid } } ]
+      responses: { "200": { $ref: "#/components/responses/KBItem" } }
+
+  /vector/search:
+    post:
+      tags: [Knowledge Base & Search]
+      summary: Vector-only nearest-neighbors search (no keywords)
+      description: >
+        Pure ANN using pgvector (cosine). Optional `filter_ids` to restrict index;
+        otherwise full-table scan on the chosen collection’s IVFFLAT index.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [target, query_embedding, topK]
+              properties:
+                target:
+                  type: string
+                  enum: [kb, messages, notes, products, services, pets, vets]
+                query_embedding:
+                  type: array
+                  items: { type: number }
+                  minItems: 32
+                  description: Embedding floats (e.g., 1536-dim)
+                topK: { type: integer, default: 8, maximum: 50 }
+                filter_ids:
+                  type: array
+                  items: { type: string, format: uuid }
+                  description: Optional whitelist of ids to limit search space
+      responses:
+        "200":
+          description: Nearest neighbors
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string, format: uuid }
+                        score: { type: number, description: Cosine similarity }
+                        snippet: { type: string }
+                        metadata: { type: object, additionalProperties: true }
+
+  /vector/upsert:
+    post:
+      tags: [Knowledge Base & Search]
+      summary: Upsert vector entries (manage embeddings explicitly)
+      description: >
+        Provide your own embeddings. Server persists payload + embedding and updates IVFFLAT.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [target, items]
+              properties:
+                target: { type: string, enum: [kb, messages, notes, products, services, pets, vets] }
+                items:
+                  type: array
+                  items:
+                    type: object
+                    required: [id, embedding]
+                    properties:
+                      id: { type: string, format: uuid }
+                      embedding:
+                        type: array
+                        items: { type: number }
+                        minItems: 32
+                      payload:
+                        type: object
+                        additionalProperties: true
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+
+  /sessions/{sessionId}/ratings:
+    post:
+      tags: [Ratings]
+      summary: Rate a session
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/sessionId" } ]
+      requestBody: { $ref: "#/components/requestBodies/RatingCreate" }
+      responses: { "201": { $ref: "#/components/responses/Rating" } }
+
+  /vets/{vetId}/ratings:
+    get:
+      tags: [Ratings]
+      summary: Public aggregate ratings
+      parameters: [ { $ref: "#/components/parameters/vetId" } ]
+      responses: { "200": { $ref: "#/components/responses/ListRatings" } }
+
+  /notifications/test:
+    post:
+      tags: [Notifications]
+      summary: Send test notification
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/NotifyTest" }
+      responses: { "200": { $ref: "#/components/responses/Ok" } }
+
+  /files/signed-url:
+    post:
+      tags: [Files]
+      summary: Generic signed upload URL
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/SignedUrl" }
+      responses: { "200": { $ref: "#/components/responses/SignedUrl" } }
+
+  /files/download-url:
+    get:
+      tags: [Files]
+      summary: Signed download URL
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: path
+          required: true
+          schema:
+            type: string
+      responses: { "200": { $ref: "#/components/responses/SignedUrl" } }
+
+  /admin/users:
+    get:
+      tags: [Admin]
+      summary: Search users
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/ListUsers" } }
+
+  /admin/users/{userId}:
+    get:
+      tags: [Admin]
+      summary: Get user detail
+      security: [{ bearerAuth: [] }]
+      parameters: [ { in: path, name: userId, required: true, schema: { type: string, format: uuid } } ]
+      responses: { "200": { $ref: "#/components/responses/User" } }
+
+  /admin/subscriptions:
+    get:
+      tags: [Admin]
+      summary: List subscriptions
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/ListSubscriptions" } }
+
+  /admin/credits/grant:
+    post:
+      tags: [Admin]
+      summary: Grant comp credits/entitlements
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/GrantCredits" }
+      responses: { "200": { $ref: "#/components/responses/Ok" } }
+
+  /admin/refunds:
+    post:
+      tags: [Admin]
+      summary: Create Stripe refund
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/Refund" }
+      responses: { "200": { $ref: "#/components/responses/Payment" } }
+
+  /admin/vets/{vetId}/approve:
+    post:
+      tags: [Admin]
+      summary: Approve vet
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/vetId" } ]
+      responses: { "200": { $ref: "#/components/responses/Vet" } }
+
+  /admin/plans:
+    post:
+      tags: [Admin]
+      summary: Create/Update plan
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/PlanUpsert" }
+      responses: { "200": { $ref: "#/components/responses/Plan" } }
+
+  /admin/coupons:
+    post:
+      tags: [Admin]
+      summary: Create coupon (optional)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { code: { type: string }, percent_off: { type: number } }, required: [code] }
+      responses: { "201": { $ref: "#/components/responses/Ok" } }
+
+  /admin/analytics/usage:
+    get:
+      tags: [Admin]
+      summary: Usage analytics
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/Ok" } }
+
+  /webhooks/stripe:
+    post:
+      tags: [Webhooks]
+      summary: Stripe webhook (raw, signed)
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, description: Raw Stripe event }
+      responses: { "200": { $ref: "#/components/responses/Ok" } }
+
+  /internal/stripe/ingest:
+    post:
+      tags: [Webhooks]
+      summary: Normalize Stripe event into DB (internal)
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/StripeIngest" }
+      responses: { "200": { $ref: "#/components/responses/Ok" } }
+
+  /internal/embeddings/backfill:
+    post:
+      tags: [AI (internal)]
+      summary: Backfill embeddings per table
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { table: { type: string }, limit: { type: integer } }, required: [table] }
+      responses: { "202": { $ref: "#/components/responses/Ok" } }
+
+  /internal/summaries/generate:
+    post:
+      tags: [AI (internal)]
+      summary: Generate consultation summaries or care plan drafts
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { sessionId: { type: string, format: uuid }, type: { type: string, enum: [notes, care_plan] } }, required: [sessionId, type] }
+      responses: { "202": { $ref: "#/components/responses/Ok" } }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    petId: { in: path, name: petId, required: true, schema: { type: string, format: uuid } }
+    vetId: { in: path, name: vetId, required: true, schema: { type: string, format: uuid } }
+    sessionId: { in: path, name: sessionId, required: true, schema: { type: string, format: uuid } }
+    pagingLimit: { in: query, name: limit, schema: { type: integer, default: 20, maximum: 100 } }
+    pagingCursor: { in: query, name: cursor, schema: { type: string } }
+
+  requestBodies:
+    MePatch:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              full_name: { type: string }
+              phone: { type: string }
+              language: { type: string, enum: [es, en] }
+              timezone: { type: string }
+    BillingProfile:
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/BillingProfile"
+    PetUpsert:
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/PetInput"
+    SignedUrl:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              path: { type: string }
+              contentType: { type: string }
+            required: [path, contentType]
+    VetUpsert:
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/VetInput" }
+    VetAvailability:
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/VetAvailability" }
+    VetOverride:
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/VetOverride" }
+    Checkout:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              plan_code: { type: string }
+              seats: { type: integer, description: "pets/patients seats" }
+              success_url: { type: string, format: uri }
+              cancel_url: { type: string, format: uri }
+            required: [plan_code, success_url, cancel_url]
+    ChangePlan:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              plan_code: { type: string }
+              seats: { type: integer }
+            required: [plan_code]
+    EntitlementReserve:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              type: { type: string, enum: [chat, video] }
+              sessionId: { type: string, format: uuid }
+            required: [type]
+    EntitlementCommit:
+      content:
+        application/json:
+          schema: { type: object, properties: { consumptionId: { type: string, format: uuid } }, required: [consumptionId] }
+    EntitlementRelease:
+      content:
+        application/json:
+          schema: { type: object, properties: { consumptionId: { type: string, format: uuid } }, required: [consumptionId] }
+    OneOffCheckout:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              reason: { type: string }
+              amount_cents: { type: integer }
+              success_url: { type: string, format: uri }
+              cancel_url: { type: string, format: uri }
+            required: [amount_cents, success_url, cancel_url]
+    StartSession:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              mode: { type: string, enum: [chat, video] }
+              pet_id: { type: string, format: uuid }
+              text: { type: string }
+            required: [mode, pet_id]
+    EndSession:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              sessionId: { type: string, format: uuid }
+            required: [sessionId]
+    SessionPatch:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status: { type: string, enum: [scheduled, active, completed, no_show, canceled] }
+    MessageCreate:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              role: { type: string, enum: [user, vet, ai] }
+              content: { type: string }
+            required: [role, content]
+    VideoRoomCreate:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              sessionId: { type: string, format: uuid }
+            required: [sessionId]
+    NotesUpsert:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              summary_text: { type: string }
+              plan_summary: { type: string }
+    CarePlanCreate:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              created_by_ai: { type: boolean, default: true }
+              short_term: { type: string }
+              mid_term: { type: string }
+              long_term: { type: string }
+    CarePlanItemCreate:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              type: { type: string, enum: [consult, vaccine, product] }
+              description: { type: string }
+              price_cents: { type: integer }
+            required: [type, description]
+    CarePlanItemPatch:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              fulfilled: { type: boolean }
+              description: { type: string }
+              price_cents: { type: integer }
+    ImageCaseCreate:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              image_url: { type: string, format: uri }
+              labels: { type: array, items: { type: string } }
+              findings: { type: string }
+              diagnosis_label: { type: string }
+            required: [image_url]
+    AppointmentCreate:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              vet_id: { type: string, format: uuid }
+              pet_id: { type: string, format: uuid }
+              starts_at: { type: string, format: date-time }
+            required: [vet_id, pet_id, starts_at]
+    AppointmentPatch:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status: { type: string, enum: [scheduled, active, completed, no_show, canceled] }
+    KBUpsert:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              title: { type: string }
+              body: { type: string }
+              species: { type: array, items: { type: string } }
+              tags: { type: array, items: { type: string } }
+            required: [title, body]
+    RatingCreate:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              score: { type: integer, minimum: 1, maximum: 5 }
+              comment: { type: string }
+            required: [score]
+    NotifyTest:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              channel: { type: string, enum: [email, sms, whatsapp] }
+              to: { type: string }
+              message: { type: string }
+            required: [channel, to, message]
+    StripeIngest:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              type: { type: string }
+              data: { type: object }
+
+    PlanUpsert:
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/PlanInput" }
+    GrantCredits:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              user_id: { type: string, format: uuid }
+              credits: { type: integer, minimum: 1 }
+              type: { type: string, enum: [chat, video] }
+              note: { type: string }
+            required: [user_id, credits]
+    Refund:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              payment_id: { type: string, format: uuid }
+              reason: { type: string }
+              amount_cents: { type: integer }
+            required: [payment_id]
+
+  responses:
+    Ok:
+      description: OK
+      content: { application/json: { schema: { type: object, properties: { ok: { type: boolean, default: true } } } } }
+    List:
+      description: List response
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { type: object } }, nextCursor: { type: string, nullable: true } } } } }
+    Me:
+      description: Current user snapshot
+      content: { application/json: { schema: { $ref: "#/components/schemas/Me" } } }
+    BillingProfile:
+      description: Billing profile
+      content: { application/json: { schema: { $ref: "#/components/schemas/BillingProfile" } } }
+    StripeSetup:
+      description: Stripe SetupIntent (client_secret)
+      content: { application/json: { schema: { type: object, properties: { client_secret: { type: string } } } } }
+    ListPets:
+      description: Pets
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Pet" } } } } } }
+    Pet:
+      description: Pet
+      content: { application/json: { schema: { $ref: "#/components/schemas/Pet" } } }
+    ListVets:
+      description: Vets
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Vet" } } } } } }
+    Vet:
+      description: Vet
+      content: { application/json: { schema: { $ref: "#/components/schemas/Vet" } } }
+    ListCenters:
+      description: Centers
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Center" } } } } } }
+    ListPlans:
+      description: Plans
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Plan" } } } } } }
+    Plan:
+      description: Plan
+      content: { application/json: { schema: { $ref: "#/components/schemas/Plan" } } }
+    ListSubscriptions:
+      description: Subscriptions
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Subscription" } } } } } }
+    Subscription:
+      description: Subscription
+      content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } }
+    Usage:
+      description: Usage snapshot
+      content: { application/json: { schema: { $ref: "#/components/schemas/Usage" } } }
+    StripeCheckout:
+      description: Stripe Checkout URL
+      content: { application/json: { schema: { type: object, properties: { url: { type: string, format: uri } } } } }
+    StripePortal:
+      description: Stripe Billing Portal URL
+      content: { application/json: { schema: { type: object, properties: { url: { type: string, format: uri } } } } }
+    ListPayments:
+      description: Payments
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Payment" } } } } } }
+    Payment:
+      description: Payment
+      content: { application/json: { schema: { $ref: "#/components/schemas/Payment" } } }
+    ListInvoices:
+      description: Invoices
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Invoice" } } } } } }
+    Invoice:
+      description: Invoice
+      content: { application/json: { schema: { $ref: "#/components/schemas/Invoice" } } }
+    SessionStart:
+      description: Session started
+      content: { application/json: { schema: { $ref: "#/components/schemas/SessionStart" } } }
+    Session:
+      description: Session
+      content: { application/json: { schema: { $ref: "#/components/schemas/Session" } } }
+    ListSessions:
+      description: Sessions
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Session" } } } } } }
+    VetAvailability:
+      description: Vet availability template and overrides
+      content: { application/json: { schema: { $ref: "#/components/schemas/VetAvailability" } } }
+    VetOverride:
+      description: Vet availability override
+      content: { application/json: { schema: { $ref: "#/components/schemas/VetOverride" } } }
+    EntitlementReserve:
+      description: Reservation created
+      content: { application/json: { schema: { type: object, additionalProperties: true } } }
+    ListMessages:
+      description: Messages
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Message" } } } } } }
+    Message:
+      description: Message
+      content: { application/json: { schema: { $ref: "#/components/schemas/Message" } } }
+    Transcript:
+      description: Transcript
+      content: { application/json: { schema: { type: object, properties: { text: { type: string } } } } }
+    VideoRoom:
+      description: LiveKit room + token
+      content: { application/json: { schema: { type: object, properties: { roomId: { type: string }, token: { type: string } } } } }
+    Notes:
+      description: Vet notes
+      content: { application/json: { schema: { $ref: "#/components/schemas/Notes" } } }
+    ListCarePlans:
+      description: Care plans
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/CarePlan" } } } } } }
+    CarePlan:
+      description: Care plan
+      content: { application/json: { schema: { $ref: "#/components/schemas/CarePlan" } } }
+    ListCarePlanItems:
+      description: Care plan items
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/CarePlanItem" } } } } } }
+    CarePlanItem:
+      description: Care plan item
+      content: { application/json: { schema: { $ref: "#/components/schemas/CarePlanItem" } } }
+    ListImageCases:
+      description: Image cases
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/ImageCase" } } } } } }
+    ImageCase:
+      description: Image case
+      content: { application/json: { schema: { $ref: "#/components/schemas/ImageCase" } } }
+    ListAppointments:
+      description: Appointments
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Appointment" } } } } } }
+    Appointment:
+      description: Appointment
+      content: { application/json: { schema: { $ref: "#/components/schemas/Appointment" } } }
+    ListSlots:
+      description: Time slots
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Slot" } } } } } }
+    ListKB:
+      description: KB items
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/KBItem" } } } } } }
+    KBItem:
+      description: KB item
+      content: { application/json: { schema: { $ref: "#/components/schemas/KBItem" } } }
+    
+    Rating:
+      description: Rating
+      content: { application/json: { schema: { $ref: "#/components/schemas/Rating" } } }
+    ListRatings:
+      description: Ratings
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Rating" } } } } } }
+    SignedUrl:
+      description: Signed URL response
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              url: { type: string, format: uri }
+              method: { type: string }
+              headers: { type: object, additionalProperties: true }
+    ListUsers:
+      description: Users
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/User" } } } } } }
+    User:
+      description: User
+      content: { application/json: { schema: { $ref: "#/components/schemas/User" } } }
+
+  schemas:
+    Me:
+      type: object
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        billing_profile: { $ref: "#/components/schemas/BillingProfile" }
+        active_subscription: { $ref: "#/components/schemas/Subscription" }
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        full_name: { type: string }
+        phone: { type: string }
+        role: { type: string, enum: [user, vet, admin] }
+    BillingProfile:
+      type: object
+      properties:
+        stripe_customer_id: { type: string }
+        default_payment_method: { type: string }
+        billing_address: { type: object, additionalProperties: true }
+        tax_id: { type: string }
+        preferred_language: { type: string, enum: [es, en] }
+        timezone: { type: string }
+    PetInput:
+      type: object
+      properties:
+        name: { type: string }
+        species: { type: string }
+        breed: { type: string }
+        birthdate: { type: string, format: date }
+        sex: { type: string }
+        weight_kg: { type: number }
+        medical_notes: { type: string }
+      required: [name, species]
+    Pet:
+      allOf:
+        - $ref: "#/components/schemas/PetInput"
+        - type: object
+          properties: { id: { type: string, format: uuid }, user_id: { type: string, format: uuid } }
+    VetInput:
+      type: object
+      properties:
+        license_number: { type: string }
+        country: { type: string }
+        bio: { type: string }
+        years_experience: { type: integer }
+        specialties: { type: array, items: { type: string, format: uuid } }
+        languages: { type: array, items: { type: string } }
+    Vet:
+      allOf:
+        - $ref: "#/components/schemas/VetInput"
+        - type: object
+          properties:
+            id: { type: string, format: uuid }
+            is_approved: { type: boolean }
+    Center:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        address: { type: string }
+        phone: { type: string }
+        website: { type: string, format: uri }
+        is_partner: { type: boolean }
+    PlanInput:
+      type: object
+      properties:
+        code: { type: string }
+        name: { type: string }
+        description: { type: string }
+        price_cents: { type: integer }
+        currency: { type: string, default: MXN }
+        billing_period: { type: string, enum: [month, year] }
+        included_chats: { type: integer }
+        included_videos: { type: integer, description: "COUNT of video sessions per period" }
+        pets_included_default: { type: integer }
+        tax_rate: { type: number }
+        is_active: { type: boolean }
+    Plan:
+      allOf:
+        - $ref: "#/components/schemas/PlanInput"
+        - type: object
+          properties: { id: { type: string, format: uuid } }
+    Subscription:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        plan: { $ref: "#/components/schemas/Plan" }
+        status: { type: string, enum: [trialing, active, past_due, canceled, expired] }
+        current_period_start: { type: string, format: date-time }
+        current_period_end: { type: string, format: date-time }
+        cancel_at_period_end: { type: boolean }
+        pets_included: { type: integer, nullable: true }
+    Usage:
+      type: object
+      properties:
+        included_chats: { type: integer }
+        consumed_chats: { type: integer }
+        included_videos: { type: integer }
+        consumed_videos: { type: integer }
+        period_start: { type: string, format: date-time }
+        period_end: { type: string, format: date-time }
+    Payment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        amount_cents: { type: integer }
+        currency: { type: string }
+        status: { type: string }
+    Invoice:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        amount_cents: { type: integer }
+        currency: { type: string }
+        status: { type: string }
+        issued_at: { type: string, format: date-time }
+    SessionStart:
+      type: object
+      properties:
+        session: { $ref: "#/components/schemas/Session" }
+        video: { type: object, nullable: true, properties: { roomId: { type: string }, token: { type: string } } }
+    Session:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        mode: { type: string, enum: [chat, video] }
+        user_id: { type: string, format: uuid }
+        vet_id: { type: string, format: uuid, nullable: true }
+        pet_id: { type: string, format: uuid }
+        status: { type: string }
+        started_at: { type: string, format: date-time, nullable: true }
+        ended_at: { type: string, format: date-time, nullable: true }
+    Message:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid }
+        sender_id: { type: string, format: uuid }
+        role: { type: string, enum: [user, vet, ai] }
+        content: { type: string }
+        created_at: { type: string, format: date-time }
+    Notes:
+      type: object
+      properties:
+        session_id: { type: string, format: uuid }
+        vet_id: { type: string, format: uuid }
+        summary_text: { type: string }
+        plan_summary: { type: string }
+    CarePlan:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        pet_id: { type: string, format: uuid }
+        created_by_ai: { type: boolean }
+        short_term: { type: string }
+        mid_term: { type: string }
+        long_term: { type: string }
+    CarePlanItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        care_plan_id: { type: string, format: uuid }
+        type: { type: string, enum: [consult, vaccine, product] }
+        description: { type: string }
+        price_cents: { type: integer }
+        fulfilled: { type: boolean }
+    ImageCase:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        pet_id: { type: string, format: uuid }
+        image_url: { type: string, format: uri }
+        labels: { type: array, items: { type: string } }
+        findings: { type: string }
+        diagnosis_label: { type: string }
+    Appointment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid, nullable: true }
+        vet_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time, nullable: true }
+        status: { type: string }
+    Slot:
+      type: object
+      properties:
+        start: { type: string, format: date-time }
+        end: { type: string, format: date-time }
+        available: { type: boolean }
+    KBItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        body: { type: string }
+        species: { type: array, items: { type: string } }
+        tags: { type: array, items: { type: string } }
+    Rating:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid }
+        vet_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        score: { type: integer, minimum: 1, maximum: 5 }
+        comment: { type: string }
+    VetAvailability:
+      type: object
+      properties:
+        template:
+          type: array
+          items:
+            type: object
+            properties:
+              weekday: { type: integer, minimum: 0, maximum: 6 }
+              start_time: { type: string, pattern: "^\\d{2}:\\d{2}$" }
+              end_time: { type: string, pattern: "^\\d{2}:\\d{2}$" }
+        overrides:
+          type: array
+          items: { $ref: "#/components/schemas/VetOverride" }
+    VetOverride:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        date: { type: string, format: date }
+        start: { type: string, format: date-time }
+        end: { type: string, format: date-time }
+        closed: { type: boolean }
+
+  examples: {}

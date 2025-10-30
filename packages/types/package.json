@@ -1,0 +1,8 @@
+{
+	"name": "@cav/types",
+	"version": "0.1.0",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"scripts": { "build": "tsc", "typecheck": "tsc --noEmit" },
+	"devDependencies": { "typescript": "^5.6.3" }
+}

@@ -1,0 +1,222 @@
+here you have my API / Service Diagram & Flows, based on this and the tests you just ran, are we going in the correct direction or are we missing something?
+
+Call-a-Vet — API / Service Diagram & Flows (Latest)
+1) Architecture (high-level)
+flowchart LR
+  subgraph Clients
+    W[Web App (blended: marketing + user)]
+    A[Admin Dashboard]
+  end
+
+  subgraph Gateway[Gateway API (NestJS)]
+    AUTH[Auth/JWT verify (Supabase)]
+    ENT[Subscriptions & Entitlements\n(plans, usage, reserve/commit)]
+    ORCH[Session Orchestrator\n(create chat/video, finalize usage)]
+    SEARCH[Hybrid Search\n(tsvector + pgvector)]
+    PAY[Payments/Billing Facade\n(Stripe)]
+    NOTIF[Notifications facade\n(email/SMS/WhatsApp)]
+  end
+
+  subgraph Realtime
+    CHAT[Chat Service (WS)]
+    LVK[Video Service (LiveKit-hosted)]
+  end
+
+  subgraph AI[AI Orchestrator / Workers]
+    EMB[Embeddings Backfill\n(messages, notes, KB, pets, vets...)]
+    SUMM[Summaries, care plans]
+  end
+
+  subgraph DataPlane[Data Plane]
+    PG[(Supabase Postgres\n+ pgvector + RLS)]
+    STO[(Supabase Storage\ncases, attachments)]
+    Q[Task Queue (async)]
+    WH[Webhooks Ingest (Express)]
+  end
+
+  Clients -->|Supabase Auth (client)| W
+  Clients --> A
+
+  W -->|HTTPS REST/gRPC| Gateway
+  A -->|HTTPS| Gateway
+
+  Gateway --> AUTH
+  Gateway <--> ENT
+  Gateway --> ORCH
+  Gateway --> SEARCH
+  Gateway <--> PAY
+  Gateway --> NOTIF
+
+  ORCH <--> CHAT
+  ORCH <--> LVK
+
+  Gateway <--> PG
+  Gateway --> STO
+
+  WH -->|Stripe events| Gateway
+  PAY -->|Checkout links| W
+
+  AI -->|read/write| PG
+  AI --> Q
+
+  CHAT -->|message store (opt)| PG
+  LVK -->|room meta/usage| PG
+
+
+Notes
+
+Web App is blended: “/” is acquisition + immediate Start Consult; “/app/*” is the authenticated experience.
+
+Admin is separate (Next.js) for ops: vet onboarding, refunds/credits, pricing controls, payouts.
+
+Stripe Webhooks are isolated (Express) and push normalized events to Gateway.
+
+Supabase provides Auth, Postgres (with RLS), and Storage; hybrid search via tsvector + pgvector.
+
+Chat (WS) and Video (LiveKit) are services the Gateway orchestrates (entitlement check, open/close, finalize usage).
+
+AI Workers backfill embeddings and write summaries/care plans via async jobs.
+
+2) Key Runtime Flows (sequence)
+2.1 Signup / Auth
+sequenceDiagram
+  participant U as User (Web)
+  participant SB as Supabase Auth
+  participant GW as Gateway API
+  participant DB as Postgres (RLS)
+  U->>SB: Sign up / Sign in (email/OAuth)
+  SB-->>U: JWT (sb-access-token)
+  U->>GW: Authenticated request with JWT
+  GW->>DB: Verify via auth.uid() under RLS
+  DB-->>GW: Authorized rows (RLS enforced)
+  GW-->>U: 200 + user profile/subscription snapshot
+
+2.2 Checkout / Membership
+sequenceDiagram
+  participant U as User (Web)
+  participant GW as Gateway API
+  participant ST as Stripe
+  participant WH as Webhooks Ingest
+  participant DB as Postgres
+
+  U->>GW: POST /subscriptions/checkout (plan_code)
+  GW->>ST: Create Checkout Session
+  ST-->>U: Redirect to hosted checkout
+
+  ST-->>WH: webhook: invoice.paid / checkout.session.completed
+  WH->>GW: normalized event (customer, sub, status, period)
+  GW->>DB: UPSERT user_subscriptions, open subscription_usage period
+  GW-->>U: (optional) Notif/email; Web pulls status on reload
+
+2.3 Start Session (Chat or Video)
+sequenceDiagram
+  participant U as User (Web)
+  participant GW as Gateway
+  participant DB as Postgres (RLS)
+  participant ENT as Entitlements (DB funcs)
+  participant CHAT as Chat WS
+  participant LVK as LiveKit
+
+  U->>GW: POST /sessions/start {mode, pet_id, text}
+  GW->>DB: SELECT active subscription (RLS)
+  GW->>DB: fn_reserve_chat() or fn_reserve_video()  (atomic)
+  alt mode == "chat"
+    GW->>CHAT: create room/token
+    CHAT-->>GW: room info
+  else mode == "video"
+    GW->>LVK: create room/token
+    LVK-->>GW: room info
+  end
+  GW->>DB: INSERT chat_sessions (status=active)
+  GW-->>U: 200 {sessionId, room/token}
+
+2.4 End Session & Finalize Usage
+sequenceDiagram
+  participant U as User
+  participant GW as Gateway
+  participant DB as Postgres
+  participant ENT as Entitlements
+
+  U->>GW: POST /sessions/end {sessionId}
+  GW->>DB: UPDATE chat_sessions (ended_at, status)
+  GW->>DB: fn_commit_consumption(consumption_id)  # finalize count
+  GW-->>U: 200 {rating_url}
+
+2.5 Overage (no entitlement left)
+sequenceDiagram
+  participant U as User
+  participant GW as Gateway
+  participant ST as Stripe
+  participant WH as Webhooks
+  participant DB as Postgres
+
+  U->>GW: /sessions/start (no units left)
+  GW->>ST: Create PaymentIntent/Checkout for one-off
+  ST-->>U: Pay flow
+  ST-->>WH: payment_intent.succeeded
+  WH->>GW: normalized payment event
+  GW->>DB: INSERT payments; allow session; reserve unit ad-hoc
+  GW-->>U: proceed to room
+
+2.6 Cancellation at Period End
+sequenceDiagram
+  participant U as User
+  participant GW as Gateway
+  participant ST as Stripe
+  participant DB as Postgres
+
+  U->>GW: POST /subscriptions/cancel
+  GW->>ST: Update sub: cancel_at_period_end=true
+  GW->>DB: SET cancel_at_period_end=true
+  Note over U,GW: Access remains until current_period_end
+
+2.7 Embeddings Backfill (AI Worker)
+sequenceDiagram
+  participant WRK as AI Worker
+  participant DB as Postgres
+  loop every 5 min
+    WRK->>DB: SELECT rows WHERE embedding IS NULL LIMIT 100
+    WRK->>WRK: get embeddings (1536-dim)
+    WRK->>DB: UPDATE ... SET embedding=$vec
+  end
+  WRK->>DB: ANALYZE after batches
+
+2.8 Hybrid Search (KB / Notes / Messages)
+sequenceDiagram
+  participant U as User/Vet/Admin
+  participant GW as Gateway
+  participant DB as Postgres
+
+  U->>GW: GET /search?q="colico caballo"
+  GW->>DB: Lexical (tsvector ES/EN)
+  GW->>DB: Semantic (embedding <=> query_vec)
+  GW->>GW: Score fusion, rank, paginate
+  GW-->>U: Results (ids, snippets, score)
+
+3) Data Plane & Security (recap)
+
+Supabase Postgres: RLS enabled on all user data tables; JWT mapped via auth.uid().
+
+Hybrid search: es_en_tsv() for bilingual tsvector + pgvector (1536) with IVFFLAT (lists=100), tuned later.
+
+Storage: buckets cases, attachments with signed URLs from Gateway.
+
+Stripe Webhooks: isolated service → normalized payload → Gateway updates user_subscriptions, subscription_usage, payments, invoices.
+
+Entitlements: DB functions fn_current_usage, fn_reserve_chat, fn_reserve_video, fn_commit_consumption, fn_release_consumption are the single source of truth.
+
+4) Endpoints (representative)
+
+POST /subscriptions/checkout → Stripe Checkout session (plan)
+
+POST /subscriptions/cancel → cancel at period end
+
+GET /subscriptions/usage → current period snapshot (included/consumed/overage)
+
+POST /sessions/start → entitlement reserve + room token (chat/video)
+
+POST /sessions/end → finalize consumption
+
+GET /search → hybrid KB/notes/messages search
+
+GET /centers/near → nearby partner/clinics (lexical + geo filters)
