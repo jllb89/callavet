@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { Pool } from 'pg';
+import dns from 'node:dns';
 import fs from 'node:fs';
 import { RequestContext } from '../auth/request-context.service';
 
@@ -24,10 +25,15 @@ export class DbService {
           ssl = { rejectUnauthorized: true };
         }
       }
+      // Force IPv4 to avoid ENETUNREACH when IPv6 routes are unavailable in some hosts
+      const lookup: any = (hostname: string, options: any, callback: any) => {
+        return dns.lookup(hostname, { family: 4, all: false }, callback);
+      };
       this.pool = new Pool({
         connectionString: url,
         ssl,
-      });
+        lookup,
+      } as any);
     }
   }
   get isStub(){ return !this.pool; }
