@@ -1,7 +1,7 @@
 services:
   - type: web
     name: cav-gateway-staging
-    env: docker
+    runtime: docker
     plan: starter
     branch: main
     autoDeploy: true
@@ -21,7 +21,7 @@ services:
 
   - type: web
     name: cav-webhooks-staging
-    env: docker
+    runtime: docker
     plan: starter
     branch: main
     autoDeploy: true
@@ -38,7 +38,7 @@ services:
 
   - type: web
     name: cav-chat-staging
-    env: docker
+    runtime: docker
     plan: starter
     branch: main
     autoDeploy: true
