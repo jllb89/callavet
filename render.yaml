@@ -3,6 +3,7 @@ services:
     name: cav-gateway-staging
     env: docker
     registryCredentialName: image-registry-docker-config
+    plan: starter
     branch: main
     autoDeploy: true
     region: ohio
@@ -22,6 +23,7 @@ services:
     name: cav-webhooks-staging
     env: docker
     registryCredentialName: image-registry-docker-config
+    plan: starter
     branch: main
     autoDeploy: true
     region: ohio
@@ -38,6 +40,7 @@ services:
     name: cav-chat-staging
     env: docker
     registryCredentialName: image-registry-docker-config
+    plan: starter
     branch: main
     autoDeploy: true
     region: ohio
