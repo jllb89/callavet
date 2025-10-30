@@ -29,11 +29,18 @@ export class DbService {
       const lookup: any = (hostname: string, options: any, callback: any) => {
         return dns.lookup(hostname, { family: 4, all: false }, callback);
       };
-      this.pool = new Pool({
-        connectionString: url,
+      // Parse URL to explicit fields to ensure our lookup is used
+      const u = new URL(url);
+      const cfg: any = {
+        host: u.hostname,
+        port: u.port ? Number(u.port) : 5432,
+        database: decodeURIComponent(u.pathname.replace(/^\//, '')),
+        user: decodeURIComponent(u.username),
+        password: decodeURIComponent(u.password),
         ssl,
         lookup,
-      } as any);
+      };
+      this.pool = new Pool(cfg);
     }
   }
   get isStub(){ return !this.pool; }
