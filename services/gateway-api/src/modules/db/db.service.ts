@@ -31,22 +31,18 @@ export class DbService {
       const u = new URL(url);
       this.initPromise = undefined;
       const createPool = async () => {
-        // Prefer IPv4; resolve the hostname ourselves and pass IPv4 literal to pg
-        let host = u.hostname;
-        try {
-          const res = await dnsLookup(u.hostname, { family: 4, all: false });
-          host = typeof res === 'string' ? res : res.address;
-        } catch {
-          // Fallback: try forcing ipv4-first at runtime
-          try { (dns as any).setDefaultResultOrder?.('ipv4first'); } catch {}
-        }
+        // Force Node's resolver to return IPv4 only for pg's internal DNS resolution
+        const lookup: any = (hostname: string, options: any, callback: any) => {
+          return dns.lookup(hostname, { family: 4, all: false }, callback);
+        };
         const cfg: any = {
-          host,
+          host: u.hostname,
           port: u.port ? Number(u.port) : 5432,
           database: decodeURIComponent(u.pathname.replace(/^\//, '')),
           user: decodeURIComponent(u.username),
           password: decodeURIComponent(u.password),
           ssl,
+          lookup,
         };
         this.pool = new Pool(cfg);
       };
