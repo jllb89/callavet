@@ -12,7 +12,7 @@ export class DbService {
   constructor(private readonly rc: RequestContext){
     const url = process.env.DATABASE_URL;
     if (url) {
-      const needsSsl = /[?&]sslmode=require/.test(url) || /supabase\.co/.test(url);
+  const needsSsl = /[?&]sslmode=require/.test(url) || /supabase\.(co|com)/.test(url);
       let ssl: any = undefined;
       if (needsSsl) {
         const caPath = process.env.DATABASE_SSL_CA_PATH;
