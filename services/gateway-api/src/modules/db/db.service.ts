@@ -31,13 +31,16 @@ export class DbService {
       const u = new URL(url);
       this.initPromise = undefined;
       const createPool = async () => {
-        // Pre-resolve IPv4 address ourselves and connect to that literal to avoid IPv6
-        let ipv4 = u.hostname;
-        try {
-          const res = await dnsLookup(u.hostname, { family: 4, all: false });
-          ipv4 = typeof res === 'string' ? res : res.address;
-        } catch {
-          try { dns.setDefaultResultOrder?.('ipv4first'); } catch {}
+        // Optional override via env (preferred in staging): use explicit IPv4 host
+        let hostForPg = process.env.DATABASE_HOST_IPV4 || process.env.DATABASE_HOST_OVERRIDE || u.hostname;
+        if (hostForPg === u.hostname) {
+          // No override provided: pre-resolve IPv4 address ourselves and connect to that literal to avoid IPv6
+          try {
+            const res = await dnsLookup(u.hostname, { family: 4, all: false });
+            hostForPg = typeof res === 'string' ? res : res.address;
+          } catch {
+            try { dns.setDefaultResultOrder?.('ipv4first'); } catch {}
+          }
         }
         // Ensure TLS SNI uses the original hostname even if net dials IPv4
         let sslOpts: any = ssl;
@@ -45,7 +48,7 @@ export class DbService {
           sslOpts = { ...sslOpts, servername: u.hostname };
         }
         const cfg: any = {
-          host: ipv4,
+          host: hostForPg,
           port: u.port ? Number(u.port) : 5432,
           database: decodeURIComponent(u.pathname.replace(/^\//, '')),
           user: decodeURIComponent(u.username),
