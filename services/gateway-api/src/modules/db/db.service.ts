@@ -31,18 +31,26 @@ export class DbService {
       const u = new URL(url);
       this.initPromise = undefined;
       const createPool = async () => {
-        // Force Node's resolver to return IPv4 only for pg's internal DNS resolution
-        const lookup: any = (hostname: string, options: any, callback: any) => {
-          return dns.lookup(hostname, { family: 4, all: false }, callback);
-        };
+        // Pre-resolve IPv4 address ourselves and connect to that literal to avoid IPv6
+        let ipv4 = u.hostname;
+        try {
+          const res = await dnsLookup(u.hostname, { family: 4, all: false });
+          ipv4 = typeof res === 'string' ? res : res.address;
+        } catch {
+          try { dns.setDefaultResultOrder?.('ipv4first'); } catch {}
+        }
+        // Ensure TLS SNI uses the original hostname even if net dials IPv4
+        let sslOpts: any = ssl;
+        if (sslOpts && typeof sslOpts === 'object') {
+          sslOpts = { ...sslOpts, servername: u.hostname };
+        }
         const cfg: any = {
-          host: u.hostname,
+          host: ipv4,
           port: u.port ? Number(u.port) : 5432,
           database: decodeURIComponent(u.pathname.replace(/^\//, '')),
           user: decodeURIComponent(u.username),
           password: decodeURIComponent(u.password),
-          ssl,
-          lookup,
+          ssl: sslOpts,
         };
         this.pool = new Pool(cfg);
       };
