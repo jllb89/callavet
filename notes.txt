@@ -220,3 +220,30 @@ POST /sessions/end → finalize consumption
 GET /search → hybrid KB/notes/messages search
 
 GET /centers/near → nearby partner/clinics (lexical + geo filters)
+
+
+
+
+set -a && source ./.env && set +a && pnpm --filter @cav/gateway-api run dev
+
+pnpm turbo run dev --filter='@cav/gateway-api' --filter='@cav/chat-service'
+
+
+pnpm run dev:stack
+
+Clean restart apps and services (no infra restart):
+pnpm run dev:stack:clean
+
+Clean restart and restart docker infra:
+pnpm run dev:stack:infra:clean
+
+Normal start (no changes if everything already running):
+pnpm run dev:stack
+
+
+Recommended flow (end-to-end)
+Sign-in/Sign-up: Web uses supabase-js. You enable MFA and providers in the Supabase dashboard.
+API calls: Web includes Authorization: Bearer <sb-access-token>; Gateway verifies JWT; claims.sub is your user id; we use that to serve /me endpoints.
+Profile: DB stores only profile/billing preferences; changes via /me routes.
+Logout current device: client calls supabase.auth.signOut(); no Gateway change needed.
+Logout all devices (admin or user-initiated): Gateway calls Supabase Admin API to invalidate refresh tokens for that user (requires service role key).

@@ -11,7 +11,9 @@ type Endpoint = {
   path: string; // e.g. /pets/:petId
   label?: string;
   who?: string; // visibility
+  status?: 'done' | 'todo';
   notes?: string;
+  description?: string; // tooltip
   bodySample?: any;
   querySample?: Record<string, string>;
   pathParams?: string[]; // ["petId"]
@@ -24,6 +26,28 @@ type EndpointGroup = {
 };
 
 const DEFAULT_TEST_USER = "00000000-0000-0000-0000-000000000002";
+
+// Minimal status map for implemented routes in gateway today
+// Key format: `${METHOD} ${PATH_WITH_COLONS}`
+const ROUTE_STATUS: Record<string, 'done'|'todo'> = {
+  'GET /health': 'done',
+  'GET /version': 'done',
+  'GET /time': 'done',
+  'POST /sessions/start': 'done',
+  'POST /sessions/end': 'done',
+  'GET /subscriptions/usage': 'done',
+  'GET /centers/near': 'done',
+  'POST /vector/search': 'done',
+  'POST /vector/upsert': 'done',
+  'GET /vector/search': 'done',
+  'POST /vector/search (kb)': 'done',
+  'POST /vector/upsert (kb)': 'done',
+  'GET /kb': 'done',
+  'GET /kb/:id': 'done',
+  'POST /kb': 'done',
+  'PATCH /kb/:id/publish': 'done',
+  'GET /search': 'done',
+};
 
 const ENV_URLS: Record<EnvKey, { gateway: string; webhooks: string; chat?: string; video?: string }> = {
   local: {
@@ -58,14 +82,15 @@ const STATIC_GROUPS: EndpointGroup[] = [
   {
     name: "Auth & Profile",
     items: [
-      { method: "GET", path: "/me", who: "User/Vet/Admin" },
-      { method: "PATCH", path: "/me", who: "User/Vet/Admin", bodySample: { name: "Jane Doe", timezone: "America/Mexico_City" } },
-      { method: "GET", path: "/me/security/sessions", who: "User/Vet/Admin" },
-      { method: "POST", path: "/me/security/logout-all", who: "User/Vet/Admin" },
-      { method: "GET", path: "/me/billing-profile", who: "User/Vet/Admin" },
-      { method: "PUT", path: "/me/billing-profile", who: "User/Vet/Admin", bodySample: { tax_id: "XAXX010101000", address: { line1: "Av. Siempre Viva 123" } } },
-      { method: "POST", path: "/me/billing/payment-method/attach", who: "User/Vet", bodySample: { return_url: "http://localhost:3000" } },
-      { method: "DELETE", path: "/me/billing/payment-method/:pmId", who: "User/Vet", pathParams: ["pmId"], bodySample: {} },
+      { method: "GET", path: "/me", who: "User/Vet/Admin", description: "Fetch current authenticated user's profile (basic fields + role + timezone)." },
+      { method: "PATCH", path: "/me", who: "User/Vet/Admin", bodySample: { name: "Jane Doe", timezone: "America/Mexico_City" }, description: "Update mutable profile fields: name, timezone (IANA)." },
+      { method: "GET", path: "/me/security/sessions", who: "User/Vet/Admin", description: "List active auth sessions (tokens) for this user." },
+      { method: "POST", path: "/me/security/logout-all", who: "User/Vet/Admin", bodySample: {}, description: "Revoke / delete all active sessions for this user." },
+  { method: "POST", path: "/me/security/logout-all-supabase", who: "Admin", bodySample: {}, description: "Invalidate all Supabase refresh tokens for this user via Admin API (service key required)." },
+      { method: "GET", path: "/me/billing-profile", who: "User/Vet/Admin", description: "Retrieve billing profile (tax_id, address) if configured." },
+      { method: "PUT", path: "/me/billing-profile", who: "User/Vet/Admin", bodySample: { tax_id: "XAXX010101000", address: { line1: "Av. Siempre Viva 123", country: "MX" } }, description: "Upsert billing profile fields (validate MX RFC and address)." },
+      { method: "POST", path: "/me/billing/payment-method/attach", who: "User/Vet", bodySample: { return_url: "http://localhost:3000" }, description: "Create/attach a payment method (Stripe SetupIntent)." },
+      { method: "DELETE", path: "/me/billing/payment-method/:pmId", who: "User/Vet", pathParams: ["pmId"], bodySample: {}, description: "Detach a stored payment method from billing profile." },
     ],
   },
   {
@@ -181,10 +206,17 @@ const STATIC_GROUPS: EndpointGroup[] = [
   {
     name: "Knowledge Base & Search",
     items: [
-      { method: "GET", path: "/kb", who: "Public", querySample: { species: "dog" } },
-      { method: "GET", path: "/kb/:id", who: "Public", pathParams: ["id"] },
-      { method: "POST", path: "/kb", who: "Admin/Vet", bodySample: { title: "Vomiting", content: "..." } },
-      { method: "GET", path: "/search", who: "Auth varies", querySample: { q: "rash", type: "kb" } },
+      { method: "GET", path: "/kb", who: "Public", querySample: { species: "dog" }, description: "List published KB articles (or author drafts if authenticated) filtered by species/tags." },
+      { method: "GET", path: "/kb/d920ad16-2f7c-4a6e-99f2-44f925834a72", who: "Public", description: "Fetch a single KB article by ID (published or own draft)." },
+      { method: "POST", path: "/kb", who: "Admin/Vet", bodySample: { title: "Vomiting in Dogs", content: "Dogs may vomit for many reasons. Observe frequency, bile, blood, foreign bodies, and dehydration.", tags: ["gi","emesis"], species: ["dog"], language: "en" }, description: "Create a draft KB article; visible only to author/admin until published." },
+      { method: "PATCH", path: "/kb/d920ad16-2f7c-4a6e-99f2-44f925834a72/publish", who: "Admin", bodySample: {}, notes: "Requires admin override", description: "Publish an existing draft KB article, setting status=published and timestamp." },
+      { method: "GET", path: "/search", who: "Auth varies", querySample: { q: "rash", type: "kb" }, description: "Lexical search over KB articles using tsvector ranking and fallback." },
+      { method: "GET", path: "/vector/search", who: "Auth varies", querySample: { target: "kb", embedding: "[0,0.1,0.2]", topK: "5", filter_ids: "[\"d920ad16-2f7c-4a6e-99f2-44f925834a72\"]" }, description: "Semantic vector search against KB embeddings using cosine distance." },
+  // Vector endpoints (added statically so they show even if live spec fails to load)
+  { method: "POST", path: "/vector/search", who: "Auth varies", bodySample: { target: "pets", query_embedding: [0.0,0.1,0.2], topK: 5, filter_ids: ["b5d11bb9-5ff9-4847-8e56-a03df24a519f"] }, description: "Semantic vector search for pets domain." },
+  { method: "POST", path: "/vector/upsert", who: "Auth", bodySample: { target: "pets", items: [{ id: "b5d11bb9-5ff9-4847-8e56-a03df24a519f", embedding: [0.0,0.1,0.2] }] }, description: "Upsert embeddings for pets." },
+  { method: "POST", path: "/vector/search", who: "Auth varies", notes: "KB semantic search", bodySample: { target: "kb", query_embedding: [0.0,0.1,0.2], topK: 5, filter_ids: ["d920ad16-2f7c-4a6e-99f2-44f925834a72"] }, description: "Semantic vector search for KB articles." },
+  { method: "POST", path: "/vector/upsert", who: "Auth", notes: "KB embedding upsert", bodySample: { target: "kb", items: [{ id: "d920ad16-2f7c-4a6e-99f2-44f925834a72", embedding: [0.0,0.1,0.2] }] }, description: "Upsert embeddings for KB articles." },
     ],
   },
   {
@@ -232,6 +264,18 @@ const STATIC_GROUPS: EndpointGroup[] = [
   },
 ];
 
+// Build a static lookup for enriching spec-derived endpoints
+const STATIC_ENDPOINT_META: Record<string, Partial<Endpoint>> = (() => {
+  const map: Record<string, Partial<Endpoint>> = {};
+  for (const g of STATIC_GROUPS) {
+    for (const ep of g.items) {
+      const key = `${ep.method} ${ep.path}`;
+      map[key] = { description: ep.description, who: ep.who, bodySample: ep.bodySample };
+    }
+  }
+  return map;
+})();
+
 // Build endpoint groups from OpenAPI spec object
 function buildGroupsFromOpenAPI(spec: any): EndpointGroup[] {
   if (!spec || !spec.paths) return [];
@@ -243,7 +287,8 @@ function buildGroupsFromOpenAPI(spec: any): EndpointGroup[] {
       if (!op) continue;
       const method = m.toUpperCase() as HttpMethod;
       const tags = Array.isArray(op.tags) && op.tags.length ? op.tags : ["API"];
-      const summary = op.summary || `${method} ${rawPath}`;
+  const summary = op.summary || `${method} ${rawPath}`;
+  const description = op.description || op.summary || undefined;
       const who = (op.security && op.security.length) ? "Auth" : "Public";
       // extract path params
       const paramNames: string[] = [];
@@ -272,15 +317,20 @@ function buildGroupsFromOpenAPI(spec: any): EndpointGroup[] {
           else if (vv?.type === 'boolean') bodySample[k] = false;
         }
       }
+      const basePath = rawPath.replace(/\{(.*?)\}/g, ':$1');
+      const specKey = `${method} ${basePath}`;
+      const staticMeta = STATIC_ENDPOINT_META[specKey] || {};
       const ep: Endpoint = {
         method,
-        path: rawPath.replace(/\{(.*?)\}/g, ':$1'),
+        path: basePath,
         label: summary,
-        who,
+        who: staticMeta.who || who,
+        status: ROUTE_STATUS[specKey] || 'todo',
         querySample: Object.keys(querySample).length ? querySample : undefined,
         pathParams: paramNames,
-        bodySample,
-        host: 'gateway'
+        bodySample: staticMeta.bodySample || bodySample,
+        host: 'gateway',
+        description: staticMeta.description || description,
       };
       for (const t of tags) {
         if (!groupMap.has(t)) groupMap.set(t, []);
@@ -326,7 +376,7 @@ async function doFetch(method: HttpMethod, url: string, headers: Record<string, 
 
 function Section({ title, children, description, descriptionClassName }: { title: string; children?: any; description?: string; descriptionClassName?: string }) {
   return (
-    <section className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-5 shadow-sm">
+    <section className="rounded-xl bg-zinc-950/60 p-5">
       <div className="mb-3 flex items-center justify-between">
         <h2 className="text-lg font-semibold text-zinc-100">{title}</h2>
         {description && <p className={`${descriptionClassName || 'text-sm'} text-zinc-400`}>{description}</p>}
@@ -360,7 +410,7 @@ export default function ObservabilityCIPage() {
   const [logs, setLogs] = useState<any[]>([]);
   const [useSpec, setUseSpec] = useState<boolean>(true);
   const [specGroups, setSpecGroups] = useState<EndpointGroup[] | null>(null);
-  const [gwHealth, setGwHealth] = useState<{ ok: boolean | null; ms?: number; version?: string; time?: string }>({ ok: null });
+  const [gwHealth, setGwHealth] = useState<{ ok: boolean | null; ms?: number; version?: string; time?: string; db?: 'connected'|'stub'|'error' }>({ ok: null });
   const [whHealth, setWhHealth] = useState<{ ok: boolean | null; ms?: number }>({ ok: null });
   const [ciStatus, setCiStatus] = useState<string>("unknown");
 
@@ -422,9 +472,27 @@ export default function ObservabilityCIPage() {
         try { const vr = await fetch(new URL('/version', gatewayUrl).toString(), { cache: 'no-store' }); if (vr.ok) { const j = await vr.json().catch(()=>null); version = j?.version || j?.commit || j?.build || undefined; } } catch {}
         // Optional /time
         try { const tr = await fetch(new URL('/time', gatewayUrl).toString(), { cache: 'no-store' }); if (tr.ok) { const j = await tr.json().catch(()=>null); timeStr = j?.time || j?.now || undefined; } } catch {}
-        if (mounted) setGwHealth({ ok, ms, version, time: timeStr });
+        // DB status via gateway diagnostics: prefer /_db/status; fall back to heuristic only if unavailable
+        let dbStatus: 'connected'|'stub'|'error'|undefined = undefined;
+        try {
+          const sUrl = new URL('/_db/status', gatewayUrl).toString();
+          const sRes = await fetch(sUrl, { cache: 'no-store' });
+          if (sRes.ok) {
+            const j = await sRes.json().catch(() => null);
+            if (j && typeof j === 'object') {
+              if (j.stub === false) dbStatus = 'connected';
+              else if (j.stub === true) dbStatus = j.lastError ? 'error' : 'stub';
+            }
+          }
+        } catch {
+          // ignore; we'll try heuristic below
+        }
+        // Heuristic fallback (kept minimal): if gateway is healthy but we couldn't classify, assume connected
+        if (!dbStatus && ok) dbStatus = 'connected';
+        if (!dbStatus) dbStatus = 'error';
+        if (mounted) setGwHealth({ ok, ms, version, time: timeStr, db: dbStatus });
       } catch {
-        if (mounted) setGwHealth({ ok: false });
+        if (mounted) setGwHealth({ ok: false, db: 'error' });
       }
       // Webhooks /health
       try {
@@ -472,60 +540,99 @@ export default function ObservabilityCIPage() {
           <h1 className="text-md text-zinc-200">Call a Vet Observability + CI</h1>
         </div>
 
-        {/* Layout: left nav, main, right logs (full-width grid) */}
-        <div className="grid grid-cols-12 gap-4 pb-28">
+  {/* Layout: left nav, main, right logs (single column on small, fixed logs width on large) */}
+  <div className="grid grid-cols-1 lg:grid-cols-[380px_1fr_380px] gap-4 pb-28">
           {/* Left Sidebar */}
-          <aside className="col-span-12 sm:col-span-3 lg:col-span-2">
-            <div className="sticky top-4 space-y-2">
-              <nav className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-3">
-                <div className="mb-4 text-xs uppercase tracking-wide text-zinc-700">Sections</div>
-                <div className="overflow-hidden rounded-lg border border-zinc-800">
-                  <div className="flex">
-                    <button
-                      aria-pressed={activeSection==='database'}
-                      onClick={() => setActiveSection('database')}
-                      className={`flex-1 items-center gap-2 px-3 py-2 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${
-                        activeSection==='database'
-                          ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-inner'
-                          : 'bg-zinc-900 text-zinc-200 hover:bg-zinc-800'
-                      }`}
-                    >
-                      <span className="mr-2 inline-block align-middle">{/* DB icon */}
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="inline">
-                          <ellipse cx="12" cy="5" rx="8" ry="3" className={`${activeSection==='database' ? 'fill-white/90' : 'fill-zinc-300/70'}`}/>
-                          <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5" className={`${activeSection==='database' ? 'fill-white/90' : 'fill-zinc-300/70'}`}/>
-                          <path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" className={`${activeSection==='database' ? 'fill-white/90' : 'fill-zinc-300/70'}`}/>
-                        </svg>
-                      </span>
-                      Database
-                    </button>
-                    <button
-                      aria-pressed={activeSection==='api'}
-                      onClick={() => setActiveSection('api')}
-                      className={`flex-1 items-center gap-2 px-3 py-2 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${
-                        activeSection==='api'
-                          ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-inner'
-                          : 'bg-zinc-900 text-zinc-200 hover:bg-zinc-800'
-                      }`}
-                    >
-                      <span className="mr-2 inline-block align-middle">{/* API icon */}
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="inline">
-                          <circle cx="6" cy="12" r="2" className={`${activeSection==='api' ? 'fill-white/90' : 'fill-zinc-300/70'}`}/>
-                          <circle cx="18" cy="6" r="2" className={`${activeSection==='api' ? 'fill-white/90' : 'fill-zinc-300/70'}`}/>
-                          <circle cx="18" cy="18" r="2" className={`${activeSection==='api' ? 'fill-white/90' : 'fill-zinc-300/70'}`}/>
-                          <path d="M7.7 10.7l8.6-4.4M7.7 13.3l8.6 4.4" strokeWidth="1.5" className={`${activeSection==='api' ? 'stroke-white/90' : 'stroke-zinc-300/70'}`}/>
-                        </svg>
-                      </span>
-                      API testing
-                    </button>
-                  </div>
+          <aside>
+            <div className="sticky top-4 space-y-3">
+              <nav className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
+                <div className="mb-2 text-xs uppercase tracking-wide text-zinc-700">Sections</div>
+                <div className="flex flex-col gap-2">
+                  <button
+                    aria-pressed={activeSection==='database'}
+                    onClick={() => setActiveSection('database')}
+                    className={`text-left text-sm transition focus:outline-none font-medium ${
+                      activeSection==='database'
+                        ? 'text-zinc-200'
+                        : 'text-zinc-300 hover:text-zinc-100'
+                    }`}
+                  >
+                    <span className="relative inline-block">
+                      <span className="">Database</span>
+                      {activeSection==='database' && (
+                        <span aria-hidden className="absolute inset-0 bg-gradient-to-r from-emerald-300 to-cyan-300 bg-clip-text text-transparent">
+                          Database
+                        </span>
+                      )}
+                    </span>
+                  </button>
+                  <button
+                    aria-pressed={activeSection==='api'}
+                    onClick={() => setActiveSection('api')}
+                    className={`text-left text-sm transition focus:outline-none font-medium ${
+                      activeSection==='api'
+                        ? 'text-zinc-200'
+                        : 'text-zinc-300 hover:text-zinc-100'
+                    }`}
+                  >
+                    <span className="relative inline-block">
+                      <span className="">API testing</span>
+                      {activeSection==='api' && (
+                        <span aria-hidden className="absolute inset-0 bg-gradient-to-r from-emerald-300 to-cyan-300 bg-clip-text text-transparent">
+                          API testing
+                        </span>
+                      )}
+                    </span>
+                  </button>
                 </div>
               </nav>
+
+              {/* Request settings moved from main */}
+              <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
+                <div className="mb-2 text-xs uppercase tracking-wide text-zinc-700">Request settings</div>
+                <div className="space-y-3">
+                  <div>
+                    <label className="mb-1 block text-xs text-zinc-400">Gateway URL</label>
+                    <input value={gatewayUrl} onChange={(e) => setGatewayUrl(e.target.value)} className="w-full rounded-md border-0 bg-zinc-950 px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-emerald-700/40" />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs text-zinc-400">Webhooks URL</label>
+                    <input value={webhooksUrl} onChange={(e) => setWebhooksUrl(e.target.value)} className="w-full rounded-md border-0 bg-zinc-950 px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-emerald-700/40" />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs text-zinc-400">CI status URL (optional)</label>
+                    <input value={ciUrl} onChange={(e) => setCiUrl(e.target.value)} className="w-full rounded-md border-0 bg-zinc-950 px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-emerald-700/40" />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs text-zinc-400">x-user-id (dev)</label>
+                    <input value={userId} onChange={(e) => setUserId(e.target.value)} className="w-full rounded-md border-0 bg-zinc-950 px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-emerald-700/40" />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs text-zinc-400">Bearer token (Authorization)</label>
+                    <input value={bearerToken} onChange={(e) => setBearerToken(e.target.value)} placeholder="eyJhbGciOi..." className="w-full rounded-md border-0 bg-zinc-950 px-3 py-2 text-sm font-mono outline-none focus:ring-1 focus:ring-emerald-700/40" />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs text-zinc-400">Idempotency-Key</label>
+                    <div className="flex items-center gap-2">
+                      <label className="inline-flex items-center gap-2 text-xs text-zinc-300">
+                        <input type="checkbox" checked={useIdem} onChange={(e) => setUseIdem(e.target.checked)} />
+                        Use header
+                      </label>
+                      <button onClick={() => setIdemKey(genUUIDv4())} className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs hover:bg-zinc-700">New</button>
+                    </div>
+                    <input value={idemKey} onChange={(e) => setIdemKey(e.target.value)} placeholder="auto-generate or paste a UUID" className="mt-1 w-full rounded-md border-0 bg-zinc-950 px-3 py-2 text-xs font-mono outline-none focus:ring-1 focus:ring-emerald-700/40" />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs text-zinc-400">Extra headers (JSON)</label>
+                    <input value={extraHeaders} onChange={(e) => setExtraHeaders(e.target.value)} className="w-full rounded-md border-0 bg-zinc-950 px-3 py-2 text-sm font-mono outline-none focus:ring-1 focus:ring-emerald-700/40" />
+                  </div>
+                </div>
+              </div>
             </div>
           </aside>
 
           {/* Main content */}
-          <main className="col-span-12 sm:col-span-6 lg:col-span-8 space-y-6 overflow-y-auto h-[calc(100vh-150px)] pr-1">
+          <main className="space-y-6 overflow-y-auto h-[calc(100vh-150px)] pr-1 rounded-xl border border-zinc-800  p-4">
             {activeSection === 'database' ? (
               <Section title="Database (structure)" description="Tables & fields">
                 <div className="grid gap-2 text-sm text-zinc-300">
@@ -540,48 +647,10 @@ export default function ObservabilityCIPage() {
               </Section>
             ) : (
               <Section title="API testing" description="Grouped endpoints with live calls" descriptionClassName="text-xs">
-                {/* Request settings inline (URLs, headers) */}
-                <div className="mb-4 grid gap-3 sm:grid-cols-2">
-                  <div>
-                    <label className="mb-1 block text-xs text-zinc-400">Gateway URL</label>
-                    <input value={gatewayUrl} onChange={(e) => setGatewayUrl(e.target.value)} className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm outline-none focus:border-emerald-500" />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-xs text-zinc-400">Webhooks URL</label>
-                    <input value={webhooksUrl} onChange={(e) => setWebhooksUrl(e.target.value)} className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm outline-none focus:border-emerald-500" />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-xs text-zinc-400">CI status URL (optional)</label>
-                    <input value={ciUrl} onChange={(e) => setCiUrl(e.target.value)} className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm outline-none focus:border-emerald-500" />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-xs text-zinc-400">x-user-id (dev)</label>
-                    <input value={userId} onChange={(e) => setUserId(e.target.value)} className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm outline-none focus:border-emerald-500" />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-xs text-zinc-400">Bearer token (Authorization)</label>
-                    <input value={bearerToken} onChange={(e) => setBearerToken(e.target.value)} placeholder="eyJhbGciOi..." className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm font-mono outline-none focus:border-emerald-500" />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-xs text-zinc-400">Idempotency-Key</label>
-                    <div className="flex items-center gap-2">
-                      <label className="inline-flex items-center gap-2 text-xs text-zinc-300">
-                        <input type="checkbox" checked={useIdem} onChange={(e) => setUseIdem(e.target.checked)} />
-                        Use header
-                      </label>
-                      <button onClick={() => setIdemKey(genUUIDv4())} className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs hover:bg-zinc-700">New</button>
-                    </div>
-                    <input value={idemKey} onChange={(e) => setIdemKey(e.target.value)} placeholder="auto-generate or paste a UUID" className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs font-mono outline-none focus:border-emerald-500" />
-                  </div>
-                  <div className="sm:col-span-2">
-                    <label className="mb-1 block text-xs text-zinc-400">Extra headers (JSON)</label>
-                    <input value={extraHeaders} onChange={(e) => setExtraHeaders(e.target.value)} className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm font-mono outline-none focus:border-emerald-500" />
-                  </div>
-                </div>
                 <div className="mb-3 flex items-center justify-between">
-                  <label className="inline-flex items-center gap-2 text-xs text-zinc-300">
+                  <label className="inline-flex items-center gap-2 text-xs text-zinc-300" title="Fetch /openapi.yaml to build dynamic endpoint list; uncheck to use static fallback">
                     <input type="checkbox" checked={useSpec} onChange={(e) => setUseSpec(e.target.checked)} />
-                    Load live spec (/openapi.yaml)
+                    Use live API blueprint (OpenAPI)
                   </label>
                   <span className="text-[11px] text-zinc-500">{useSpec ? (specGroups ? `${specGroups.length} groups` : 'loading…') : 'using static list'}</span>
                 </div>
@@ -591,10 +660,9 @@ export default function ObservabilityCIPage() {
           </main>
 
           {/* Right Sidebar (Logs) */}
-          <aside className="col-span-12 sm:col-span-3 lg:col-span-2">
+          <aside>
             <div className="sticky top-4 h-[calc(100vh-150px)] overflow-auto rounded-xl border border-zinc-800 bg-black/50 p-3">
-              <div className="mb-2 text-sm font-medium">Logs</div>
-              <LogList logs={logs as any} />
+              <LogsPanel logs={logs as any} />
             </div>
           </aside>
         </div>
@@ -627,6 +695,7 @@ export default function ObservabilityCIPage() {
               <span className="text-zinc-400">Metrics:</span>
               <span className={`rounded px-1 ${gwHealth.ok ? 'bg-emerald-900/40 text-emerald-300' : gwHealth.ok === false ? 'bg-rose-900/40 text-rose-300' : 'bg-zinc-800 text-zinc-300'}`}>GW {gwHealth.ms ?? '—'}ms</span>
               <span className={`rounded px-1 ${whHealth.ok ? 'bg-emerald-900/40 text-emerald-300' : whHealth.ok === false ? 'bg-rose-900/40 text-rose-300' : 'bg-zinc-800 text-zinc-300'}`}>WH {whHealth.ms ?? '—'}ms</span>
+              <span className={`rounded px-1 ${gwHealth.db === 'connected' ? 'bg-emerald-900/40 text-emerald-300' : gwHealth.db === 'stub' ? 'bg-yellow-900/40 text-yellow-300' : gwHealth.db === 'error' ? 'bg-rose-900/40 text-rose-300' : 'bg-zinc-800 text-zinc-300'}`}>DB {gwHealth.db || '—'}</span>
             </div>
             <div className="hidden sm:block h-4 w-px bg-zinc-800" />
             <div className="flex items-center gap-2">
@@ -645,6 +714,63 @@ export default function ObservabilityCIPage() {
   );
 }
 
+function LogsPanel({ logs }: { logs: Array<any> }) {
+  const [copied, setCopied] = useState(false);
+  async function copyAllLogs() {
+    try {
+      const parts: string[] = [];
+      for (const l of logs) {
+        const lines: string[] = [];
+        lines.push(`[${l.method}] ${l.url}`);
+        lines.push(`Status: ${l.status} ${l.ok ? 'OK' : 'ERR'} (${l.ms} ms)`);
+        if (l.reqTs || l.resTs || l.ts) {
+          const reqStr = l.reqTs ? new Date(l.reqTs).toISOString() : (l.ts ? new Date(l.ts).toISOString() : '');
+          const resStr = l.resTs ? new Date(l.resTs).toISOString() : (l.ts ? new Date(l.ts).toISOString() : '');
+          lines.push(`Times: req=${reqStr} res=${resStr}`);
+        }
+        if (l.req?.headers) {
+          lines.push(`\nRequest headers:`);
+          lines.push(JSON.stringify(l.req.headers, null, 2));
+        }
+        if (l.req?.body) {
+          lines.push(`\nRequest body:`);
+          lines.push(typeof l.req.body === 'string' ? l.req.body : JSON.stringify(l.req.body, null, 2));
+        }
+        if (l.res?.body != null) {
+          lines.push(`\nResponse body:`);
+          lines.push(typeof l.res.body === 'string' ? l.res.body : JSON.stringify(l.res.body, null, 2));
+        }
+        parts.push(lines.join('\n'));
+      }
+      const text = parts.join('\n\n-----------------------------\n\n');
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {}
+  }
+  return (
+    <div className="flex h-full flex-col">
+      <div className="mb-2 flex items-center justify-between">
+        <div className="text-sm font-medium">Logs</div>
+        <button
+          onClick={copyAllLogs}
+          className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] ${copied ? 'bg-emerald-900/40 text-emerald-300' : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'}`}
+          title={copied ? 'Copied!' : 'Copy all logs'}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="9" y="9" width="12" height="12" rx="2" className={`${copied ? 'fill-emerald-300/80' : 'fill-zinc-300/80'}`}/>
+            <rect x="3" y="3" width="12" height="12" rx="2" className={`${copied ? 'fill-emerald-200/70' : 'fill-zinc-200/70'}`}/>
+          </svg>
+          <span>{copied ? 'Copied' : 'Copy all'}</span>
+        </button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto">
+        <LogList logs={logs} />
+      </div>
+    </div>
+  );
+}
+
 function ApiTester({ groups, baseByHost, userId, extraHeaders, bearerToken, useIdem, idemKey, onGlobalLog }: { groups: EndpointGroup[]; baseByHost: Record<string, string>; userId: string; extraHeaders: string; bearerToken: string; useIdem: boolean; idemKey: string; onGlobalLog: (e: any) => void }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [results, setResults] = useState<Record<string, { status: number; ok: boolean; body: string }>>({});
@@ -655,38 +781,66 @@ function ApiTester({ groups, baseByHost, userId, extraHeaders, bearerToken, useI
 
   return (
     <div className="space-y-4">
-      {/* Divider before routes */}
-      <div className="my-6 h-px w-full bg-zinc-800" />
       <h3 className="text-sm font-medium text-zinc-300">API routes</h3>
-      <div className="max-h-[55vh] md:max-h-[60vh] xl:max-h-[65vh] overflow-y-auto pr-2">
-        <div className="columns-1 md:columns-2 gap-4 [column-fill:balance]">
-          {groups.map((g, gi) => (
-            <div key={gi} className="mb-4 break-inside-avoid overflow-hidden rounded-xl border border-zinc-800">
-              <button className="flex w-full items-center justify-between bg-zinc-900 px-4 py-3 text-left hover:bg-zinc-800" onClick={() => toggle(g.name)}>
-                <div className="font-medium">{g.name}</div>
-                <div className="text-xs text-zinc-400">{expanded[g.name] ? "Hide" : "Show"}</div>
-              </button>
-              {expanded[g.name] && (
-                <div className="divide-y divide-zinc-800">
-                  {g.items.map((ep, ei) => (
-                    <EndpointRow
-                      key={ei}
-                      ep={ep}
-                      baseByHost={baseByHost}
-                      userId={userId}
-                      extraHeaders={extraHeaders}
-                      bearerToken={bearerToken}
-                      useIdem={useIdem}
-                      idemKey={idemKey}
-                      onResult={(body, ok, status) => setResults((r) => ({ ...r, [g.name + ei]: { body, ok, status } }))}
-                      result={results[g.name + ei]}
-                      onGlobalLog={onGlobalLog}
-                    />
-                  ))}
+      <div className="my-5 h-px w-full" />
+      <div className="rounded-xl bg-zinc-900/60 p-3">
+        <div className="max-h-[55vh] md:max-h-[60vh] xl:max-h-[65vh] overflow-y-auto pr-2">
+          <div className="flex flex-col gap-3">
+            {groups.map((g, gi) => (
+              <div key={g.name} className="mb-2">
+                <button
+                  className="group relative w-full text-left py-1"
+                  onClick={() => toggle(g.name)}
+                >
+                  <span className="inline-flex items-center gap-2">
+                    <svg
+                      className={`h-3 w-3 transition-transform duration-200 ${expanded[g.name] ? 'rotate-90' : ''}`}
+                      viewBox="0 0 20 20" fill="currentColor"
+                    >
+                      <path fillRule="evenodd" d="M7.21 14.77a.75.75 0 0 1-1.06-1.06L9.86 10 6.15 6.29a.75.75 0 1 1 1.06-1.06l4.24 4.24a.75.75 0 0 1 0 1.06l-4.24 4.24z" clipRule="evenodd" />
+                    </svg>
+                    <span className="relative inline-block text-sm">
+                      <span className="text-zinc-200">{g.name}</span>
+                      <span aria-hidden className="absolute inset-0 whitespace-nowrap bg-gradient-to-r from-emerald-300 to-cyan-300 bg-clip-text text-transparent w-0 overflow-hidden transition-[width] duration-300 ease-out group-hover:w-full">
+                        {g.name}
+                      </span>
+                    </span>
+                  </span>
+                  {/* Hover fill effect now applied directly to text above */}
+                </button>
+                {/* Animated container for routes */}
+                <div
+                  className={`mt-2 overflow-hidden transition-all duration-200 ease-out ${expanded[g.name] ? 'opacity-100 translate-y-0' : 'max-h-0 opacity-0 -translate-y-1'}`}
+                >
+                  <div className="space-y-2">
+                    {g.items.map((ep, ei) => (
+                      <div key={`${ep.method}:${ep.path}:${ep.notes || ep.label || ep.description || ''}:${ei}`}>
+                        {/* Divider between routes (except first) */}
+                        {ei > 0 && <div className="my-2 h-px w-full bg-zinc-800" />}
+                        <div
+                          className={`transition-all duration-200 ease-out ${expanded[g.name] ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-1'}`}
+                          style={{ transitionDelay: expanded[g.name] ? `${Math.min(ei * 30, 300)}ms` : '0ms' }}
+                        >
+                          <EndpointRow
+                            ep={ep}
+                            baseByHost={baseByHost}
+                            userId={userId}
+                            extraHeaders={extraHeaders}
+                            bearerToken={bearerToken}
+                            useIdem={useIdem}
+                            idemKey={idemKey}
+                            onResult={(body, ok, status) => setResults((r) => ({ ...r, [g.name + ei]: { body, ok, status } }))}
+                            result={results[g.name + ei]}
+                            onGlobalLog={onGlobalLog}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-              )}
-            </div>
-          ))}
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     </div>
@@ -709,10 +863,12 @@ function EndpointRow({ ep, baseByHost, userId, extraHeaders, bearerToken, useIde
   const [query, setQuery] = useState<Record<string, string>>(() => ({ ...(ep.querySample || {}) } as Record<string, string>));
   const [body, setBody] = useState<string>(() => (ep.bodySample ? JSON.stringify(ep.bodySample, null, 2) : ""));
   const [loading, setLoading] = useState(false);
+  const [loadingSample, setLoadingSample] = useState(false);
 
   const host = ep.host || "gateway";
   const base = baseByHost[host] || "";
   const url = buildUrl(base, ep, paths, query);
+  const effectiveStatus = ep.status || ROUTE_STATUS[`${ep.method} ${ep.path}`];
 
   async function run() {
     setLoading(true);
@@ -725,6 +881,10 @@ function EndpointRow({ ep, baseByHost, userId, extraHeaders, bearerToken, useIde
         ...(host === "gateway" ? { "x-user-id": userId } : {}),
         ...parsedHeaders,
       };
+      // Auto admin override for KB publish route when no explicit x-admin header supplied
+      if (ep.path.includes('/kb/') && ep.path.endsWith('/publish') && !headers['x-admin']) {
+        headers['x-admin'] = '1';
+      }
       if (bearerToken && bearerToken.trim()) headers["authorization"] = `Bearer ${bearerToken.trim()}`;
       if (useIdem) headers["idempotency-key"] = (idemKey && idemKey.trim()) ? idemKey.trim() : '';
       let parsedBody: any = undefined;
@@ -759,10 +919,36 @@ function EndpointRow({ ep, baseByHost, userId, extraHeaders, bearerToken, useIde
     }
   }
 
+  // Load JSON sample from /observability-ci/requests based on heuristic slug
+  async function loadSample() {
+    setLoadingSample(true);
+    try {
+      // Slug strategy: method-path with slashes turned to dashes and params removed
+      const slug = (() => {
+        const method = ep.method.toLowerCase();
+        const base = ep.path.replace(/:\w+/g, '').replace(/^\/+/,'').replace(/\/+$/,'').replace(/\//g, '-');
+        // hand-tuned aliases
+        if (ep.path === '/sessions/start') return 'sessions-start';
+        if (ep.path.endsWith('/messages')) return 'message-append';
+        if (ep.path === '/pets') return 'pet-create';
+        if (ep.path === '/subscriptions/usage' || ep.path === '/subscriptions/usage/current') return 'subscriptions-usage';
+        // differentiate vector kb vs pets samples
+        if (ep.path === '/vector/search' && ep.bodySample?.target === 'kb') return 'vector-search-kb';
+        if (ep.path === '/vector/upsert' && ep.bodySample?.target === 'kb') return 'vector-upsert-kb';
+        return `${base || 'root'}`;
+      })();
+      const url = `/observability-ci/requests/${slug}.json`;
+      const res = await fetch(url, { cache: 'no-store' });
+      const txt = await res.text();
+      setBody(txt || '');
+    } catch {}
+    finally { setLoadingSample(false); }
+  }
+
   return (
     <div className="grid grid-cols-1 gap-3 p-4 md:grid-cols-3">
       <div className="space-y-2">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2" title={ep.description || ep.notes || ''}>
           <span className={`inline-flex items-center rounded px-2 py-0.5 text-xs font-medium ${
             ep.method === "GET" ? "bg-emerald-900/40 text-emerald-300" :
             ep.method === "POST" ? "bg-sky-900/40 text-sky-300" :
@@ -771,7 +957,17 @@ function EndpointRow({ ep, baseByHost, userId, extraHeaders, bearerToken, useIde
             ep.method === "DELETE" ? "bg-rose-900/40 text-rose-300" : "bg-zinc-800 text-zinc-300"
           }`}>{ep.method}</span>
           <code className="rounded bg-zinc-900 px-2 py-0.5 text-xs text-zinc-200">{ep.path}</code>
+          {effectiveStatus && (
+            <span className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] ${effectiveStatus==='done' ? 'bg-emerald-900/40 text-emerald-300' : 'bg-zinc-800 text-zinc-300'}`}>
+              {effectiveStatus === 'done' ? 'DONE' : 'TODO'}
+            </span>
+          )}
         </div>
+        {ep.description && (
+          <div className="text-xs text-zinc-400/90 leading-snug" title={ep.description}>
+            {ep.description}
+          </div>
+        )}
         {ep.who && <div className="text-xs text-zinc-400">{ep.who}</div>}
         <div className="text-[10px] text-zinc-500">Host: {host}</div>
         <div className="text-[10px] text-zinc-500 break-all">URL: {url}</div>
@@ -783,7 +979,7 @@ function EndpointRow({ ep, baseByHost, userId, extraHeaders, bearerToken, useIde
             {ep.pathParams!.map((k) => (
               <div key={k}>
                 <label className="mb-1 block text-xs text-zinc-400">{k}</label>
-                <input value={paths[k] || ""} onChange={(e) => setPaths((s) => ({ ...s, [k]: e.target.value }))} className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-xs outline-none focus:border-emerald-500" />
+                <input value={paths[k] || ""} onChange={(e) => setPaths((s) => ({ ...s, [k]: e.target.value }))} className="w-full rounded-md border-0 bg-zinc-950 px-2 py-1.5 text-xs outline-none focus:ring-1 focus:ring-emerald-700/40" />
               </div>
             ))}
           </div>
@@ -793,7 +989,7 @@ function EndpointRow({ ep, baseByHost, userId, extraHeaders, bearerToken, useIde
             {Object.keys(ep.querySample!).map((k) => (
               <div key={k}>
                 <label className="mb-1 block text-xs text-zinc-400">{k}</label>
-                <input value={query[k] || ""} onChange={(e) => setQuery((s) => ({ ...s, [k]: e.target.value }))} className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-xs outline-none focus:border-emerald-500" />
+                <input value={query[k] || ""} onChange={(e) => setQuery((s) => ({ ...s, [k]: e.target.value }))} className="w-full rounded-md border-0 bg-zinc-950 px-2 py-1.5 text-xs outline-none focus:ring-1 focus:ring-emerald-700/40" />
               </div>
             ))}
           </div>
@@ -802,6 +998,9 @@ function EndpointRow({ ep, baseByHost, userId, extraHeaders, bearerToken, useIde
       </div>
       <div className="space-y-2">
         <div className="flex items-center justify-end">
+          {ep.method !== 'GET' && (
+            <button onClick={loadSample} disabled={loadingSample} className={`mr-2 rounded-md px-2 py-1 text-xs ${loadingSample ? 'bg-zinc-700 text-zinc-300' : 'bg-zinc-800 text-zinc-200 hover:bg-zinc-700'}`}>Load sample</button>
+          )}
           <button onClick={run} disabled={loading} className={`rounded-md px-3 py-1.5 text-sm ${loading ? "bg-zinc-700 text-zinc-300" : "bg-emerald-600 text-white hover:bg-emerald-500"}`}>
             {loading ? "Running…" : "Send"}
           </button>
@@ -814,7 +1013,7 @@ function EndpointRow({ ep, baseByHost, userId, extraHeaders, bearerToken, useIde
           </div>
         )}
       </div>
-      {(ep.bodySample != null) && (
+      {(ep.method !== 'GET') && (
         <div className="md:col-span-3 rounded-md border border-zinc-800 bg-zinc-950 p-2">
           <div className="mb-1 text-[10px] text-zinc-400">Body (JSON)</div>
           <textarea
@@ -877,10 +1076,10 @@ function LogCard({ l }: { l: any }) {
     } catch {}
   }
   return (
-    <div className="space-y-2 rounded-lg border border-zinc-800 bg-zinc-900 p-2">
+    <div className="space-y-2 rounded-lg bg-zinc-900 p-2">
       <div className="flex items-center justify-between">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="rounded bg-zinc-800 px-1 py-0.5 text-[10px]">{l.method}</span>
+          <span className="rounded bg-zinc-800/70 px-1 py-0.5 text-[10px]">{l.method}</span>
           <div className="truncate text-xs text-zinc-300" title={l.url}>{l.url}</div>
         </div>
         <div className="flex items-center gap-2">
@@ -888,17 +1087,17 @@ function LogCard({ l }: { l: any }) {
         </div>
       </div>
       {l.error && (
-        <div className="rounded-md border border-rose-900/40 bg-rose-950/40 p-2 text-xs text-rose-200">{l.error}</div>
+        <div className="rounded-md bg-rose-950/40 p-2 text-xs text-rose-200">{l.error}</div>
       )}
       {l.req && (
         <div className="grid gap-1 text-[11px]">
           <div className="text-zinc-400">Request</div>
-          <div className="rounded border border-zinc-800 bg-zinc-950 p-2">
+          <div className="rounded bg-zinc-950 p-2">
             <div className="text-zinc-500">Headers</div>
             <pre className="max-w-full overflow-auto whitespace-pre-wrap break-all text-[10px] text-zinc-300">{JSON.stringify(l.req.headers, null, 2)}</pre>
           </div>
           {l.req.body && (
-            <div className="rounded border border-zinc-800 bg-zinc-950 p-2">
+            <div className="rounded bg-zinc-950 p-2">
               <div className="text-zinc-500">Body</div>
               <pre className="max-w-full overflow-auto whitespace-pre-wrap break-all text-[10px] text-zinc-300">{l.req.body}</pre>
             </div>
@@ -921,7 +1120,7 @@ function LogCard({ l }: { l: any }) {
               <span>{copied ? 'Copied' : 'Copy all'}</span>
             </button>
           </div>
-          <div className="rounded border border-zinc-800 bg-zinc-950 p-2">
+          <div className="rounded bg-zinc-950 p-2">
             <pre className="max-h-56 max-w-full overflow-auto whitespace-pre-wrap break-all text-[10px] text-zinc-300">{l.res.body}</pre>
           </div>
         </div>

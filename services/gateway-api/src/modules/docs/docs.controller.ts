@@ -1,27 +1,45 @@
 import { Controller, Get, Header, Res } from '@nestjs/common';
 import { Response } from 'express';
 import { readFileSync, existsSync } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { resolve } from 'node:path';
 
 function resolveSpecPath(): string {
-  // Try a few likely locations both in dev (ts) and prod (dist)
-  const candidates = [
-    // Monorepo root relative from service dir (dev)
-    resolve(process.cwd(), '../../../docs/openapi/openapi.yaml'),
-    // From compiled dist directory
-    resolve(__dirname, '../../../../docs/openapi/openapi.yaml'),
-    // If copied as an asset alongside dist
-    resolve(__dirname, '../../public/openapi.yaml'),
-  ];
+  // 1. Honor explicit env override first (so that a valid path isn't shadowed by missing candidates)
+  if (process.env.OPENAPI_SPEC_PATH) {
+    const envPath = process.env.OPENAPI_SPEC_PATH;
+    if (existsSync(envPath)) return envPath;
+  }
+
+  // 2. Assemble candidate search locations. We include both dev (ts-node) and dist layouts.
+  // We purposely repeat a couple resolutions because process.cwd() may be either the service dir or monorepo root
+  const candidates: string[] = [];
+  const cwd = process.cwd();
+  // Derive potential monorepo root by climbing 2 levels (serviceDir/.. => services/.. => repo root)
+  // Previous traversal used 3 levels which escaped the repo when running in services/gateway-api
+  const maybeRoot = resolve(cwd, '../../');
+
+  const pushUnique = (p: string) => { if (!candidates.includes(p)) candidates.push(p); };
+
+  // canonical name variants we accept
+  const names = ['openapi.yaml', 'openapi.yml', 'openapi.json'];
+  for (const name of names) {
+  // Two-level ascent to repo root from services/<svc>
+  pushUnique(resolve(cwd, `../../docs/openapi/${name}`));
+    pushUnique(resolve(__dirname, `../../../../docs/openapi/${name}`));
+    pushUnique(resolve(__dirname, `../../public/${name}`));
+    pushUnique(resolve(maybeRoot, `docs/openapi/${name}`));
+    pushUnique(resolve(cwd, `docs/openapi/${name}`));
+  }
+
   for (const p of candidates) {
     if (existsSync(p)) return p;
   }
-  // Fallback: try env-provided
-  if (process.env.OPENAPI_SPEC_PATH && existsSync(process.env.OPENAPI_SPEC_PATH)) {
-    return process.env.OPENAPI_SPEC_PATH;
-  }
+
+  // 3. If still not found, emit a debug log with attempted paths for easier diagnosis
+  // (Avoid leaking internal absolute paths unless in dev mode)
+  const attempted = process.env.NODE_ENV === 'production' ? candidates.map(c => resolve(c).split('/').slice(-3).join('/')) : candidates;
   // Last resort: throw with helpful message
-  throw new Error('OpenAPI spec not found. Set OPENAPI_SPEC_PATH or ensure docs/openapi/openapi.yaml is available.');
+  throw new Error(`OpenAPI spec not found. Set OPENAPI_SPEC_PATH or ensure docs/openapi/openapi.yaml is available. Attempted: ${attempted.join(', ')}`);
 }
 
 function tryResolveAlt(name: string): string | null {

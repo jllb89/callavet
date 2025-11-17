@@ -1,0 +1,10 @@
+{
+  "target": "pets",
+  "items": [
+    {
+      "id": "b5d11bb9-5ff9-4847-8e56-a03df24a519f",
+      "embedding": [0, 0.1, 0.2, 0.3, 0.4],
+      "payload": { "note": "Sample pet embedding seed" }
+    }
+  ]
+}

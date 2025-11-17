@@ -18,10 +18,6 @@ services:
         value: /app/public/openapi-chat-ws.yaml
       - key: OPENAPI_WEBHOOKS_SPEC_PATH
         value: /app/public/openapi-webhooks.yaml
-      - key: DATABASE_HOST_IPV4
-        sync: false
-      - key: DATABASE_SSL_REJECT_UNAUTHORIZED
-        value: "0"
       - key: DATABASE_URL
         sync: false
       - key: SUPABASE_JWT_SECRET

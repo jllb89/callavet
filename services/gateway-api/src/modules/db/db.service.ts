@@ -9,58 +9,107 @@ import { RequestContext } from '../auth/request-context.service';
 export class DbService {
   private pool?: Pool;
   private initPromise?: Promise<void>;
+  private lastError?: string;
   constructor(private readonly rc: RequestContext){
     const url = process.env.DATABASE_URL;
+    if (!url) {
+      if (process.env.DEV_DB_DEBUG === '1') {
+        // eslint-disable-next-line no-console
+        console.error('[db:init] DATABASE_URL missing in process.env (stub mode).');
+      }
+    }
     if (url) {
-  const needsSsl = /[?&]sslmode=require/.test(url) || /supabase\.(co|com)/.test(url);
+      if (process.env.DEV_DB_DEBUG === '1') {
+        // eslint-disable-next-line no-console
+        console.log('[db:init] raw url=', url);
+      }
+      const needsSsl = /[?&]sslmode=require/.test(url) || /supabase\.co/.test(url);
       let ssl: any = undefined;
       if (needsSsl) {
         const caPath = process.env.DATABASE_SSL_CA_PATH;
         const rejectUnauthorizedEnv = process.env.DATABASE_SSL_REJECT_UNAUTHORIZED;
+        const nodeEnv = process.env.NODE_ENV || 'development';
+        // Honor explicit CA bundle first
         if (caPath && fs.existsSync(caPath)) {
           ssl = { ca: fs.readFileSync(caPath, 'utf8'), rejectUnauthorized: true };
-        } else if (rejectUnauthorizedEnv === '0') {
-          // Dev-only opt-out
-          ssl = { rejectUnauthorized: false };
         } else {
-          // Default: require TLS but allow platform CA bundle to validate
-          ssl = { rejectUnauthorized: true };
+          // Determine whether to skip cert verification in local/dev contexts
+          const pgSslMode = (process.env.PGSSLMODE || '').toLowerCase();
+          const noVerifyModes = new Set(['allow', 'prefer', 'no-verify']);
+          const isDev = nodeEnv !== 'production';
+          const disableVerify = rejectUnauthorizedEnv === '0' || noVerifyModes.has(pgSslMode) || isDev;
+          ssl = { rejectUnauthorized: !disableVerify };
         }
       }
       // Defer creating the Pool until first use so we can pre-resolve IPv4 address asynchronously
       const u = new URL(url);
       this.initPromise = undefined;
       const createPool = async () => {
-        // Optional override via env (preferred in staging): use explicit IPv4 host
-        let hostForPg = process.env.DATABASE_HOST_IPV4 || process.env.DATABASE_HOST_OVERRIDE || u.hostname;
-        if (hostForPg === u.hostname) {
-          // No override provided: pre-resolve IPv4 address ourselves and connect to that literal to avoid IPv6
-          try {
-            const res = await dnsLookup(u.hostname, { family: 4, all: false });
-            hostForPg = typeof res === 'string' ? res : res.address;
-          } catch {
-            try { dns.setDefaultResultOrder?.('ipv4first'); } catch {}
-          }
+        // Prefer IPv4; resolve the hostname ourselves and pass IPv4 literal to pg
+        let host = u.hostname;
+        try {
+          const res = await dnsLookup(u.hostname, { family: 4, all: false });
+          host = typeof res === 'string' ? res : res.address;
+        } catch {
+          // Fallback: try forcing ipv4-first at runtime
+          try { (dns as any).setDefaultResultOrder?.('ipv4first'); } catch {}
         }
-        // Ensure TLS SNI uses the original hostname even if net dials IPv4
-        let sslOpts: any = ssl;
-        if (sslOpts && typeof sslOpts === 'object') {
-          sslOpts = { ...sslOpts, servername: u.hostname };
+        if (process.env.DEV_DB_DEBUG === '1') {
+          // eslint-disable-next-line no-console
+          console.log('[db:init] resolved host=', host, ' ssl=', !!ssl);
         }
         const cfg: any = {
-          host: hostForPg,
+          host,
           port: u.port ? Number(u.port) : 5432,
           database: decodeURIComponent(u.pathname.replace(/^\//, '')),
           user: decodeURIComponent(u.username),
           password: decodeURIComponent(u.password),
-          ssl: sslOpts,
+          ssl,
         };
-        this.pool = new Pool(cfg);
+        try {
+          this.pool = new Pool(cfg);
+        } catch (e: any) {
+          this.lastError = e?.message || String(e);
+          // eslint-disable-next-line no-console
+          console.error('[db] pool constructor failed:', this.lastError);
+          if (process.env.DEV_REQUIRE_DB === '1') throw e;
+          return; // leave in stub mode
+        }
+        // Probe connectivity early to surface auth/ssl errors now rather than first query later
+        try {
+          await (this.pool as any).query('select 1');
+          // eslint-disable-next-line no-console
+          console.log('[db] pool init success host=' + host + ' db=' + cfg.database + ' ssl=' + (ssl ? JSON.stringify(ssl) : 'none'));
+        } catch (e: any) {
+          this.lastError = e?.message || String(e);
+          // eslint-disable-next-line no-console
+          console.error('[db] initial connectivity test failed:', this.lastError);
+          // If DEV_REQUIRE_DB=1 set, throw to prevent silent stub mode
+          if (process.env.DEV_REQUIRE_DB === '1') throw e;
+        }
       };
-      this.initPromise = createPool();
+      // Start initialization immediately and awaitable via ensureReady()
+      this.initPromise = createPool().catch((e) => {
+        // Surface pool init errors but keep stub fallback to avoid crashing entire app
+        // eslint-disable-next-line no-console
+        const msg = e?.message || String(e);
+        console.error('[db] pool init failed:', msg);
+        this.lastError = msg;
+        this.pool = undefined;
+      });
     }
   }
   get isStub(){ return !this.pool; }
+  get status(){
+    return {
+      stub: this.isStub,
+      lastError: this.lastError,
+      hasEnvUrl: !!process.env.DATABASE_URL,
+      devRequireDb: process.env.DEV_REQUIRE_DB === '1',
+      devDbDebug: process.env.DEV_DB_DEBUG === '1'
+    };
+  }
+  async ensureReady(){ if (this.initPromise) await this.initPromise; }
   async query<T = any>(text: string, params?: any[]): Promise<{ rows: T[] }>{
     if (!this.pool) {
       if (this.initPromise) await this.initPromise;
