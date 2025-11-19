@@ -86,7 +86,37 @@ paths:
       tags: [Auth & Profile]
       summary: Invalidate other sessions
       security: [{ bearerAuth: [] }]
-      responses: { "204": { description: No Content } }
+      responses:
+        "200":
+          description: Revocation summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  userId: { type: string, format: uuid }
+                  revoked: { type: integer, description: "Count of sessions soft-revoked" }
+                  stub: { type: boolean, description: "Present when running in stub mode" }
+
+  /me/security/logout-all-supabase:
+    post:
+      tags: [Auth & Profile]
+      summary: Global Supabase sign-out for current bearer (admin API)
+      description: Uses Supabase Admin API to revoke all sessions for the bearer token presented. Requires service role env vars.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Result of global sign-out attempt
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  mode: { type: string, description: "Operation mode (admin.signOut.global)" }
+                  reason: { type: string }
+                  error: { type: string }
+                  hint: { type: string }
 
   /me/billing-profile:
     get:
@@ -247,7 +277,7 @@ paths:
           schema:
             type: number
         - in: query
-          name: radius
+          name: radiusKm
           schema:
             type: number
             default: 10
@@ -409,7 +439,7 @@ paths:
           schema:
             type: string
       requestBody: { $ref: "#/components/requestBodies/StartSession" }
-      responses: { "200": { $ref: "#/components/responses/SessionStart" } }
+      responses: { "201": { $ref: "#/components/responses/SessionStart" } }
 
   /sessions/end:
     post:
@@ -678,6 +708,207 @@ paths:
                         score: { type: number, description: Cosine similarity }
                         snippet: { type: string }
                         metadata: { type: object, additionalProperties: true }
+
+  /vector/search:
+    get:
+      tags: [Knowledge Base & Search]
+      summary: Vector search (GET convenience)
+      description: GET variant for quick testing in browsers. Accepts same semantics as POST but embedding passed via one of: embedding|e|query_embedding|vec.
+      parameters:
+        - in: query
+          name: target
+          required: true
+          schema: { type: string, enum: [kb, messages, notes, products, services, pets, vets] }
+        - in: query
+          name: topK
+          schema: { type: integer, default: 8, maximum: 50 }
+        - in: query
+          name: embedding
+          schema: { type: string, description: "JSON array string or comma-separated floats" }
+        - in: query
+          name: filter_ids
+          schema: { type: string, description: "JSON array string or comma-separated UUIDs" }
+      responses:
+        "200":
+          description: Nearest neighbors
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string, format: uuid }
+                        score: { type: number }
+                        snippet: { type: string }
+                        metadata: { type: object, additionalProperties: true }
+
+  /vector/debug:
+    get:
+      tags: [Knowledge Base & Search]
+      summary: Embedding debug stats (pets)
+      responses:
+        "200":
+          description: Counts of rows and embeddings presence
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pets: { type: integer }
+                  pets_with_emb: { type: integer }
+                  sample: { type: array, items: { type: object, properties: { id: { type: string }, has_embedding: { type: boolean } } } }
+
+  /vector/pets:
+    get:
+      tags: [Knowledge Base & Search]
+      summary: List recent pets with embedding flag
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50, minimum: 1, maximum: 200 }
+      responses:
+        "200":
+          description: Pet rows
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        has_embedding: { type: boolean }
+
+  /search:
+    get:
+      tags: [Knowledge Base & Search]
+      summary: Lexical KB search (bilingual)
+      description: Combines English + Spanish websearch queries; falls back to ILIKE pattern.
+      parameters:
+        - in: query
+          name: type
+          schema: { type: string, enum: [kb], default: kb }
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 10, maximum: 50 }
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { type: object, additionalProperties: true } }
+                  took_ms: { type: integer }
+                  lexical: { type: boolean }
+
+  /_db/status:
+    get:
+      tags: [System]
+      summary: Database connectivity + stub status
+      responses:
+        "200":
+          description: DB status snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /subscriptions/usage:
+    get:
+      tags: [Plans & Subscriptions]
+      summary: Current usage snapshot (legacy path)
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Usage or no active subscription
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  msg: { type: string }
+                  usage: { $ref: "#/components/schemas/Usage" }
+
+  /subscriptions/reserve-chat:
+    post:
+      tags: [Plans & Subscriptions]
+      summary: Reserve chat entitlement for existing session
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId: { type: string, format: uuid }
+                sessionId: { type: string, format: uuid }
+              required: [sessionId]
+      responses:
+        "200": { description: Reservation outcome, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+
+  /subscriptions/reserve-video:
+    post:
+      tags: [Plans & Subscriptions]
+      summary: Reserve video entitlement for existing session
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId: { type: string, format: uuid }
+                sessionId: { type: string, format: uuid }
+              required: [sessionId]
+      responses:
+        "200": { description: Reservation outcome, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+
+  /subscriptions/commit:
+    post:
+      tags: [Plans & Subscriptions]
+      summary: Commit (finalize) entitlement consumption
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                consumptionId: { type: string, format: uuid }
+              required: [consumptionId]
+      responses:
+        "200": { description: Commit result, content: { application/json: { schema: { type: object, properties: { ok: { type: boolean } } } } } }
+
+  /subscriptions/release:
+    post:
+      tags: [Plans & Subscriptions]
+      summary: Release (rollback) entitlement reservation
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                consumptionId: { type: string, format: uuid }
+              required: [consumptionId]
+      responses:
+        "200": { description: Release result, content: { application/json: { schema: { type: object, properties: { ok: { type: boolean } } } } } }
 
   /vector/upsert:
     post:
@@ -1419,8 +1650,22 @@ components:
         issued_at: { type: string, format: date-time }
     SessionStart:
       type: object
+      description: Start session response including entitlement or overage info
       properties:
-        session: { $ref: "#/components/schemas/Session" }
+        ok: { type: boolean }
+        sessionId: { type: string, format: uuid }
+        kind: { type: string, enum: [chat, video] }
+        consumptionId: { type: string, format: uuid, nullable: true }
+        overage: { type: boolean }
+        overageReason: { type: string, nullable: true }
+        payment: { type: object, nullable: true, properties: {
+          stub: { type: boolean },
+          status: { type: string },
+          type: { type: string },
+          currency: { type: string },
+          amount: { type: integer, nullable: true },
+          reason: { type: string, nullable: true }
+        } }
         video: { type: object, nullable: true, properties: { roomId: { type: string }, token: { type: string } } }
     Session:
       type: object

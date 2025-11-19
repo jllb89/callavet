@@ -247,3 +247,38 @@ API calls: Web includes Authorization: Bearer <sb-access-token>; Gateway verifie
 Profile: DB stores only profile/billing preferences; changes via /me routes.
 Logout current device: client calls supabase.auth.signOut(); no Gateway change needed.
 Logout all devices (admin or user-initiated): Gateway calls Supabase Admin API to invalidate refresh tokens for that user (requires service role key).
+
+
+
+Admin test buttons expansion
+
+Add buttons for:
+GET /me/security/sessions
+POST /me/security/logout-all
+POST /me/security/logout-all-supabase
+Tag logs with ctx: sessions, logout-all, logout-all-supabase.
+Token health badge
+
+Decode JWT client-side (without secret) just to show exp countdown and whether it’s within 2 minutes of expiry.
+Basic subscription smoke
+
+Add a test POST /subscriptions/checkout (plan code input) and then a polling GET /subscriptions/usage.
+For dev, you can stub Stripe if keys absent, returning a stub:true payload.
+Session start/end flow
+
+Buttons for POST /sessions/start (mode: chat/video) → capture response → POST /sessions/end.
+Log chat/video session provisioning to ensure entitlement functions are wired.
+Logout-all verification
+
+After POST /me/security/logout-all-supabase, try any subsequent authorized call; Supabase refresh should fail and user re-auth forced.
+Search endpoint demo
+
+Minimal input field for GET /search?q=... and log combined lexical/semantic result counts & top scores.
+Observability polish
+
+Add a “Clear logs” and maybe an auto-scroll toggle.
+Persist last /me profile to localStorage for quick diff between sessions.
+Hardening
+
+If RLS is confirmed, remove placeholder.local email fallback (only use claims.email).
+Consider server-side provisioning after sign-up via webhook to centralize logic, and keep GET /me strictly read-only.

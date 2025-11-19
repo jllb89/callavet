@@ -341,6 +341,67 @@ export default function Home() {
             </div>
           </div>
         </section>
+        {/* Auth security endpoints */}
+        <section className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+          <h3 className="mb-2 text-sm font-medium text-zinc-200">Security & Sessions</h3>
+          <div className="grid gap-2 sm:grid-cols-3">
+            <button
+              disabled={loading}
+              onClick={async () => {
+                setLoading(true);
+                try {
+                  if (!supabase) { log("warn", "Supabase client not initialized", undefined, "GET /me/security/sessions"); return; }
+                  const current = (await supabase.auth.getSession()).data.session;
+                  if (!current) { log("warn", "No session. Sign in first.", undefined, "GET /me/security/sessions"); return; }
+                  const res = await fetch(`${gatewayUrl}/me/security/sessions`, { headers: { Authorization: `Bearer ${current.access_token}` } });
+                  const body = await res.json().catch(() => ({}));
+                  log("info", `GET /me/security/sessions -> ${res.status}`, body, "GET /me/security/sessions");
+                } catch (e) { log("error", "GET /me/security/sessions failed", e, "GET /me/security/sessions"); }
+                finally { setLoading(false); }
+              }}
+              className="rounded-md bg-zinc-800 px-3 py-2 text-xs text-zinc-100 hover:bg-zinc-700 disabled:opacity-50"
+            >
+              List Sessions
+            </button>
+            <button
+              disabled={loading}
+              onClick={async () => {
+                setLoading(true);
+                try {
+                  if (!supabase) { log("warn", "Supabase client not initialized", undefined, "POST /me/security/logout-all"); return; }
+                  const current = (await supabase.auth.getSession()).data.session;
+                  if (!current) { log("warn", "No session. Sign in first.", undefined, "POST /me/security/logout-all"); return; }
+                  const res = await fetch(`${gatewayUrl}/me/security/logout-all`, { method: 'POST', headers: { Authorization: `Bearer ${current.access_token}` } });
+                  const body = await res.json().catch(() => ({}));
+                  log("info", `POST /me/security/logout-all -> ${res.status}`, body, "POST /me/security/logout-all");
+                } catch (e) { log("error", "POST /me/security/logout-all failed", e, "POST /me/security/logout-all"); }
+                finally { setLoading(false); }
+              }}
+              className="rounded-md bg-zinc-800 px-3 py-2 text-xs text-zinc-100 hover:bg-zinc-700 disabled:opacity-50"
+            >
+              Logout All (soft)
+            </button>
+            <button
+              disabled={loading}
+              onClick={async () => {
+                setLoading(true);
+                try {
+                  if (!supabase) { log("warn", "Supabase client not initialized", undefined, "POST /me/security/logout-all-supabase"); return; }
+                  const current = (await supabase.auth.getSession()).data.session;
+                  if (!current) { log("warn", "No session. Sign in first.", undefined, "POST /me/security/logout-all-supabase"); return; }
+                  const res = await fetch(`${gatewayUrl}/me/security/logout-all-supabase`, { method: 'POST', headers: { Authorization: `Bearer ${current.access_token}` } });
+                  const body = await res.json().catch(() => ({}));
+                  log("info", `POST /me/security/logout-all-supabase -> ${res.status}`, body, "POST /me/security/logout-all-supabase");
+                } catch (e) { log("error", "POST /me/security/logout-all-supabase failed", e, "POST /me/security/logout-all-supabase"); }
+                finally { setLoading(false); }
+              }}
+              className="rounded-md bg-zinc-800 px-3 py-2 text-xs text-zinc-100 hover:bg-zinc-700 disabled:opacity-50"
+            >
+              Logout All (Supabase)
+            </button>
+          </div>
+          <p className="mt-2 text-[10px] text-zinc-500 leading-relaxed">Soft logout revokes tracked sessions in app DB; Supabase global logout invalidates refresh tokens (requires service role key on server).</p>
+        </section>
 
         <section className="flex flex-col gap-2">
           <h3 className="text-lg font-medium text-zinc-900 dark:text-zinc-50">Current user/session</h3>

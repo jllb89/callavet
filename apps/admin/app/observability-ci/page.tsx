@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
+import { createClient, SupabaseClient, Session, User, AuthChangeEvent } from "@supabase/supabase-js";
 import YAML from "yaml";
 
 type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "WS";
@@ -35,7 +36,12 @@ const ROUTE_STATUS: Record<string, 'done'|'todo'> = {
   'GET /time': 'done',
   'POST /sessions/start': 'done',
   'POST /sessions/end': 'done',
+  'GET /sessions': 'done',
+  'GET /sessions/:sessionId': 'done',
+  'PATCH /sessions/:sessionId': 'done',
   'GET /subscriptions/usage': 'done',
+  'GET /subscriptions/usage/current': 'done',
+  'GET /subscriptions/my': 'done',
   'GET /centers/near': 'done',
   'POST /vector/search': 'done',
   'POST /vector/upsert': 'done',
@@ -83,7 +89,7 @@ const STATIC_GROUPS: EndpointGroup[] = [
     name: "Auth & Profile",
     items: [
       { method: "GET", path: "/me", who: "User/Vet/Admin", description: "Fetch current authenticated user's profile (basic fields + role + timezone)." },
-      { method: "PATCH", path: "/me", who: "User/Vet/Admin", bodySample: { name: "Jane Doe", timezone: "America/Mexico_City" }, description: "Update mutable profile fields: name, timezone (IANA)." },
+      { method: "PATCH", path: "/me", who: "User/Vet/Admin", description: "Update mutable profile fields: name, timezone (IANA)." },
       { method: "GET", path: "/me/security/sessions", who: "User/Vet/Admin", description: "List active auth sessions (tokens) for this user." },
       { method: "POST", path: "/me/security/logout-all", who: "User/Vet/Admin", bodySample: {}, description: "Revoke / delete all active sessions for this user." },
   { method: "POST", path: "/me/security/logout-all-supabase", who: "Admin", bodySample: {}, description: "Invalidate all Supabase refresh tokens for this user via Admin API (service key required)." },
@@ -343,9 +349,12 @@ function buildGroupsFromOpenAPI(spec: any): EndpointGroup[] {
 }
 
 function buildUrl(base: string, endpoint: Endpoint, pathInputs: Record<string, string>, queryInputs: Record<string, string>) {
+  // Preserve :param placeholders if missing to avoid generating // in URLs
   let path = endpoint.path;
   for (const [k, v] of Object.entries(pathInputs)) {
-    path = path.replace(`:${k}`, encodeURIComponent(v || ""));
+    if (v && v.trim().length) {
+      path = path.replace(`:${k}`, encodeURIComponent(v));
+    }
   }
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(queryInputs)) {
@@ -374,9 +383,9 @@ async function doFetch(method: HttpMethod, url: string, headers: Record<string, 
   return { ok: res.ok, status: res.status, json, text };
 }
 
-function Section({ title, children, description, descriptionClassName }: { title: string; children?: any; description?: string; descriptionClassName?: string }) {
+function Section({ title, children, description, descriptionClassName, className }: { title: string; children?: any; description?: string; descriptionClassName?: string; className?: string }) {
   return (
-    <section className="rounded-xl bg-zinc-950/60 p-5">
+    <section className={`rounded-xl p-5 ${className ?? 'bg-zinc-950/60'}`}>
       <div className="mb-3 flex items-center justify-between">
         <h2 className="text-lg font-semibold text-zinc-100">{title}</h2>
         {description && <p className={`${descriptionClassName || 'text-sm'} text-zinc-400`}>{description}</p>}
@@ -384,6 +393,12 @@ function Section({ title, children, description, descriptionClassName }: { title
       {children}
     </section>
   );
+}
+
+function truncateToken(token?: string | null) {
+  if (!token) return "<none>";
+  if (token.length <= 48) return token;
+  return `${token.slice(0, 20)}…${token.slice(-12)} (len:${token.length})`;
 }
 
 function Stat({ label, value, hint }: { label: string; value: string | number; hint?: string }) {
@@ -406,7 +421,253 @@ export default function ObservabilityCIPage() {
   const [bearerToken, setBearerToken] = useState<string>("");
   const [useIdem, setUseIdem] = useState<boolean>(false);
   const [idemKey, setIdemKey] = useState<string>("");
-  const [activeSection, setActiveSection] = useState<"database" | "api">("api");
+  const [activeSection, setActiveSection] = useState<"database" | "api" | "auth">("api");
+  const bearerTokenIssue = useMemo(() => {
+    const t = (bearerToken || '').trim();
+    if (!t) return null;
+    if (t.includes('…')) return 'Token looks truncated (contains …). Use the full value via Copy token.';
+    const dotCount = (t.match(/\./g) || []).length;
+    if (dotCount !== 2) return 'Expected a JWT with 3 segments (two dots).';
+    if (t.length < 100) return 'Token seems too short; likely incomplete.';
+    return null;
+  }, [bearerToken]);
+    /* ---------------- Auth & Sessions Debug (from home page) ---------------- */
+    function authEventLog(level: "info" | "warn" | "error", msg: string, data?: any, ctx?: string) {
+      const tag = `[auth:${level}]`;
+      if (level === 'error') console.error(tag, ctx ? `(${ctx})` : '', msg, data || '');
+      else if (level === 'warn') console.warn(tag, ctx ? `(${ctx})` : '', msg, data || '');
+      else console.log(tag, ctx ? `(${ctx})` : '', msg, data || '');
+      // Mirror into global Logs panel with API-like shape for visibility.
+      const now = Date.now();
+      setLogs((l) => [
+        {
+          kind: 'AUTH',
+          ts: now,
+          reqTs: now,
+          resTs: now,
+          method: 'AUTH',
+          url: ctx ? `auth/${ctx}: ${msg}` : `auth: ${msg}`,
+          status: level === 'error' ? 500 : 200,
+          ok: level !== 'error',
+          ms: 0,
+          req: data && (level !== 'error') ? { body: typeof data === 'string' ? data : JSON.stringify(data).slice(0, 2000) } : undefined,
+          res: level === 'error' && data ? { body: typeof data === 'string' ? data : JSON.stringify(data).slice(0, 2000) } : undefined,
+        },
+        ...l,
+      ].slice(0, 300));
+    }
+    const [sbUrl, setSbUrl] = useState<string | undefined>(undefined);
+    const [sbKey, setSbKey] = useState<string | undefined>(undefined);
+    const [email, setEmail] = useState("lopezb.jl@gmail.com");
+    const [password, setPassword] = useState("dev-password-123");
+    const [authLoading, setAuthLoading] = useState(false);
+    const [hasMountedAuth, setHasMountedAuth] = useState(false);
+    const authMounted = useRef(false);
+    const supabase: SupabaseClient | null = useMemo(() => {
+      if (typeof window === 'undefined') return null;
+      const finalUrl = sbUrl || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+      const finalKey = sbKey || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+      if (!finalUrl || !finalKey) return null;
+      try {
+        return createClient(finalUrl, finalKey, { auth: { persistSession: true, autoRefreshToken: true } });
+      } catch {
+        return null;
+      }
+    }, [sbUrl, sbKey]);
+    const [session, setSession] = useState<Session | null>(null);
+    const [user, setUser] = useState<User | null>(null);
+    function summarizeSession(s: Session | null) {
+      if (!s) return { session: null };
+      const at = s.access_token;
+      return {
+        user_id: s.user.id,
+        is_anonymous: (s.user as any).is_anonymous || false,
+        expires_at: s.expires_at,
+        access_token: at ? `${at.slice(0, 24)}…${at.slice(-16)} (len:${at.length})` : null,
+        refresh_token: s.refresh_token ? s.refresh_token.slice(0, 12) : null
+      };
+    }
+    useEffect(() => {
+      if (authMounted.current) return;
+      authMounted.current = true;
+      setHasMountedAuth(true);
+      if (typeof window !== 'undefined') {
+        const envUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+        const envKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+        const storedUrl = window.localStorage.getItem('sb.url') || undefined;
+        const storedKey = window.localStorage.getItem('sb.key') || undefined;
+        setSbUrl(storedUrl || envUrl);
+        setSbKey(storedKey || envKey);
+        if (!(storedUrl || envUrl) || !(storedKey || envKey)) {
+          authEventLog('warn', 'Missing Supabase config. Provide NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY, or fill them below.', { envUrl: !!envUrl, envKey: !!envKey, storedUrl: !!storedUrl, storedKey: !!storedKey }, 'env');
+        }
+      }
+      if (!supabase) return;
+      (async () => {
+        const { data, error } = await supabase.auth.getSession();
+        if (error) authEventLog('error', 'getSession failed', error, 'auth-init');
+        else {
+          setSession(data.session);
+          if (data.session) authEventLog('info', 'Initial session', summarizeSession(data.session), 'auth-init');
+          else authEventLog('info', 'No session at init', undefined, 'auth-init');
+          if (data.session) {
+            const u = await supabase.auth.getUser();
+            if (u.error) authEventLog('error', 'getUser failed', u.error, 'auth-init'); else setUser(u.data.user);
+          }
+        }
+      })();
+      const lastEventRef = { key: '' } as { key: string };
+      const { data: sub } = supabase.auth.onAuthStateChange((event: AuthChangeEvent, s: Session | null) => {
+        setSession(s);
+        const key = `${event}|${s?.user?.id || 'none'}|${s?.access_token?.slice(0,16) || 'no-token'}`;
+        if (key !== lastEventRef.key) {
+          authEventLog('info', `Auth event: ${event}`, summarizeSession(s), 'auth-state');
+          lastEventRef.key = key;
+        }
+        setUser(s?.user || null);
+      });
+      return () => { sub.subscription.unsubscribe(); };
+    }, [supabase]);
+    async function signInEmail() {
+      setAuthLoading(true);
+      try {
+        if (!supabase) { authEventLog('warn', 'Supabase client not initialized', undefined, 'email-password'); return; }
+        if (!email || !password) { authEventLog('warn', 'Email and password required', undefined, 'email-password'); return; }
+        const t0 = performance.now(); const reqTs = Date.now();
+        const r1 = await supabase.auth.signInWithPassword({ email, password });
+        if (r1.error) {
+          authEventLog('warn', 'signInWithPassword failed, attempting signUp', r1.error, 'email-password');
+          const t1 = performance.now(); const reqTs2 = Date.now();
+          const r2 = await supabase.auth.signUp({ email, password });
+          if (r2.error) throw r2.error;
+          setLogs((l)=>[
+            { kind: 'AUTH', ts: reqTs2, reqTs: reqTs2, resTs: reqTs2, method: 'AUTH', url: 'auth/supabase.signUp', status: 200, ok: true, ms: Math.round(performance.now()-t1), req: { body: JSON.stringify({ email: '<redacted>' }) }, res: { body: JSON.stringify(summarizeSession(r2.data.session), null, 2) } },
+            ...l
+          ].slice(0,300));
+        } else {
+          // success path handled by structured log below; avoid duplicate "Signed in" info event
+        }
+        // Push log for signInWithPassword
+        setLogs((l)=>[
+          { kind: 'AUTH', ts: reqTs, reqTs, resTs: reqTs, method: 'AUTH', url: 'auth/supabase.signInWithPassword', status: r1.error ? 400 : 200, ok: !r1.error, ms: Math.round(performance.now()-t0), req: { body: JSON.stringify({ email: '<redacted>' }) }, res: { body: JSON.stringify(summarizeSession(r1.data.session), null, 2) } },
+          ...l
+        ].slice(0,300));
+      } catch (e) { authEventLog('error', 'Email/password auth error', e, 'email-password'); }
+      finally { setAuthLoading(false); }
+    }
+    async function signInAnon() {
+      setAuthLoading(true);
+      try {
+        if (!supabase) { authEventLog('warn', 'Supabase client not initialized', undefined, 'anonymous'); return; }
+        const t0 = performance.now(); const reqTs = Date.now();
+        const { data, error } = await supabase.auth.signInAnonymously();
+        if (error) throw error;
+        setLogs((l)=>[
+          { kind: 'AUTH', ts: reqTs, reqTs, resTs: reqTs, method: 'AUTH', url: 'auth/supabase.signInAnonymously', status: 200, ok: true, ms: Math.round(performance.now()-t0), res: { body: JSON.stringify(summarizeSession(data.session), null, 2) } },
+          ...l
+        ].slice(0,300));
+      } catch (e) { authEventLog('error', "Anonymous sign-in failed. Ensure 'Anonymous' provider is enabled in Supabase Auth.", e, 'anonymous'); }
+      finally { setAuthLoading(false); }
+    }
+    async function signOutCurrent() {
+      setAuthLoading(true);
+      try {
+        if (!supabase) { authEventLog('warn', 'Supabase client not initialized', undefined, 'signout'); return; }
+        const t0 = performance.now(); const reqTs = Date.now();
+        const { error } = await supabase.auth.signOut();
+        if (error) throw error;
+        setLogs((l)=>[
+          { kind: 'AUTH', ts: reqTs, reqTs, resTs: reqTs, method: 'AUTH', url: 'auth/supabase.signOut', status: 200, ok: true, ms: Math.round(performance.now()-t0), res: { body: 'Signed out (current device)' } },
+          ...l
+        ].slice(0,300));
+      } catch (e) { authEventLog('error', 'Sign out failed', e, 'signout'); }
+      finally { setAuthLoading(false); }
+    }
+    async function callMe() {
+      setAuthLoading(true);
+      try {
+        if (!supabase) { authEventLog('warn', 'Supabase client not initialized', undefined, 'GET /me'); return; }
+        const current = (await supabase.auth.getSession()).data.session;
+        if (!current) { authEventLog('warn', 'No session. Sign in first.', undefined, 'GET /me'); return; }
+        const url = `${gatewayUrl}/me`;
+        const headers = { Authorization: `Bearer ${current.access_token}` } as Record<string,string>;
+        const t0 = performance.now(); const reqTs = Date.now();
+        const res = await fetch(url, { headers });
+        const ms = Math.round(performance.now()-t0);
+        const body = await res.text();
+        setLogs((l)=>[
+          { kind: 'AUTH', ts: reqTs, reqTs, resTs: reqTs, method: 'GET', url, status: res.status, ok: res.ok, ms, req: { headers }, res: { body: body.slice(0,4000) } },
+          ...l
+        ].slice(0,300));
+      } catch (e) { authEventLog('error', 'GET /me failed', e, 'GET /me'); }
+      finally { setAuthLoading(false); }
+    }
+    async function copyToken() {
+      try {
+        if (!supabase) { authEventLog('warn', 'Supabase client not initialized', undefined, 'copy-token'); return; }
+        const current = (await supabase.auth.getSession()).data.session;
+        const token = current?.access_token || '';
+        await navigator.clipboard.writeText(token);
+        authEventLog('info', 'Access token copied to clipboard', { preview: token ? `${token.slice(0,16)}…` : '<none>' }, 'copy-token');
+      } catch (e) { authEventLog('error', 'Copy token failed', e, 'copy-token'); }
+    }
+    async function listSessions() {
+      setAuthLoading(true);
+      try {
+        if (!supabase) { authEventLog('warn', 'Supabase client not initialized', undefined, 'GET /me/security/sessions'); return; }
+        const current = (await supabase.auth.getSession()).data.session;
+        if (!current) { authEventLog('warn', 'No session. Sign in first.', undefined, 'GET /me/security/sessions'); return; }
+        const url = `${gatewayUrl}/me/security/sessions`;
+        const headers = { Authorization: `Bearer ${current.access_token}` } as Record<string,string>;
+        const t0 = performance.now(); const reqTs = Date.now();
+        const res = await fetch(url, { headers });
+        const ms = Math.round(performance.now()-t0);
+        const body = await res.text();
+        setLogs((l)=>[
+          { kind: 'AUTH', ts: reqTs, reqTs, resTs: reqTs, method: 'GET', url, status: res.status, ok: res.ok, ms, req: { headers }, res: { body: body.slice(0,4000) } },
+          ...l
+        ].slice(0,300));
+      } catch (e) { authEventLog('error', 'GET /me/security/sessions failed', e, 'GET /me/security/sessions'); }
+      finally { setAuthLoading(false); }
+    }
+    async function logoutAllApp() {
+      setAuthLoading(true);
+      try {
+        if (!supabase) { authEventLog('warn', 'Supabase client not initialized', undefined, 'POST /me/security/logout-all'); return; }
+        const current = (await supabase.auth.getSession()).data.session;
+        if (!current) { authEventLog('warn', 'No session. Sign in first.', undefined, 'POST /me/security/logout-all'); return; }
+        const url = `${gatewayUrl}/me/security/logout-all`;
+        const headers = { Authorization: `Bearer ${current.access_token}` } as Record<string,string>;
+        const t0 = performance.now(); const reqTs = Date.now();
+        const res = await fetch(url, { method: 'POST', headers });
+        const ms = Math.round(performance.now()-t0);
+        const body = await res.text();
+        setLogs((l)=>[
+          { kind: 'AUTH', ts: reqTs, reqTs, resTs: reqTs, method: 'POST', url, status: res.status, ok: res.ok, ms, req: { headers }, res: { body: body.slice(0,4000) } },
+          ...l
+        ].slice(0,300));
+      } catch (e) { authEventLog('error', 'POST /me/security/logout-all failed', e, 'POST /me/security/logout-all'); }
+      finally { setAuthLoading(false); }
+    }
+    async function logoutAllSupabase() {
+      setAuthLoading(true);
+      try {
+        if (!supabase) { authEventLog('warn', 'Supabase client not initialized', undefined, 'POST /me/security/logout-all-supabase'); return; }
+        const current = (await supabase.auth.getSession()).data.session;
+        if (!current) { authEventLog('warn', 'No session. Sign in first.', undefined, 'POST /me/security/logout-all-supabase'); return; }
+        const url = `${gatewayUrl}/me/security/logout-all-supabase`;
+        const headers = { Authorization: `Bearer ${current.access_token}` } as Record<string,string>;
+        const t0 = performance.now(); const reqTs = Date.now();
+        const res = await fetch(url, { method: 'POST', headers });
+        const ms = Math.round(performance.now()-t0);
+        const body = await res.text();
+        setLogs((l)=>[
+          { kind: 'AUTH', ts: reqTs, reqTs, resTs: reqTs, method: 'POST', url, status: res.status, ok: res.ok, ms, req: { headers }, res: { body: body.slice(0,4000) } },
+          ...l
+        ].slice(0,300));
+      } catch (e) { authEventLog('error', 'POST /me/security/logout-all-supabase failed', e, 'POST /me/security/logout-all-supabase'); }
+      finally { setAuthLoading(false); }
+    }
   const [logs, setLogs] = useState<any[]>([]);
   const [useSpec, setUseSpec] = useState<boolean>(true);
   const [specGroups, setSpecGroups] = useState<EndpointGroup[] | null>(null);
@@ -584,6 +845,24 @@ export default function ObservabilityCIPage() {
                       )}
                     </span>
                   </button>
+                  <button
+                    aria-pressed={activeSection==='auth'}
+                    onClick={() => setActiveSection('auth')}
+                    className={`text-left text-sm transition focus:outline-none font-medium ${
+                      activeSection==='auth'
+                        ? 'text-zinc-200'
+                        : 'text-zinc-300 hover:text-zinc-100'
+                    }`}
+                  >
+                    <span className="relative inline-block">
+                      <span className="">Auth & Sessions</span>
+                      {activeSection==='auth' && (
+                        <span aria-hidden className="absolute inset-0 bg-gradient-to-r from-emerald-300 to-cyan-300 bg-clip-text text-transparent">
+                          Auth & Sessions
+                        </span>
+                      )}
+                    </span>
+                  </button>
                 </div>
               </nav>
 
@@ -610,6 +889,9 @@ export default function ObservabilityCIPage() {
                   <div>
                     <label className="mb-1 block text-xs text-zinc-400">Bearer token (Authorization)</label>
                     <input value={bearerToken} onChange={(e) => setBearerToken(e.target.value)} placeholder="eyJhbGciOi..." className="w-full rounded-md border-0 bg-zinc-950 px-3 py-2 text-sm font-mono outline-none focus:ring-1 focus:ring-emerald-700/40" />
+                    {bearerTokenIssue && (
+                      <div className="mt-1 text-[10px] text-amber-300">{bearerTokenIssue}</div>
+                    )}
                   </div>
                   <div>
                     <label className="mb-1 block text-xs text-zinc-400">Idempotency-Key</label>
@@ -632,7 +914,7 @@ export default function ObservabilityCIPage() {
           </aside>
 
           {/* Main content */}
-          <main className="space-y-6 overflow-y-auto h-[calc(100vh-150px)] pr-1 rounded-xl border border-zinc-800  p-4">
+          <main className={`space-y-6 overflow-y-auto h-[calc(100vh-150px)] pr-1 rounded-xl border border-zinc-800  p-4 ${activeSection==='auth' ? 'bg-zinc-900/70' : ''}`}>
             {activeSection === 'database' ? (
               <Section title="Database (structure)" description="Tables & fields">
                 <div className="grid gap-2 text-sm text-zinc-300">
@@ -645,7 +927,7 @@ export default function ObservabilityCIPage() {
                   <div className="rounded-md border border-zinc-800 bg-zinc-900 p-3"><div className="font-medium">payments / invoices</div><div className="text-xs text-zinc-400">id, user_id, amount, currency, status, metadata</div></div>
                 </div>
               </Section>
-            ) : (
+            ) : activeSection === 'api' ? (
               <Section title="API testing" description="Grouped endpoints with live calls" descriptionClassName="text-xs">
                 <div className="mb-3 flex items-center justify-between">
                   <label className="inline-flex items-center gap-2 text-xs text-zinc-300" title="Fetch /openapi.yaml to build dynamic endpoint list; uncheck to use static fallback">
@@ -655,6 +937,59 @@ export default function ObservabilityCIPage() {
                   <span className="text-[11px] text-zinc-500">{useSpec ? (specGroups ? `${specGroups.length} groups` : 'loading…') : 'using static list'}</span>
                 </div>
                 <ApiTester groups={useSpec && specGroups ? specGroups : STATIC_GROUPS} baseByHost={baseByHost} userId={userId} extraHeaders={extraHeaders} bearerToken={bearerToken} useIdem={useIdem} idemKey={idemKey} onGlobalLog={(e) => pushLog(e)} />
+              </Section>
+            ) : (
+              <Section title="Auth & Sessions" description="Supabase auth flows and security endpoints" descriptionClassName="text-xs" className="bg-zinc-900/80">
+                <div className="space-y-6">
+                  {/* Config */}
+                  <div className="grid gap-4 sm:grid-cols-3">
+                    <div>
+                      <label className="mb-1 block text-xs text-zinc-400">Supabase URL</label>
+                      <input value={sbUrl || ''} onChange={(e)=>{ setSbUrl(e.target.value); if (typeof window!=='undefined') window.localStorage.setItem('sb.url', e.target.value);} } className="w-full rounded-md border-0 bg-zinc-950 px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-emerald-700/40" />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-xs text-zinc-400">Anon key</label>
+                      <input value={sbKey || ''} onChange={(e)=>{ setSbKey(e.target.value); if (typeof window!=='undefined') window.localStorage.setItem('sb.key', e.target.value);} } className="w-full rounded-md border-0 bg-zinc-950 px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-emerald-700/40" />
+                    </div>
+                    {/* auto-saved, no explicit save button */}
+                  </div>
+                  {/* Email/password */}
+                  <div className="grid gap-4 sm:grid-cols-3">
+                    <div>
+                      <label className="mb-1 block text-xs text-zinc-400">Email</label>
+                      <input value={email} onChange={(e)=>setEmail(e.target.value)} className="w-full rounded-md border-0 bg-zinc-950 px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-emerald-700/40" />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-xs text-zinc-400">Password</label>
+                      <input type="password" value={password} onChange={(e)=>setPassword(e.target.value)} className="w-full rounded-md border-0 bg-zinc-950 px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-emerald-700/40" />
+                    </div>
+                    <div className="flex items-end gap-2" />
+                  </div>
+                  {/* Actions */}
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    <button disabled={authLoading} onClick={signInEmail} className="rounded-md bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50">{authLoading ? 'Working…' : 'Login / Sign-up'}</button>
+                    <button disabled={authLoading} onClick={signInAnon} className="rounded-md bg-zinc-800 px-3 py-2 text-xs text-zinc-100 hover:bg-zinc-700 disabled:opacity-50">Anon</button>
+                    <button disabled={authLoading} onClick={signOutCurrent} className="rounded-md bg-zinc-800 px-3 py-2 text-xs text-zinc-100 hover:bg-zinc-700 disabled:opacity-50">Logout</button>
+                    <button disabled={authLoading} onClick={callMe} className="rounded-md bg-zinc-800 px-3 py-2 text-xs text-zinc-100 hover:bg-zinc-700 disabled:opacity-50">GET /me</button>
+                    <button disabled={authLoading} onClick={copyToken} className="rounded-md bg-zinc-800 px-3 py-2 text-xs text-zinc-100 hover:bg-zinc-700 disabled:opacity-50">Copy token</button>
+                    <button disabled={authLoading} onClick={listSessions} className="rounded-md bg-zinc-800 px-3 py-2 text-xs text-zinc-100 hover:bg-zinc-700 disabled:opacity-50">List sessions</button>
+                    <button disabled={authLoading} onClick={logoutAllApp} className="rounded-md bg-zinc-800 px-3 py-2 text-xs text-zinc-100 hover:bg-zinc-700 disabled:opacity-50">Logout all (soft)</button>
+                    <button disabled={authLoading} onClick={logoutAllSupabase} className="rounded-md bg-zinc-800 px-3 py-2 text-xs text-zinc-100 hover:bg-zinc-700 disabled:opacity-50">Logout all (Supabase)</button>
+                    <div className="rounded-md border border-zinc-800 bg-zinc-950 p-2 text-[10px] text-zinc-400">Client initialized: {hasMountedAuth ? String(!!supabase) : '…'}</div>
+                  </div>
+                  <p className="text-[10px] text-zinc-500">Soft logout revokes app-tracked sessions; Supabase global logout invalidates refresh tokens.</p>
+                  {/* Current user/session */}
+                  <div className="mt-4 rounded-lg border border-zinc-800 bg-zinc-950 p-4">
+                    <h4 className="mb-2 text-sm font-medium text-zinc-200">Current user/session</h4>
+                    <div className="grid gap-1 text-sm text-zinc-300">
+                      <div>User ID: {user?.id ?? "<none>"}</div>
+                      <div>Email: {user?.email ?? "<none>"}</div>
+                      <div>Anonymous: {String(((user as any)?.is_anonymous) ?? ((user?.app_metadata as any)?.provider === 'anon'))}</div>
+                      <div>Access Token: {truncateToken(session?.access_token)}</div>
+                      <div>Expires At: {session?.expires_at ?? '-'}</div>
+                    </div>
+                  </div>
+                </div>
               </Section>
             )}
           </main>
@@ -716,10 +1051,16 @@ export default function ObservabilityCIPage() {
 
 function LogsPanel({ logs }: { logs: Array<any> }) {
   const [copied, setCopied] = useState(false);
+  const [filter, setFilter] = useState<'ALL'|'API'|'AUTH'>('ALL');
+  const [beautify, setBeautify] = useState<boolean>(true);
+  const filtered = useMemo(() => {
+    if (filter === 'ALL') return logs;
+    return logs.filter((l) => (l.kind || (l.method === 'AUTH' ? 'AUTH' : 'API')) === filter);
+  }, [logs, filter]);
   async function copyAllLogs() {
     try {
       const parts: string[] = [];
-      for (const l of logs) {
+      for (const l of filtered) {
         const lines: string[] = [];
         lines.push(`[${l.method}] ${l.url}`);
         lines.push(`Status: ${l.status} ${l.ok ? 'OK' : 'ERR'} (${l.ms} ms)`);
@@ -730,15 +1071,33 @@ function LogsPanel({ logs }: { logs: Array<any> }) {
         }
         if (l.req?.headers) {
           lines.push(`\nRequest headers:`);
-          lines.push(JSON.stringify(l.req.headers, null, 2));
+          lines.push(beautify ? JSON.stringify(l.req.headers, null, 2) : JSON.stringify(l.req.headers));
         }
         if (l.req?.body) {
           lines.push(`\nRequest body:`);
-          lines.push(typeof l.req.body === 'string' ? l.req.body : JSON.stringify(l.req.body, null, 2));
+          if (typeof l.req.body === 'string') {
+            if (beautify) {
+              try { lines.push(JSON.stringify(JSON.parse(l.req.body), null, 2)); }
+              catch { lines.push(l.req.body); }
+            } else {
+              lines.push(l.req.body);
+            }
+          } else {
+            lines.push(beautify ? JSON.stringify(l.req.body, null, 2) : JSON.stringify(l.req.body));
+          }
         }
         if (l.res?.body != null) {
           lines.push(`\nResponse body:`);
-          lines.push(typeof l.res.body === 'string' ? l.res.body : JSON.stringify(l.res.body, null, 2));
+          if (typeof l.res.body === 'string') {
+            if (beautify) {
+              try { lines.push(JSON.stringify(JSON.parse(l.res.body), null, 2)); }
+              catch { lines.push(l.res.body); }
+            } else {
+              lines.push(l.res.body);
+            }
+          } else {
+            lines.push(beautify ? JSON.stringify(l.res.body, null, 2) : JSON.stringify(l.res.body));
+          }
         }
         parts.push(lines.join('\n'));
       }
@@ -751,7 +1110,19 @@ function LogsPanel({ logs }: { logs: Array<any> }) {
   return (
     <div className="flex h-full flex-col">
       <div className="mb-2 flex items-center justify-between">
-        <div className="text-sm font-medium">Logs</div>
+        <div className="flex items-center gap-2">
+          <div className="text-sm font-medium">Logs</div>
+          <div className="rounded-md border border-zinc-800">
+            <div className="flex overflow-hidden">
+              {(['ALL','API','AUTH'] as const).map(k => (
+                <button key={k} onClick={()=>setFilter(k)} className={`px-1.5 py-0.5 text-[10px] ${filter===k ? 'bg-zinc-700 text-white' : 'bg-zinc-900 text-zinc-300 hover:bg-zinc-800'}`}>{k}</button>
+              ))}
+            </div>
+          </div>
+          <button onClick={()=>setBeautify(b=>!b)} className={`rounded px-1.5 py-0.5 text-[10px] ${beautify ? 'bg-emerald-900/40 text-emerald-300' : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'}`} title="Beautify JSON in logs">
+            {beautify ? 'Beautify: ON' : 'Beautify: OFF'}
+          </button>
+        </div>
         <button
           onClick={copyAllLogs}
           className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] ${copied ? 'bg-emerald-900/40 text-emerald-300' : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'}`}
@@ -765,7 +1136,7 @@ function LogsPanel({ logs }: { logs: Array<any> }) {
         </button>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
-        <LogList logs={logs} />
+        <LogList logs={filtered} beautify={beautify} />
       </div>
     </div>
   );
@@ -878,14 +1249,21 @@ function EndpointRow({ ep, baseByHost, userId, extraHeaders, bearerToken, useIde
         // ignore JSON errors
       }
       const headers: Record<string, string> = {
-        ...(host === "gateway" ? { "x-user-id": userId } : {}),
         ...parsedHeaders,
       };
       // Auto admin override for KB publish route when no explicit x-admin header supplied
       if (ep.path.includes('/kb/') && ep.path.endsWith('/publish') && !headers['x-admin']) {
         headers['x-admin'] = '1';
       }
-      if (bearerToken && bearerToken.trim()) headers["authorization"] = `Bearer ${bearerToken.trim()}`;
+      if (bearerToken && bearerToken.trim()) {
+        const t = bearerToken.trim();
+        const dotCount = (t.match(/\./g) || []).length;
+        if (t.includes('…') || dotCount !== 2 || t.length < 100) {
+          throw new Error('Invalid Bearer token: value looks truncated or malformed. Use the full token via Copy token in Auth & Sessions.');
+        }
+        headers["authorization"] = `Bearer ${t}`;
+      }
+      else if (host === "gateway") headers["x-user-id"] = userId;
       if (useIdem) headers["idempotency-key"] = (idemKey && idemKey.trim()) ? idemKey.trim() : '';
       let parsedBody: any = undefined;
       if (body && body.trim().length) {
@@ -899,6 +1277,7 @@ function EndpointRow({ ep, baseByHost, userId, extraHeaders, bearerToken, useIde
       const pretty = res.json ? JSON.stringify(res.json, null, 2) : (res.text || "");
       onResult(pretty, res.ok, res.status);
       onGlobalLog({
+        kind: 'API',
         ts: reqTs,
         reqTs,
         resTs,
@@ -913,7 +1292,7 @@ function EndpointRow({ ep, baseByHost, userId, extraHeaders, bearerToken, useIde
     } catch (e: any) {
       onResult(e?.message || String(e), false, 0);
       const now = Date.now();
-      onGlobalLog({ ts: now, reqTs: now, resTs: now, method: ep.method, url, status: 0, ok: false, ms: 0, error: e?.message || String(e) });
+      onGlobalLog({ kind: 'API', ts: now, reqTs: now, resTs: now, method: ep.method, url, status: 0, ok: false, ms: 0, error: e?.message || String(e) });
     } finally {
       setLoading(false);
     }
@@ -939,9 +1318,25 @@ function EndpointRow({ ep, baseByHost, userId, extraHeaders, bearerToken, useIde
       })();
       const url = `/observability-ci/requests/${slug}.json`;
       const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) {
+        // If not found, fall back to built-in bodySample (if any) and log
+        setBody(ep.bodySample ? JSON.stringify(ep.bodySample, null, 2) : '');
+        return;
+      }
+      const ctype = res.headers.get('content-type') || '';
       const txt = await res.text();
-      setBody(txt || '');
-    } catch {}
+      if (ctype.includes('application/json')) {
+        // pretty-print JSON
+        try { setBody(JSON.stringify(JSON.parse(txt), null, 2)); }
+        catch { setBody(txt); }
+      } else {
+        // Unexpected content (likely HTML 404). Keep existing or fallback to bodySample
+        setBody(ep.bodySample ? JSON.stringify(ep.bodySample, null, 2) : '');
+      }
+    } catch {
+      // Network or other error: keep existing or fallback
+      setBody(ep.bodySample ? JSON.stringify(ep.bodySample, null, 2) : '');
+    }
     finally { setLoadingSample(false); }
   }
 
@@ -1001,9 +1396,20 @@ function EndpointRow({ ep, baseByHost, userId, extraHeaders, bearerToken, useIde
           {ep.method !== 'GET' && (
             <button onClick={loadSample} disabled={loadingSample} className={`mr-2 rounded-md px-2 py-1 text-xs ${loadingSample ? 'bg-zinc-700 text-zinc-300' : 'bg-zinc-800 text-zinc-200 hover:bg-zinc-700'}`}>Load sample</button>
           )}
-          <button onClick={run} disabled={loading} className={`rounded-md px-3 py-1.5 text-sm ${loading ? "bg-zinc-700 text-zinc-300" : "bg-emerald-600 text-white hover:bg-emerald-500"}`}>
-            {loading ? "Running…" : "Send"}
-          </button>
+          {(() => {
+            const missingParam = ep.pathParams?.some((k) => !paths[k] || !paths[k].trim());
+            const disabled = loading || (!!ep.pathParams && ep.pathParams.length > 0 && missingParam);
+            return (
+              <button
+                onClick={run}
+                disabled={disabled}
+                title={disabled && missingParam ? 'Fill all path params first' : ''}
+                className={`rounded-md px-3 py-1.5 text-sm ${disabled ? 'bg-zinc-700 text-zinc-300' : 'bg-emerald-600 text-white hover:bg-emerald-500'}`}
+              >
+                {loading ? 'Running…' : missingParam ? 'Params needed' : 'Send'}
+              </button>
+            );
+          })()}
         </div>
         {result && (
           <div className="flex justify-end">
@@ -1034,18 +1440,18 @@ function EndpointRow({ ep, baseByHost, userId, extraHeaders, bearerToken, useIde
   );
 }
 
-function LogList({ logs }: { logs: Array<any> }) {
+function LogList({ logs, beautify }: { logs: Array<any>; beautify: boolean }) {
   return (
     <div className="space-y-3">
       {(!logs || logs.length === 0) && <div className="text-xs text-zinc-500">No logs yet. Run an API call.</div>}
       {logs.map((l, i) => (
-        <LogCard key={i} l={l} />
+        <LogCard key={i} l={l} beautify={beautify} />
       ))}
     </div>
   );
 }
 
-function LogCard({ l }: { l: any }) {
+function LogCard({ l, beautify }: { l: any; beautify: boolean }) {
   const [copied, setCopied] = useState(false);
   async function copyAll() {
     try {
@@ -1059,15 +1465,25 @@ function LogCard({ l }: { l: any }) {
       }
       if (l.req?.headers) {
         pieces.push(`\nRequest headers:`);
-        pieces.push(JSON.stringify(l.req.headers, null, 2));
+        pieces.push(beautify ? JSON.stringify(l.req.headers, null, 2) : JSON.stringify(l.req.headers));
       }
       if (l.req?.body) {
         pieces.push(`\nRequest body:`);
-        pieces.push(typeof l.req.body === 'string' ? l.req.body : JSON.stringify(l.req.body, null, 2));
+        if (typeof l.req.body === 'string') {
+          if (beautify) { try { pieces.push(JSON.stringify(JSON.parse(l.req.body), null, 2)); } catch { pieces.push(l.req.body); } }
+          else { pieces.push(l.req.body); }
+        } else {
+          pieces.push(beautify ? JSON.stringify(l.req.body, null, 2) : JSON.stringify(l.req.body));
+        }
       }
       if (l.res?.body != null) {
         pieces.push(`\nResponse body:`);
-        pieces.push(typeof l.res.body === 'string' ? l.res.body : JSON.stringify(l.res.body, null, 2));
+        if (typeof l.res.body === 'string') {
+          if (beautify) { try { pieces.push(JSON.stringify(JSON.parse(l.res.body), null, 2)); } catch { pieces.push(l.res.body); } }
+          else { pieces.push(l.res.body); }
+        } else {
+          pieces.push(beautify ? JSON.stringify(l.res.body, null, 2) : JSON.stringify(l.res.body));
+        }
       }
       const text = pieces.join('\n');
       await navigator.clipboard.writeText(text);
@@ -1080,6 +1496,7 @@ function LogCard({ l }: { l: any }) {
       <div className="flex items-center justify-between">
         <div className="flex min-w-0 items-center gap-2">
           <span className="rounded bg-zinc-800/70 px-1 py-0.5 text-[10px]">{l.method}</span>
+          {l.kind && <span className={`rounded px-1 py-0.5 text-[10px] ${l.kind==='AUTH' ? 'bg-purple-900/40 text-purple-300' : 'bg-slate-900/40 text-slate-300'}`}>{l.kind}</span>}
           <div className="truncate text-xs text-zinc-300" title={l.url}>{l.url}</div>
         </div>
         <div className="flex items-center gap-2">
@@ -1094,12 +1511,18 @@ function LogCard({ l }: { l: any }) {
           <div className="text-zinc-400">Request</div>
           <div className="rounded bg-zinc-950 p-2">
             <div className="text-zinc-500">Headers</div>
-            <pre className="max-w-full overflow-auto whitespace-pre-wrap break-all text-[10px] text-zinc-300">{JSON.stringify(l.req.headers, null, 2)}</pre>
+            <pre className="max-w-full overflow-auto whitespace-pre-wrap break-all text-[10px] text-zinc-300">{beautify ? JSON.stringify(l.req.headers, null, 2) : JSON.stringify(l.req.headers)}</pre>
           </div>
           {l.req.body && (
             <div className="rounded bg-zinc-950 p-2">
               <div className="text-zinc-500">Body</div>
-              <pre className="max-w-full overflow-auto whitespace-pre-wrap break-all text-[10px] text-zinc-300">{l.req.body}</pre>
+              <pre className="max-w-full overflow-auto whitespace-pre-wrap break-all text-[10px] text-zinc-300">{(() => {
+                if (typeof l.req.body === 'string') {
+                  if (!beautify) return l.req.body;
+                  try { return JSON.stringify(JSON.parse(l.req.body), null, 2); } catch { return l.req.body; }
+                }
+                return beautify ? JSON.stringify(l.req.body, null, 2) : JSON.stringify(l.req.body);
+              })()}</pre>
             </div>
           )}
         </div>
@@ -1121,7 +1544,13 @@ function LogCard({ l }: { l: any }) {
             </button>
           </div>
           <div className="rounded bg-zinc-950 p-2">
-            <pre className="max-h-56 max-w-full overflow-auto whitespace-pre-wrap break-all text-[10px] text-zinc-300">{l.res.body}</pre>
+            <pre className="max-h-56 max-w-full overflow-auto whitespace-pre-wrap break-all text-[10px] text-zinc-300">{(() => {
+              if (typeof l.res.body === 'string') {
+                if (!beautify) return l.res.body;
+                try { return JSON.stringify(JSON.parse(l.res.body), null, 2); } catch { return l.res.body; }
+              }
+              return beautify ? JSON.stringify(l.res.body, null, 2) : JSON.stringify(l.res.body);
+            })()}</pre>
           </div>
         </div>
       )}

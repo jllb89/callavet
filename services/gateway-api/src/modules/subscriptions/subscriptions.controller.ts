@@ -8,6 +8,220 @@ import { RequestContext } from '../auth/request-context.service';
 export class SubscriptionsController {
   constructor(private readonly db: DbService, private readonly rc: RequestContext) {}
 
+  // ---- Lifecycle stubs (checkout/portal/cancel/resume/change-plan) ----
+  // These are intentionally not implemented yet. Return NOT_IMPLEMENTED (501) with structured payload
+  // so the Observability UI can distinguish between "missing route" (404) and "planned but deferred".
+
+  @Post('checkout')
+  async checkout(@Body() body: { plan_code?: string; seats?: number }) {
+    try {
+      if (this.db.isStub) return { ok: true, stub: true, reason: 'db_unavailable' } as any;
+      const planCode = (body?.plan_code || '').trim();
+      if (!planCode) return { ok: false, reason: 'validation_error', details: 'plan_code required' };
+      const dbgClaims = this.rc.claims || null;
+      const row = await this.db.runInTx(async (q) => {
+        // Ensure auth.uid() is available; if not, attempt to derive from request context claims
+        const uidRow = await q(`select auth.uid()::text as uid`);
+        const uid = uidRow.rows[0]?.uid;
+        if (!uid) {
+          return { noAuthUid: true, dbgClaims } as any;
+        }
+        // Ensure no active subscription
+        const active = await q(`select id from v_active_user_subscriptions where user_id = auth.uid() limit 1`);
+        if (active.rows[0]) return { alreadyActive: true } as any;
+        const plan = await q(
+          `select id, code, name, description, price_cents, currency, billing_period, included_chats, included_videos, pets_included_default, tax_rate
+             from subscription_plans
+            where is_active = true and lower(code) = lower($1)
+            limit 1`,
+          [planCode]
+        );
+        if (!plan.rows[0]) return { planNotFound: true } as any;
+        const billingPeriod = plan.rows[0].billing_period || 'month';
+        const seats = body?.seats && body.seats > 0 ? body.seats : plan.rows[0].pets_included_default || 1;
+        // Period end calculation
+        const sub = await q(
+          `insert into user_subscriptions(
+             id, user_id, plan_id, status, current_period_start, current_period_end, cancel_at_period_end, pets_included
+           ) values (
+             gen_random_uuid(), auth.uid(), $1::uuid, 'active', now(),
+             (now() + case when $2 = 'month' then interval '1 month' when $2 = 'year' then interval '1 year' else interval '1 month' end),
+             false, $3
+           ) returning id, plan_id, status, current_period_start, current_period_end, cancel_at_period_end, pets_included`,
+          [plan.rows[0].id, billingPeriod, seats]
+        );
+        const usage = await q(
+          `insert into subscription_usage(
+             id, subscription_id, period_start, period_end, included_chats, included_videos, consumed_chats, consumed_videos
+           ) values (
+             gen_random_uuid(), $1::uuid, $2, $3, $4, $5, 0, 0
+           ) returning id`,
+          [sub.rows[0].id, sub.rows[0].current_period_start, sub.rows[0].current_period_end, plan.rows[0].included_chats, plan.rows[0].included_videos]
+        );
+        return { plan: plan.rows[0], sub: sub.rows[0], usageId: usage.rows[0].id };
+      });
+      if ((row as any).alreadyActive) return { ok: false, reason: 'already_has_active_subscription' };
+      if ((row as any).planNotFound) return { ok: false, reason: 'plan_not_found' };
+      if ((row as any).noAuthUid) return { ok: false, reason: 'unauthenticated', details: 'JWT missing or invalid', dbgClaims: (row as any).dbgClaims };
+      const plan = (row as any).plan;
+      const sub = (row as any).sub;
+      return {
+        ok: true,
+        action: 'checkout',
+        subscription: {
+          id: sub.id,
+          status: sub.status,
+          current_period_start: sub.current_period_start,
+          current_period_end: sub.current_period_end,
+          cancel_at_period_end: sub.cancel_at_period_end,
+          pets_included: sub.pets_included,
+          plan: {
+            id: plan.id,
+            code: plan.code,
+            name: plan.name,
+            description: plan.description,
+            price_cents: plan.price_cents,
+            currency: plan.currency,
+            billing_period: plan.billing_period,
+            included_chats: plan.included_chats,
+            included_videos: plan.included_videos,
+            pets_included_default: plan.pets_included_default,
+            tax_rate: plan.tax_rate,
+          },
+        },
+      };
+    } catch (e: any) {
+      throw new (require('@nestjs/common').HttpException)({ ok: false, reason: 'checkout_failed', error: e?.message }, 400);
+    }
+  }
+
+  // Temporary debug endpoint (dev): exposes decoded claims and auth.uid() resolution
+  @Get('debug-auth')
+  async debugAuth() {
+    try {
+      const data = await this.db.runInTx(async (q) => {
+        const uidRow = await q(`select auth.uid()::text as uid`);
+        return { uid: uidRow.rows[0]?.uid || null };
+      });
+      return { ok: true, claims: this.rc.claims || null, authUid: data.uid };
+    } catch (e: any) {
+      return { ok: false, error: e?.message || String(e), claims: this.rc.claims || null };
+    }
+  }
+
+  // Debug: inspect active view vs underlying table
+  @Get('debug-active')
+  async debugActive(){
+    try {
+      const result = await this.db.runInTx(async (q) => {
+        const uidRows = await q<{ uid: string }>(`select auth.uid()::text as uid`);
+        const uid = uidRows.rows[0]?.uid;
+        if (!uid) return { uid: null, view: [], subs: [] };
+        const viewRows = await q<any>(`select id, plan_id, status, current_period_start, current_period_end, cancel_at_period_end from v_active_user_subscriptions where user_id = auth.uid() order by current_period_end desc`);
+        const subRows = await q<any>(`select id, plan_id, status, current_period_start, current_period_end, cancel_at_period_end from user_subscriptions where user_id = auth.uid() order by current_period_end desc`);
+        return { uid, viewRows, subRows };
+      });
+      return { ok: true, uid: (result as any).uid, view: (result as any).viewRows, subs: (result as any).subRows };
+    } catch (e: any){
+      return { ok: false, error: e?.message || String(e) };
+    }
+  }
+
+  @Post('portal')
+  async portal() {
+    const { HttpException, HttpStatus } = require('@nestjs/common');
+    throw new HttpException({ ok: false, reason: 'not_implemented', action: 'portal' }, HttpStatus.NOT_IMPLEMENTED);
+  }
+
+  @Post('cancel')
+  async cancel(@Body() body: { immediate?: boolean }) {
+    try {
+      if (this.db.isStub) return { ok: true, stub: true } as any;
+      const row = await this.db.runInTx(async (q) => {
+        // Removed FOR UPDATE to avoid RLS blocking row visibility when UPDATE policy not granted.
+        const active = await q(`select id, status, current_period_end from v_active_user_subscriptions where user_id = auth.uid() limit 1`);
+        if (!active.rows[0]) return { notFound: true } as any;
+        if (body?.immediate) {
+          const upd = await q(
+            `update user_subscriptions set status='canceled', cancel_at_period_end=true, current_period_end = now()
+             where id = $1 returning id, status, current_period_end, cancel_at_period_end`,
+            [active.rows[0].id]
+          );
+          return { sub: upd.rows[0], immediate: true };
+        }
+        const upd = await q(
+          `update user_subscriptions set cancel_at_period_end=true where id = $1 returning id, status, current_period_end, cancel_at_period_end`,
+          [active.rows[0].id]
+        );
+        return { sub: upd.rows[0], immediate: false };
+      });
+      if ((row as any).notFound) return { ok: false, reason: 'no_active_subscription' };
+      return { ok: true, action: 'cancel', immediate: (row as any).immediate, subscription: (row as any).sub };
+    } catch (e: any) {
+      throw new (require('@nestjs/common').HttpException)({ ok: false, reason: 'cancel_failed', error: e?.message }, 400);
+    }
+  }
+
+  @Post('resume')
+  async resume() {
+    try {
+      if (this.db.isStub) return { ok: true, stub: true } as any;
+      const row = await this.db.runInTx(async (q) => {
+        // Removed FOR UPDATE for same RLS reason as cancel.
+        const active = await q(`select id, status, cancel_at_period_end from v_active_user_subscriptions where user_id = auth.uid() limit 1`);
+        if (!active.rows[0]) return { notFound: true } as any;
+        if (!active.rows[0].cancel_at_period_end) return { notCanceled: true } as any;
+        const upd = await q(
+          `update user_subscriptions set cancel_at_period_end=false where id = $1 returning id, status, cancel_at_period_end`,
+          [active.rows[0].id]
+        );
+        return { sub: upd.rows[0] };
+      });
+      if ((row as any).notFound) return { ok: false, reason: 'no_active_subscription' };
+      if ((row as any).notCanceled) return { ok: false, reason: 'cannot_resume_not_canceled' };
+      return { ok: true, action: 'resume', subscription: (row as any).sub };
+    } catch (e: any) {
+      throw new (require('@nestjs/common').HttpException)({ ok: false, reason: 'resume_failed', error: e?.message }, 400);
+    }
+  }
+
+  @Post('change-plan')
+  async changePlan(@Body() body: { code?: string; seats?: number }) {
+    try {
+      if (this.db.isStub) return { ok: true, stub: true } as any;
+      const code = (body?.code || '').trim();
+      if (!code) return { ok: false, reason: 'validation_error', details: 'code required' };
+      const row = await this.db.runInTx(async (q) => {
+        // Removed FOR UPDATE to prevent RLS filtering when UPDATE not allowed directly on view.
+        const active = await q(`select id, plan_id from v_active_user_subscriptions where user_id = auth.uid() limit 1`);
+        if (!active.rows[0]) return { notFound: true } as any;
+        const plan = await q(
+          `select id, code, included_chats, included_videos, pets_included_default from subscription_plans where is_active and lower(code)=lower($1) limit 1`,
+          [code]
+        );
+        if (!plan.rows[0]) return { planNotFound: true } as any;
+        if (plan.rows[0].id === active.rows[0].plan_id) return { samePlan: true } as any;
+        const upd = await q(
+          `update user_subscriptions set plan_id = $1, pets_included = coalesce($2, pets_included)
+             where id = $3 returning id, plan_id`,
+          [plan.rows[0].id, body?.seats || plan.rows[0].pets_included_default, active.rows[0].id]
+        );
+        // Adjust usage included counts for new plan (without reducing consumed counts)
+        await q(
+          `update subscription_usage set included_chats = $1, included_videos = $2, updated_at = now() where subscription_id = $3`,
+          [plan.rows[0].included_chats, plan.rows[0].included_videos, active.rows[0].id]
+        );
+        return { sub: upd.rows[0], plan: plan.rows[0] };
+      });
+      if ((row as any).notFound) return { ok: false, reason: 'no_active_subscription' };
+      if ((row as any).planNotFound) return { ok: false, reason: 'plan_not_found' };
+      if ((row as any).samePlan) return { ok: false, reason: 'change_plan_same_plan' };
+      return { ok: true, action: 'change-plan', subscription: (row as any).sub, plan: (row as any).plan };
+    } catch (e: any) {
+      throw new (require('@nestjs/common').HttpException)({ ok: false, reason: 'change_plan_failed', error: e?.message }, 400);
+    }
+  }
+
   @Post('reserve-chat')
   async reserveChat(@Body() body: { userId: string; sessionId: string }) {
     try {
@@ -94,6 +308,101 @@ export class SubscriptionsController {
       return { ok: true, usage, msg: usage ? 'ok' : 'no_active_subscription' };
     } catch (e: any) {
       throw new HttpException(e?.message || 'usage_failed', HttpStatus.BAD_REQUEST);
+    }
+  }
+
+  @Get('my')
+  async mySubscriptions() {
+    try {
+      if (this.db.isStub) {
+        return { data: [] } as any;
+      }
+      const rows = await this.db.runInTx(async (q) => {
+        const { rows } = await q<any>(
+          `select
+             s.id as sub_id,
+             s.status,
+             s.current_period_start,
+             s.current_period_end,
+             s.cancel_at_period_end,
+             s.pets_included,
+             p.id as plan_id,
+             p.code as plan_code,
+             p.name as plan_name,
+             p.description as plan_description,
+             p.price_cents as plan_price_cents,
+             p.currency as plan_currency,
+             p.billing_period as plan_billing_period,
+             p.included_chats as plan_included_chats,
+             p.included_videos as plan_included_videos,
+             p.pets_included_default as plan_pets_included_default,
+             p.tax_rate as plan_tax_rate,
+             p.is_active as plan_is_active
+           from user_subscriptions s
+           join subscription_plans p on p.id = s.plan_id
+          where s.user_id = auth.uid()
+          order by s.current_period_end desc nulls last`
+        );
+        return rows.map((r) => ({
+          id: r.sub_id,
+          status: r.status,
+          current_period_start: r.current_period_start,
+          current_period_end: r.current_period_end,
+          cancel_at_period_end: r.cancel_at_period_end,
+          pets_included: r.pets_included,
+          plan: {
+            id: r.plan_id,
+            code: r.plan_code,
+            name: r.plan_name,
+            description: r.plan_description,
+            price_cents: r.plan_price_cents,
+            currency: r.plan_currency,
+            billing_period: r.plan_billing_period,
+            included_chats: r.plan_included_chats,
+            included_videos: r.plan_included_videos,
+            pets_included_default: r.plan_pets_included_default,
+            tax_rate: r.plan_tax_rate,
+            is_active: r.plan_is_active,
+          },
+        }));
+      });
+      return { data: rows };
+    } catch (e: any) {
+      throw new HttpException(e?.message || 'subscriptions_list_failed', HttpStatus.BAD_REQUEST);
+    }
+  }
+
+  @Get('usage/current')
+  async getCurrentUsage() {
+    try {
+      if (this.db.isStub) {
+        return { included_chats: 0, consumed_chats: 0, included_videos: 0, consumed_videos: 0, period_start: new Date().toISOString(), period_end: new Date().toISOString(), msg: 'stub' } as any;
+      }
+      const usage = await this.db.runInTx(async (q) => {
+        const { rows: subs } = await q<{ id: string }>(
+          `select id from v_active_user_subscriptions where user_id = auth.uid() order by current_period_end desc limit 1`
+        );
+        if (!subs[0]) return null;
+        const subId = subs[0].id;
+        const { rows } = await q<any>(`select * from fn_current_usage(trim($1)::uuid)`, [subId]);
+        const u = rows[0] || null;
+        return u ? {
+          included_chats: u.included_chats,
+          consumed_chats: u.consumed_chats,
+          included_videos: u.included_videos,
+          consumed_videos: u.consumed_videos,
+          period_start: u.period_start,
+          period_end: u.period_end,
+        } : null;
+      });
+      if (!usage) {
+        // Return an empty snapshot with msg to avoid 404s while keeping shape close to spec
+        const now = new Date().toISOString();
+        return { included_chats: 0, consumed_chats: 0, included_videos: 0, consumed_videos: 0, period_start: now, period_end: now, msg: 'no_active_subscription' } as any;
+      }
+      return usage as any;
+    } catch (e: any) {
+      throw new HttpException(e?.message || 'usage_current_failed', HttpStatus.BAD_REQUEST);
     }
   }
 
