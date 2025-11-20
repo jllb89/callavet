@@ -129,8 +129,17 @@ export class SubscriptionsController {
 
   @Post('portal')
   async portal() {
-    const { HttpException, HttpStatus } = require('@nestjs/common');
-    throw new HttpException({ ok: false, reason: 'not_implemented', action: 'portal' }, HttpStatus.NOT_IMPLEMENTED);
+    // Placeholder: backend returns a pending_frontend status so UI can build Stripe portal link.
+    // If STRIPE_PORTAL_BASE_URL env is set, include it; otherwise null.
+    const base = process.env.STRIPE_PORTAL_BASE_URL || null;
+    return {
+      ok: true,
+      action: 'portal',
+      status: 'pending_frontend',
+      stripePortalUrl: base ? `${base}?session=create` : null,
+      reason: 'frontend_todo',
+      message: 'Portal integration to be finished in frontend.'
+    };
   }
 
   @Post('cancel')
@@ -167,15 +176,27 @@ export class SubscriptionsController {
     try {
       if (this.db.isStub) return { ok: true, stub: true } as any;
       const row = await this.db.runInTx(async (q) => {
-        // Removed FOR UPDATE for same RLS reason as cancel.
-        const active = await q(`select id, status, cancel_at_period_end from v_active_user_subscriptions where user_id = auth.uid() limit 1`);
-        if (!active.rows[0]) return { notFound: true } as any;
-        if (!active.rows[0].cancel_at_period_end) return { notCanceled: true } as any;
-        const upd = await q(
-          `update user_subscriptions set cancel_at_period_end=false where id = $1 returning id, status, cancel_at_period_end`,
-          [active.rows[0].id]
+        // Query underlying table directly so scheduled cancellations are still visible.
+        const { rows: subs } = await q(
+          `select id, status, cancel_at_period_end
+             from user_subscriptions
+            where user_id = auth.uid()
+              and status = 'active'
+            order by current_period_end desc
+            limit 1`
         );
-        return { sub: upd.rows[0] };
+        if (!subs[0]) return { notFound: true } as any;
+        const sub = subs[0];
+        if (!sub.cancel_at_period_end) return { notCanceled: true } as any;
+        const { rows: upd } = await q(
+          `update user_subscriptions
+              set cancel_at_period_end = false,
+                  updated_at = now()
+            where id = $1
+            returning id, status, cancel_at_period_end`,
+          [sub.id]
+        );
+        return { sub: upd[0] };
       });
       if ((row as any).notFound) return { ok: false, reason: 'no_active_subscription' };
       if ((row as any).notCanceled) return { ok: false, reason: 'cannot_resume_not_canceled' };
@@ -298,14 +319,15 @@ export class SubscriptionsController {
         const { rows: subs } = await q<{ id: string }>(
           `select id from v_active_user_subscriptions where user_id = auth.uid() order by current_period_end desc limit 1`
         );
-        if (!subs[0]) {
-          return null;
-        }
+        if (!subs[0]) return null;
         const subId = subs[0].id;
         const { rows } = await q<any>(`select * from fn_current_usage(trim($1)::uuid)`, [subId]);
         return rows[0] || null;
       });
-      return { ok: true, usage, msg: usage ? 'ok' : 'no_active_subscription' };
+      if (!usage) {
+        return { ok: false, reason: 'no_active_subscription', message: 'No active subscription. Acquire a plan to access usage.', usage: null };
+      }
+      return { ok: true, usage };
     } catch (e: any) {
       throw new HttpException(e?.message || 'usage_failed', HttpStatus.BAD_REQUEST);
     }
@@ -376,7 +398,7 @@ export class SubscriptionsController {
   async getCurrentUsage() {
     try {
       if (this.db.isStub) {
-        return { included_chats: 0, consumed_chats: 0, included_videos: 0, consumed_videos: 0, period_start: new Date().toISOString(), period_end: new Date().toISOString(), msg: 'stub' } as any;
+        return { ok: true, usage: { included_chats: 0, consumed_chats: 0, included_videos: 0, consumed_videos: 0, period_start: new Date().toISOString(), period_end: new Date().toISOString() }, msg: 'stub' } as any;
       }
       const usage = await this.db.runInTx(async (q) => {
         const { rows: subs } = await q<{ id: string }>(
@@ -396,11 +418,9 @@ export class SubscriptionsController {
         } : null;
       });
       if (!usage) {
-        // Return an empty snapshot with msg to avoid 404s while keeping shape close to spec
-        const now = new Date().toISOString();
-        return { included_chats: 0, consumed_chats: 0, included_videos: 0, consumed_videos: 0, period_start: now, period_end: now, msg: 'no_active_subscription' } as any;
+        return { ok: false, reason: 'no_active_subscription', message: 'No active subscription. Acquire a plan to access usage.', usage: null } as any;
       }
-      return usage as any;
+      return { ok: true, usage } as any;
     } catch (e: any) {
       throw new HttpException(e?.message || 'usage_current_failed', HttpStatus.BAD_REQUEST);
     }

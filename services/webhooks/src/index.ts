@@ -16,6 +16,12 @@ app.post("/stripe/webhook", bodyParser.raw({ type: "application/json" }), (req, 
   catch (e) { return res.sendStatus(400); }
 
   switch (event.type) {
+    case 'customer.subscription.created': {
+      const sub = event.data.object as Stripe.Subscription;
+      console.log('subscription created', sub.id, sub.status, sub.customer);
+      // TODO: initial upsert of subscription record (period start/end, status)
+      break;
+    }
     case 'checkout.session.completed': {
       const session = event.data.object as Stripe.Checkout.Session;
       console.log('checkout.session.completed', session.id, session.customer);

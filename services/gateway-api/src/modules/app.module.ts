@@ -14,6 +14,8 @@ import { VectorModule } from './vector/vector.module';
 import { KbModule } from './kb/kb.module';
 import { SearchModule } from './search/search.module';
 import { MeModule } from './me/me.module';
+import { PetsModule } from './pets/pets.module';
+import { MessagesModule } from './messages/messages.module';
 
 @Module({
   imports: [
@@ -32,6 +34,8 @@ import { MeModule } from './me/me.module';
     KbModule,
   SearchModule,
   MeModule,
+  PetsModule,
+  MessagesModule,
   ],
 })
 export class AppModule {}
