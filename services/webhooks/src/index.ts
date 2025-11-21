@@ -5,59 +5,34 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "", { apiVersion: "2024-06-20" });
 const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET || "";
 
-// Startup diagnostics
-console.log('[startup] STRIPE_WEBHOOK_SECRET set:', !!endpointSecret);
-console.log('[startup] GATEWAY_INTERNAL_URL =', process.env.GATEWAY_INTERNAL_URL || '(unset)');
-console.log('[startup] INTERNAL_STRIPE_EVENT_SECRET set:', !!process.env.INTERNAL_STRIPE_EVENT_SECRET);
-
 // Health
 app.get("/health", (_req,res)=>res.json({ok:true, service:'webhooks'}));
-// Simple debug endpoint to inspect current forwarding target
-app.get('/debug/forward-target', (_req,res) => {
-  res.json({
-    gateway_internal_url: process.env.GATEWAY_INTERNAL_URL || null,
-    has_internal_secret: !!process.env.INTERNAL_STRIPE_EVENT_SECRET
-  });
-});
 
 // Stripe Webhooks
 app.post("/stripe/webhook", bodyParser.raw({ type: "application/json" }), (req, res) => {
-  const disableSig = process.env.DISABLE_STRIPE_SIGNATURE === '1';
-  if (!endpointSecret && !disableSig) {
+  if (!endpointSecret) {
     console.error('[stripe-webhook] Missing STRIPE_WEBHOOK_SECRET env');
     return res.status(500).json({ ok: false, reason: 'webhook_secret_missing' });
   }
   const sig = req.headers["stripe-signature"] as string;
-  let event: Stripe.Event | undefined;
-  if (disableSig) {
-    try {
-      // When disabled, parse JSON manually from raw buffer
-      const rawStr = req.body.toString();
-      event = JSON.parse(rawStr);
-      console.warn('[stripe-webhook] WARNING signature verification bypassed (DISABLE_STRIPE_SIGNATURE=1)');
-    } catch (e: any) {
-      console.error('[stripe-webhook] bypass parse failed', e?.message);
-      return res.status(400).json({ ok: false, reason: 'bypass_parse_failed' });
-    }
-  } else {
-    try {
-      event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
-    } catch (e: any) {
-      console.error('[stripe-webhook] signature verification failed', e?.message, 'sig header present:', !!sig);
-      return res.status(400).json({ ok: false, reason: 'signature_verification_failed' });
-    }
+  let event: Stripe.Event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
+  } catch (e: any) {
+    console.error('[stripe-webhook] signature verification failed', e?.message);
+    return res.status(400).json({ ok: false, reason: 'signature_verification_failed' });
   }
-  if (!event) return res.status(400).json({ ok: false, reason: 'no_event_parsed' });
 
   // Forward selected events to internal gateway for persistence
   async function forwardToGateway(event: Stripe.Event) {
-    const gatewayUrl = process.env.GATEWAY_INTERNAL_URL; // e.g. https://cav-gateway-staging-xxxx.onrender.com/internal/stripe/event
+    const gatewayUrl = process.env.GATEWAY_INTERNAL_URL; // e.g. http://gateway-api:3000/internal/stripe/event
     const secret = process.env.INTERNAL_STRIPE_EVENT_SECRET;
     if (!gatewayUrl) return console.warn('[stripe-webhook] GATEWAY_INTERNAL_URL not set, skipping forward');
     if (!secret) return console.warn('[stripe-webhook] INTERNAL_STRIPE_EVENT_SECRET not set, skipping forward');
+    // Minimal payload; gateway will pull required fields
     const payload = { id: event.id, type: event.type, data: event.data.object };
-    console.log('[stripe-webhook] forwarding', event.id, event.type, '->', gatewayUrl);
     const started = Date.now();
+    console.log('[stripe-webhook] forward start', event.id, event.type);
     try {
       const res = await fetch(gatewayUrl, {
         method: 'POST',
@@ -67,12 +42,13 @@ app.post("/stripe/webhook", bodyParser.raw({ type: "application/json" }), (req, 
       const ms = Date.now() - started;
       if (!res.ok) {
         const text = await res.text();
-        console.error('[stripe-webhook] forward error', res.status, text, `(${ms}ms)`);
+        console.error('[stripe-webhook] forward error', event.id, event.type, res.status, `${ms}ms`, text.slice(0,200));
       } else {
-        console.log('[stripe-webhook] forward success', res.status, `(${ms}ms)`);
+        console.log('[stripe-webhook] forward ok', event.id, event.type, res.status, `${ms}ms`);
       }
     } catch (err: any) {
-      console.error('[stripe-webhook] forward exception', err?.message);
+      const ms = Date.now() - started;
+      console.error('[stripe-webhook] forward exception', event.id, event.type, `${ms}ms`, err?.message);
     }
   }
 

@@ -1,7 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { Pool } from 'pg';
 import dns from 'node:dns';
-import { lookup as dnsLookup } from 'node:dns/promises';
 import fs from 'node:fs';
 import { RequestContext } from '../auth/request-context.service';
 
@@ -45,21 +44,8 @@ export class DbService {
       const u = new URL(url);
       this.initPromise = undefined;
       const createPool = async () => {
-        // Allow skipping manual DNS resolution (e.g. in hosted envs where IPv6 causes ENETUNREACH)
-        let host = u.hostname;
-        if (process.env.SKIP_DB_DNS_RESOLVE !== '1') {
-          try {
-            const res = await dnsLookup(u.hostname, { family: 4, all: false });
-            host = typeof res === 'string' ? res : res.address;
-          } catch (e) {
-            try { (dns as any).setDefaultResultOrder?.('ipv4first'); } catch {}
-            if (process.env.DEV_DB_DEBUG === '1') {
-              // eslint-disable-next-line no-console
-              console.warn('[db:init] dnsLookup failed, using original hostname', (e as any)?.message);
-            }
-            host = u.hostname; // keep original
-          }
-        }
+        // Force original hostname (avoid IPv6 literal resolution that fails in container)
+        const host = u.hostname;
         if (process.env.DEV_DB_DEBUG === '1') {
           // eslint-disable-next-line no-console
           console.log('[db:init] resolved host=', host, ' ssl=', !!ssl);
@@ -91,20 +77,7 @@ export class DbService {
           // eslint-disable-next-line no-console
           console.error('[db] initial connectivity test failed:', this.lastError);
           // Attempt fallback: if we resolved to an IP and failed with ENETUNREACH, retry with original hostname once
-          if (host !== u.hostname && this.lastError && /ENETUNREACH/.test(this.lastError)) {
-            try {
-              const cfgFallback = { ...cfg, host: u.hostname };
-              this.pool = new Pool(cfgFallback);
-              await (this.pool as any).query('select 1');
-              // eslint-disable-next-line no-console
-              console.log('[db] fallback init success host=' + u.hostname);
-              this.lastError = undefined;
-            } catch (ef: any) {
-              this.lastError = ef?.message || String(ef);
-              // eslint-disable-next-line no-console
-              console.error('[db] fallback attempt failed:', this.lastError);
-            }
-          }
+          // Fallback logic removed: we always use original hostname now.
           if (process.env.DEV_REQUIRE_DB === '1' && this.lastError) throw e;
         }
       };
