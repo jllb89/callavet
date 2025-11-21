@@ -45,14 +45,20 @@ export class DbService {
       const u = new URL(url);
       this.initPromise = undefined;
       const createPool = async () => {
-        // Prefer IPv4; resolve the hostname ourselves and pass IPv4 literal to pg
+        // Allow skipping manual DNS resolution (e.g. in hosted envs where IPv6 causes ENETUNREACH)
         let host = u.hostname;
-        try {
-          const res = await dnsLookup(u.hostname, { family: 4, all: false });
-          host = typeof res === 'string' ? res : res.address;
-        } catch {
-          // Fallback: try forcing ipv4-first at runtime
-          try { (dns as any).setDefaultResultOrder?.('ipv4first'); } catch {}
+        if (process.env.SKIP_DB_DNS_RESOLVE !== '1') {
+          try {
+            const res = await dnsLookup(u.hostname, { family: 4, all: false });
+            host = typeof res === 'string' ? res : res.address;
+          } catch (e) {
+            try { (dns as any).setDefaultResultOrder?.('ipv4first'); } catch {}
+            if (process.env.DEV_DB_DEBUG === '1') {
+              // eslint-disable-next-line no-console
+              console.warn('[db:init] dnsLookup failed, using original hostname', (e as any)?.message);
+            }
+            host = u.hostname; // keep original
+          }
         }
         if (process.env.DEV_DB_DEBUG === '1') {
           // eslint-disable-next-line no-console
@@ -84,8 +90,22 @@ export class DbService {
           this.lastError = e?.message || String(e);
           // eslint-disable-next-line no-console
           console.error('[db] initial connectivity test failed:', this.lastError);
-          // If DEV_REQUIRE_DB=1 set, throw to prevent silent stub mode
-          if (process.env.DEV_REQUIRE_DB === '1') throw e;
+          // Attempt fallback: if we resolved to an IP and failed with ENETUNREACH, retry with original hostname once
+          if (host !== u.hostname && this.lastError && /ENETUNREACH/.test(this.lastError)) {
+            try {
+              const cfgFallback = { ...cfg, host: u.hostname };
+              this.pool = new Pool(cfgFallback);
+              await (this.pool as any).query('select 1');
+              // eslint-disable-next-line no-console
+              console.log('[db] fallback init success host=' + u.hostname);
+              this.lastError = undefined;
+            } catch (ef: any) {
+              this.lastError = ef?.message || String(ef);
+              // eslint-disable-next-line no-console
+              console.error('[db] fallback attempt failed:', this.lastError);
+            }
+          }
+          if (process.env.DEV_REQUIRE_DB === '1' && this.lastError) throw e;
         }
       };
       // Start initialization immediately and awaitable via ensureReady()
