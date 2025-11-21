@@ -282,3 +282,6 @@ Hardening
 
 If RLS is confirmed, remove placeholder.local email fallback (only use claims.email).
 Consider server-side provisioning after sign-up via webhook to centralize logic, and keep GET /me strictly read-only.
+
+
+estoy en el flujo de las suscripciones, tengo que probar terminar una desde stripe y que se refleje en la db
