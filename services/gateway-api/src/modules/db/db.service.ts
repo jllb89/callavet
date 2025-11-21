@@ -44,11 +44,29 @@ export class DbService {
       const u = new URL(url);
       this.initPromise = undefined;
       const createPool = async () => {
-        // Force original hostname (avoid IPv6 literal resolution that fails in container)
-        const host = u.hostname;
+        // Prefer IPv4 resolution to avoid ENETUNREACH for IPv6-only addresses in container
+        const originalHost = u.hostname;
+        let host = originalHost;
+        const forceIpv4 = process.env.DB_FORCE_IPV4 !== '0';
+        if (forceIpv4) {
+          try {
+            const { address } = await dns.promises.lookup(originalHost, { family: 4 });
+            host = address;
+            if (process.env.DEV_DB_DEBUG === '1') {
+              // eslint-disable-next-line no-console
+              console.log('[db:init] ipv4 lookup success', originalHost, '->', host);
+            }
+          } catch (e: any) {
+            if (process.env.DEV_DB_DEBUG === '1') {
+              // eslint-disable-next-line no-console
+              console.warn('[db:init] ipv4 lookup failed, falling back to hostname', originalHost, e?.message);
+            }
+            host = originalHost; // fallback
+          }
+        }
         if (process.env.DEV_DB_DEBUG === '1') {
           // eslint-disable-next-line no-console
-          console.log('[db:init] resolved host=', host, ' ssl=', !!ssl);
+          console.log('[db:init] using host=', host, ' ssl=', !!ssl, ' forceIpv4=', forceIpv4);
         }
         const cfg: any = {
           host,
@@ -77,7 +95,23 @@ export class DbService {
           // eslint-disable-next-line no-console
           console.error('[db] initial connectivity test failed:', this.lastError);
           // Attempt fallback: if we resolved to an IP and failed with ENETUNREACH, retry with original hostname once
-          // Fallback logic removed: we always use original hostname now.
+          if (forceIpv4 && host !== originalHost && /ENETUNREACH/.test(this.lastError || '')) {
+            try {
+              // eslint-disable-next-line no-console
+              console.warn('[db] ENETUNREACH on IPv4 address? Retrying with original hostname:', originalHost);
+              const cfg2 = { ...cfg, host: originalHost };
+              const retryPool = new Pool(cfg2);
+              await (retryPool as any).query('select 1');
+              this.pool?.end().catch(() => {});
+              this.pool = retryPool;
+              // eslint-disable-next-line no-console
+              console.log('[db] fallback to hostname succeeded host=' + originalHost);
+              this.lastError = undefined;
+            } catch (e2: any) {
+              // eslint-disable-next-line no-console
+              console.error('[db] fallback hostname attempt failed:', e2?.message || String(e2));
+            }
+          }
           if (process.env.DEV_REQUIRE_DB === '1' && this.lastError) throw e;
         }
       };

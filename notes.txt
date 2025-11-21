@@ -285,3 +285,14 @@ Consider server-side provisioning after sign-up via webhook to centralize logic,
 
 
 estoy en el flujo de las suscripciones, tengo que probar terminar una desde stripe y que se refleje en la db
+
+
+
+export DATABASE_URL="postgresql://postgres:RwmNw5aE2EOvPavL@db.oajnhvizipicnypdxcrb.supabase.co:5432/postgres?sslmode=require"
+
+
+Recommended Production Approach (avoid ephemeral mismatch)
+
+Create a permanent webhook endpoint in the Stripe Dashboard pointing to https://cav-webhooks-staging-ugvx.onrender.com/stripe/webhook.
+Use THAT endpoint’s signing secret in STRIPE_WEBHOOK_SECRET. Do not rely on stripe listen for staging once permanent endpoint exists.
+Keep stripe listen only for local development (forwarding to localhost).
