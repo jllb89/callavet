@@ -16,7 +16,13 @@ export class InternalStripeController {
     if (!body || !body.id || !body.type) {
       return { ok: false, reason: 'invalid_payload' };
     }
-    const result = await this.svc.processEvent(body);
-    return { ok: true, event: body.type, result };
+    try {
+      const result = await this.svc.processEvent(body);
+      return { ok: true, event: body.type, result };
+    } catch (e: any) {
+      // Minimal error surface for diagnostics (do not leak stack in prod)
+      console.error('[internal-stripe] processEvent error', e?.message);
+      return { ok: false, event: body.type, error: e?.message || 'unhandled_error' };
+    }
   }
 }

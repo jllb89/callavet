@@ -22,18 +22,32 @@ app.get('/debug/forward-target', (_req,res) => {
 
 // Stripe Webhooks
 app.post("/stripe/webhook", bodyParser.raw({ type: "application/json" }), (req, res) => {
-  if (!endpointSecret) {
+  const disableSig = process.env.DISABLE_STRIPE_SIGNATURE === '1';
+  if (!endpointSecret && !disableSig) {
     console.error('[stripe-webhook] Missing STRIPE_WEBHOOK_SECRET env');
     return res.status(500).json({ ok: false, reason: 'webhook_secret_missing' });
   }
   const sig = req.headers["stripe-signature"] as string;
-  let event: Stripe.Event;
-  try {
-    event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
-  } catch (e: any) {
-    console.error('[stripe-webhook] signature verification failed', e?.message);
-    return res.status(400).json({ ok: false, reason: 'signature_verification_failed' });
+  let event: Stripe.Event | undefined;
+  if (disableSig) {
+    try {
+      // When disabled, parse JSON manually from raw buffer
+      const rawStr = req.body.toString();
+      event = JSON.parse(rawStr);
+      console.warn('[stripe-webhook] WARNING signature verification bypassed (DISABLE_STRIPE_SIGNATURE=1)');
+    } catch (e: any) {
+      console.error('[stripe-webhook] bypass parse failed', e?.message);
+      return res.status(400).json({ ok: false, reason: 'bypass_parse_failed' });
+    }
+  } else {
+    try {
+      event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
+    } catch (e: any) {
+      console.error('[stripe-webhook] signature verification failed', e?.message, 'sig header present:', !!sig);
+      return res.status(400).json({ ok: false, reason: 'signature_verification_failed' });
+    }
   }
+  if (!event) return res.status(400).json({ ok: false, reason: 'no_event_parsed' });
 
   // Forward selected events to internal gateway for persistence
   async function forwardToGateway(event: Stripe.Event) {
