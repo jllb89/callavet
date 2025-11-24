@@ -4,22 +4,23 @@
   "packageManager": "pnpm@9.12.0",
   "scripts": {
     "dev": "turbo run dev --parallel",
-  "dev:web": "turbo run dev --filter=./apps/web",
-  "dev:admin": "turbo run dev --filter=./apps/admin",
+    "dev:web": "turbo run dev --filter=./apps/web",
+    "dev:admin": "turbo run dev --filter=./apps/admin",
     "dev:services": "docker compose -f infra/docker-compose.yml up --build",
-  "dev:stack": "DEV_AUTO_STOP_CONTAINERS=1 DEV_AUTO_FREE_PORTS=1 DEV_AUTO_STOP_COMPOSE=1 bash scripts/dev-stack.sh",
-  "dev:stack:clean": "DEV_FORCE_RESTART_NEXT=1 DEV_AUTO_STOP_CONTAINERS=1 DEV_AUTO_FREE_PORTS=1 DEV_AUTO_STOP_COMPOSE=1 bash scripts/dev-stack.sh",
-  "dev:stack:infra:clean": "DEV_FORCE_RESTART_NEXT=1 DEV_FORCE_RESTART_INFRA=1 DEV_AUTO_STOP_CONTAINERS=1 DEV_AUTO_FREE_PORTS=1 DEV_AUTO_STOP_COMPOSE=1 bash scripts/dev-stack.sh",
+    "dev:stack": "DEV_AUTO_STOP_CONTAINERS=1 DEV_AUTO_FREE_PORTS=1 DEV_AUTO_STOP_COMPOSE=1 bash scripts/dev-stack.sh",
+    "dev:stack:clean": "DEV_FORCE_RESTART_NEXT=1 DEV_AUTO_STOP_CONTAINERS=1 DEV_AUTO_FREE_PORTS=1 DEV_AUTO_STOP_COMPOSE=1 bash scripts/dev-stack.sh",
+    "dev:stack:infra:clean": "DEV_FORCE_RESTART_NEXT=1 DEV_FORCE_RESTART_INFRA=1 DEV_AUTO_STOP_CONTAINERS=1 DEV_AUTO_FREE_PORTS=1 DEV_AUTO_STOP_COMPOSE=1 bash scripts/dev-stack.sh",
     "build": "turbo run build",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
-  "openapi:lint": "spectral lint --fail-severity=error -r docs/openapi/.spectral.yaml docs/openapi/*.yaml",
+    "openapi:lint": "spectral lint --fail-severity=error -r docs/openapi/.spectral.yaml docs/openapi/*.yaml",
     "openapi:codegen": "pnpm --filter @cav/sdk run codegen",
     "tree": "bash -lc 'tree -L ${DEPTH:-2} -I \"node_modules|.git|.pnpm-store|dist|build|.next\"'"
   },
   "devDependencies": {
-    "turbo": "^2.1.3",
     "@stoplight/spectral-cli": "^6.11.2",
-    "openapi-typescript": "^7.4.1"
+    "openapi-typescript": "^7.4.1",
+    "pg": "^8.12.0",
+    "turbo": "^2.1.3"
   }
 }

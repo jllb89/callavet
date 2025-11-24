@@ -44,29 +44,39 @@ export class DbService {
       const u = new URL(url);
       this.initPromise = undefined;
       const createPool = async () => {
-        // Prefer IPv4 resolution to avoid ENETUNREACH for IPv6-only addresses in container
+        // Enhanced resolution & diagnostics to defeat ENETUNREACH (IPv6) in container
         const originalHost = u.hostname;
-        let host = originalHost;
+        const overrideHost = process.env.DATABASE_FORCE_HOST?.trim();
+        let host = overrideHost || originalHost;
         const forceIpv4 = process.env.DB_FORCE_IPV4 !== '0';
-        if (forceIpv4) {
-          try {
-            const { address } = await dns.promises.lookup(originalHost, { family: 4 });
-            host = address;
-            if (process.env.DEV_DB_DEBUG === '1') {
-              // eslint-disable-next-line no-console
-              console.log('[db:init] ipv4 lookup success', originalHost, '->', host);
-            }
-          } catch (e: any) {
-            if (process.env.DEV_DB_DEBUG === '1') {
-              // eslint-disable-next-line no-console
-              console.warn('[db:init] ipv4 lookup failed, falling back to hostname', originalHost, e?.message);
-            }
-            host = originalHost; // fallback
+        let resolvedV4: string[] = [];
+        let resolvedV6: string[] = [];
+        if (process.env.DEV_DB_DEBUG === '1') {
+          // eslint-disable-next-line no-console
+          console.log('[db:init] starting resolution originalHost=', originalHost, ' overrideHost=', overrideHost || '(none)');
+        }
+        try {
+          resolvedV4 = await dns.promises.resolve4(originalHost);
+        } catch (e: any) {
+          if (process.env.DEV_DB_DEBUG === '1') {
+            // eslint-disable-next-line no-console
+            console.warn('[db:init] resolve4 failed', e?.message);
           }
+        }
+        try {
+          resolvedV6 = await dns.promises.resolve6(originalHost);
+        } catch (e: any) {
+          if (process.env.DEV_DB_DEBUG === '1') {
+            // eslint-disable-next-line no-console
+            console.warn('[db:init] resolve6 failed', e?.message);
+          }
+        }
+        if (forceIpv4 && resolvedV4.length) {
+          host = resolvedV4[0];
         }
         if (process.env.DEV_DB_DEBUG === '1') {
           // eslint-disable-next-line no-console
-          console.log('[db:init] using host=', host, ' ssl=', !!ssl, ' forceIpv4=', forceIpv4);
+          console.log('[db:init] resolvedV4=', resolvedV4, ' resolvedV6(count)=', resolvedV6.length, ' chosen host=', host, ' forceIpv4=', forceIpv4);
         }
         const cfg: any = {
           host,

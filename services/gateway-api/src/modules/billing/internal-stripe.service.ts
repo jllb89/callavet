@@ -22,6 +22,7 @@ export class InternalStripeService {
 
   async processEvent(evt: IncomingStripeEvent) {
     // Idempotency insert
+    await this.db.ensureReady();
     const inserted = await this.db.query<{ event_id: string }>(
       `INSERT INTO stripe_subscription_events (event_id, type, stripe_subscription_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING RETURNING event_id`,
       [evt.id, evt.type, this.extractSubscriptionId(evt)]
