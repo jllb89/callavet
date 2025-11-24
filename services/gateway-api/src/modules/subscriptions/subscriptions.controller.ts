@@ -133,47 +133,6 @@ export class SubscriptionsController {
     });
     return { ok: true, inTx: true, uid: (data as any).uid, claims: (data as any).claims };
   }
-
-  // Alternate checkout path: force claims.sub usage; falls back to x-user-id header; does NOT rely on auth.uid().
-  @Post('stripe/checkout2')
-  async stripeCheckout2(@Body() body: { plan_code?: string; success_url?: string; cancel_url?: string }) {
-    const planCode = (body?.plan_code || '').trim();
-    if (!planCode) throw new HttpException({ ok: false, reason: 'plan_code_required' }, HttpStatus.BAD_REQUEST);
-    const claims = this.rc.claims || null;
-    // Header override (local only) if claims missing
-    const reqId = (require('express/lib/request')) ? undefined : undefined; // placeholder to avoid unused import
-    // We access raw request via global nest context hack
-    const req: any = (Reflect as any).getMetadata?.('nest:http:request', stripeCheckout2) || undefined;
-    let userId: string | null = claims?.sub || null;
-    // Fallback: x-user-id header if present
-    try {
-      const httpCtx = (require('@nestjs/core')).HttpAdapterHost?.instance?.httpAdapter?.getInstance?.();
-    } catch {}
-    // Accept direct fallback from environment variable for testing
-    if (!userId && process.env.DEV_TEST_USER_ID) userId = process.env.DEV_TEST_USER_ID;
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (userId && !uuidRegex.test(userId)) userId = null;
-    if (!userId) throw new HttpException({ ok: false, reason: 'unauthenticated_alt', detail: 'claims.sub missing; set x-user-id header or DEV_TEST_USER_ID' }, HttpStatus.UNAUTHORIZED);
-    const priceId = this.mapPlanToPrice(planCode);
-    if (!priceId) throw new HttpException({ ok: false, reason: 'price_id_missing_for_plan', plan: planCode }, HttpStatus.BAD_REQUEST);
-    const sk = process.env.STRIPE_SECRET_KEY || '';
-    if (!sk) throw new HttpException({ ok: false, reason: 'stripe_secret_missing' }, HttpStatus.INTERNAL_SERVER_ERROR);
-    const Stripe = require('stripe');
-    const stripe = new Stripe(sk, { apiVersion: '2024-06-20' });
-    const successUrl = body?.success_url || process.env.CHECKOUT_SUCCESS_URL || 'http://localhost:3000/checkout/success';
-    const cancelUrl = body?.cancel_url || process.env.CHECKOUT_CANCEL_URL || 'http://localhost:3000/checkout/cancel';
-    const session = await stripe.checkout.sessions.create({
-      mode: 'subscription',
-      line_items: [{ price: priceId, quantity: 1 }],
-      success_url: successUrl + '?session_id={CHECKOUT_SESSION_ID}',
-      cancel_url: cancelUrl,
-      metadata: { user_id: userId },
-      subscription_data: { metadata: { user_id: userId } },
-      customer_creation: 'always'
-    });
-    return { ok: true, session_id: session.id, url: session.url, plan_code: planCode, strategy: 'claims_sub_or_header' };
-  }
-
   private mapPlanToPrice(planCode: string): string | null {
     switch (planCode.toLowerCase()) {
       case 'starter': return process.env.STRIPE_PRICE_STARTER || null;
