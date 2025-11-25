@@ -149,8 +149,8 @@ export class SubscriptionsController {
       success_url: successUrl + '?session_id={CHECKOUT_SESSION_ID}',
       cancel_url: cancelUrl,
       metadata: { user_id: userId },
-      subscription_data: { metadata: { user_id: userId } },
-      customer_creation: 'always'
+      subscription_data: { metadata: { user_id: userId } }
+      // Note: customer_creation is only valid in payment mode; removed for subscription mode.
     });
     return { ok: true, session_id: session.id, url: session.url, plan_code: planCode };
   }
