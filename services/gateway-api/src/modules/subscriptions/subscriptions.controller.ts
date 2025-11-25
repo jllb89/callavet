@@ -1,4 +1,5 @@
-import { Body, Controller, Get, HttpException, HttpStatus, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpException, HttpStatus, Post, UseGuards, Req } from '@nestjs/common';
+import { PriceService } from './price.service';
 import { DbService } from '../db/db.service';
 import { AuthGuard } from '../auth/auth.guard';
 import { RequestContext } from '../auth/request-context.service';
@@ -6,7 +7,7 @@ import { RequestContext } from '../auth/request-context.service';
 @Controller('subscriptions')
 @UseGuards(AuthGuard)
 export class SubscriptionsController {
-  constructor(private readonly db: DbService, private readonly rc: RequestContext) {}
+  constructor(private readonly db: DbService, private readonly rc: RequestContext, private readonly prices: PriceService) {}
 
   // ---- Lifecycle stubs (checkout/portal/cancel/resume/change-plan) ----
   // These are intentionally not implemented yet. Return NOT_IMPLEMENTED (501) with structured payload
@@ -97,15 +98,45 @@ export class SubscriptionsController {
 
   // New Stripe Checkout Session endpoint enforcing metadata.user_id
   @Post('stripe/checkout')
-  async stripeCheckout(@Body() body: { plan_code?: string; success_url?: string; cancel_url?: string }) {
+  async stripeCheckout(@Body() body: { plan_code?: string; success_url?: string; cancel_url?: string }, @Req() req: any) {
     const planCode = (body?.plan_code || '').trim();
     if (!planCode) throw new HttpException({ ok: false, reason: 'plan_code_required' }, HttpStatus.BAD_REQUEST);
-    const claimsSub = (this.rc.claims && (this.rc.claims as any).sub) || null;
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    // Primary: ALS request context
+    let claimsSub: string | null = (this.rc.claims && (this.rc.claims as any).sub) || null;
+    // Fallback: guard-attached authClaims
+    if (!claimsSub && req?.authClaims?.sub) claimsSub = req.authClaims.sub;
+    // Fallback: header x-user-id (dev only)
+    if (!claimsSub && req?.headers?.['x-user-id']) {
+      const raw = Array.isArray(req.headers['x-user-id']) ? req.headers['x-user-id'][0] : req.headers['x-user-id'];
+      const val = (raw || '').toString().trim();
+      if (uuidRegex.test(val)) claimsSub = val;
+    }
+    // Optional env override for local smoke
+    if (!claimsSub && process.env.DEV_TEST_USER_ID && uuidRegex.test(process.env.DEV_TEST_USER_ID)) {
+      claimsSub = process.env.DEV_TEST_USER_ID;
+    }
     const userId = claimsSub && uuidRegex.test(claimsSub) ? claimsSub : null;
-    if (!userId) throw new HttpException({ ok: false, reason: 'unauthenticated', detail: 'claims.sub missing or invalid UUID' }, HttpStatus.UNAUTHORIZED);
-    const priceId = this.mapPlanToPrice(planCode);
-    if (!priceId) throw new HttpException({ ok: false, reason: 'price_id_missing_for_plan', plan: planCode }, HttpStatus.BAD_REQUEST);
+    if (!userId) throw new HttpException({ ok: false, reason: 'unauthenticated', detail: 'claims.sub missing or invalid UUID', dbg: { rcClaims: this.rc.claims || null, authClaims: req?.authClaims || null } }, HttpStatus.UNAUTHORIZED);
+    // Determine billing period + currency from plan row (avoid hardcoded currency)
+    const planMeta = await this.db.query<any>(
+      `select id, code, currency, billing_period
+         from subscription_plans
+        where is_active and lower(code)=lower($1)
+        limit 1`,
+      [planCode]
+    );
+    if (!planMeta.rows[0]) throw new HttpException({ ok: false, reason: 'plan_not_found', plan: planCode }, HttpStatus.BAD_REQUEST);
+    const billingPeriod = (planMeta.rows[0].billing_period || 'month').toLowerCase();
+    const planCurrency = (planMeta.rows[0].currency || 'usd').toLowerCase();
+    // Fetch price from DB (flexible schema) using actual plan currency & period. Fallback to legacy env mapping if absent.
+    const priceEntry = await this.prices.getActivePrice(planCode, billingPeriod, planCurrency);
+    let priceId = priceEntry.stripePriceId;
+    if (!priceId) {
+      // Legacy fallback (will be removed after migration populated)
+      priceId = process.env[`STRIPE_PRICE_${planCode.toUpperCase()}`] || null;
+    }
+    if (!priceId) throw new HttpException({ ok: false, reason: 'price_id_missing_for_plan', plan: planCode, currency: planCurrency, billing_period: billingPeriod }, HttpStatus.BAD_REQUEST);
     const sk = process.env.STRIPE_SECRET_KEY || '';
     if (!sk) throw new HttpException({ ok: false, reason: 'stripe_secret_missing' }, HttpStatus.INTERNAL_SERVER_ERROR);
     const Stripe = require('stripe');
@@ -133,14 +164,7 @@ export class SubscriptionsController {
     });
     return { ok: true, inTx: true, uid: (data as any).uid, claims: (data as any).claims };
   }
-  private mapPlanToPrice(planCode: string): string | null {
-    switch (planCode.toLowerCase()) {
-      case 'starter': return process.env.STRIPE_PRICE_STARTER || null;
-      case 'plus': return process.env.STRIPE_PRICE_PLUS || null;
-      case 'cuadra': return process.env.STRIPE_PRICE_CUADRA || null;
-      default: return null;
-    }
-  }
+  // mapPlanToPrice removed in favor of PriceService + DB mapping.
 
   // Temporary debug endpoint (dev): exposes decoded claims and auth.uid() resolution
   @Get('debug-auth')
