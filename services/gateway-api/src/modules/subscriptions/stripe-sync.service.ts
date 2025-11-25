@@ -61,7 +61,7 @@ export class StripeSyncService {
 
       // Upsert logic
       const row = await this.db.query<any>(
-        `select id, stripe_price_id from subscription_plan_prices spp
+        `select spp.id as spp_id, spp.stripe_price_id from subscription_plan_prices spp
           join subscription_plans sp on sp.id = spp.plan_id
          where sp.is_active and lower(sp.code)=lower($1)
            and spp.billing_period=$2 and lower(spp.currency)=lower($3)
@@ -70,7 +70,7 @@ export class StripeSyncService {
 
       if (row.rows[0]) {
         if (row.rows[0].stripe_price_id !== price.id) {
-          await this.db.query(`update subscription_plan_prices set stripe_price_id=$1, stripe_product_id=$2, updated_at=now() where id=$3`, [price.id, product.id, row.rows[0].id]);
+          await this.db.query(`update subscription_plan_prices set stripe_price_id=$1, stripe_product_id=$2, updated_at=now() where id=$3`, [price.id, product.id, row.rows[0].spp_id]);
           updated++;
         } else {
           skipped++;
