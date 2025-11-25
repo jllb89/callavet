@@ -137,10 +137,22 @@ export class InternalStripeService {
     // Fallback insert if we can resolve user_id via stripe_customers mapping
     const userLookup = await this.db.query<{ user_id: string }>(`SELECT user_id FROM stripe_customers WHERE stripe_customer_id=$1 LIMIT 1`, [stripeCustomerId]);
     const userId = userLookup.rows[0]?.user_id;
-    if (!userId || !planId || !periodStart || !periodEnd) {
+    // Attempt synthetic period inference if missing (Stripe object sometimes lacks fields in slim payloads)
+    let inferredStart = periodStart;
+    let inferredEnd = periodEnd;
+    if (!inferredStart) inferredStart = Math.floor(Date.now() / 1000);
+    if (!inferredEnd) {
+      // Try derive from recurring interval of first item
+      const interval = (sub.items?.data?.[0]?.price?.recurring?.interval) || 'month';
+      const base = inferredStart || Math.floor(Date.now() / 1000);
+      const monthSecs = 30 * 24 * 3600; // acceptable approximation; real end will be corrected on next webhook
+      const yearSecs = 365 * 24 * 3600;
+      inferredEnd = base + (interval === 'year' ? yearSecs : monthSecs);
+    }
+    if (!userId || !planId || !inferredStart || !inferredEnd) {
       if (process.env.DEV_DB_DEBUG === '1') {
         // eslint-disable-next-line no-console
-        console.warn('[internal-stripe] fallback_insert skipped userId=', userId, 'planId=', planId, 'periodStart=', periodStart, 'periodEnd=', periodEnd);
+        console.warn('[internal-stripe] fallback_insert skipped userId=', userId, 'planId=', planId, 'inferredStart=', inferredStart, 'inferredEnd=', inferredEnd);
       }
       return { ok: true, updated: 0, warning: 'no_matching_row_and_missing_context' };
     }
@@ -156,8 +168,8 @@ export class InternalStripeService {
         userId,
         planId,
         mappedStatus,
-        periodStart,
-        periodEnd,
+        inferredStart,
+        inferredEnd,
         cancelAtPeriodEnd === null ? false : cancelAtPeriodEnd,
         stripeSubId,
         stripeCustomerId
