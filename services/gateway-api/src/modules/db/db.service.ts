@@ -48,7 +48,12 @@ export class DbService {
         const originalHost = u.hostname;
         const overrideHost = process.env.DATABASE_FORCE_HOST?.trim();
         let host = overrideHost || originalHost;
-        const forceIpv4 = process.env.DB_FORCE_IPV4 !== '0';
+        // Default to NOT forcing IPv4 to preserve TLS SNI for managed hosts like Supabase pooler
+        // Only force IPv4 if explicitly requested via env
+        let forceIpv4 = process.env.DB_FORCE_IPV4 === '1';
+        // Hard-disable IPv4 forcing for Supabase pooler/hosts to avoid IP substitution breaking SNI
+        const hostIsSupabase = /supabase\.com$/i.test(originalHost) || /pooler\.supabase\.com$/i.test(originalHost) || /aws-\d-.*\.supabase\.com$/i.test(originalHost);
+        if (hostIsSupabase) forceIpv4 = false;
         let resolvedV4: string[] = [];
         let resolvedV6: string[] = [];
         if (process.env.DEV_DB_DEBUG === '1') {
