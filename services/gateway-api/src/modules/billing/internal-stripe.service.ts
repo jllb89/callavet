@@ -12,12 +12,31 @@ interface IncomingStripeEvent {
 export class InternalStripeService {
   constructor(private readonly db: DbService) {}
 
-  private mapPriceToPlanCode(priceId?: string): string | undefined {
+  // Resolve plan (id + code) from Stripe price id using DB (no env vars)
+  private async resolvePlanFromPrice(priceId?: string): Promise<{ id: string; code: string } | undefined> {
     if (!priceId) return undefined;
-    if (priceId === process.env.STRIPE_PRICE_STARTER) return 'starter';
-    if (priceId === process.env.STRIPE_PRICE_PLUS) return 'plus';
-    if (priceId === process.env.STRIPE_PRICE_CUADRA) return 'cuadra';
-    return undefined;
+    // First: flexible pricing table (supports multi-currency/period)
+    const flex = await this.db.query<{ id: string; code: string }>(
+      `select sp.id, sp.code
+         from subscription_plan_prices spp
+         join subscription_plans sp on sp.id = spp.plan_id
+        where spp.is_active
+          and sp.is_active
+          and spp.stripe_price_id = $1
+        limit 1`,
+      [priceId]
+    );
+    if (flex.rows[0]) return flex.rows[0];
+    // Fallback: legacy single price columns on subscription_plans
+    const legacy = await this.db.query<{ id: string; code: string }>(
+      `select id, code
+         from subscription_plans
+        where is_active
+          and stripe_price_id = $1
+        limit 1`,
+      [priceId]
+    );
+    return legacy.rows[0] || undefined;
   }
 
   async processEvent(evt: IncomingStripeEvent) {
@@ -69,14 +88,9 @@ export class InternalStripeService {
     if (sub.items && sub.items.data && sub.items.data.length > 0) {
       priceId = sub.items.data[0]?.price?.id;
     }
-    const planCode = this.mapPriceToPlanCode(priceId);
-
-    // Fetch plan id if changed
-    let planId: string | undefined;
-    if (planCode) {
-      const planRes = await this.db.query<{ id: string }>(`SELECT id FROM subscription_plans WHERE is_active AND lower(code)=lower($1) LIMIT 1`, [planCode]);
-      planId = planRes.rows[0]?.id;
-    }
+    const plan = await this.resolvePlanFromPrice(priceId);
+    const planCode = plan?.code;
+    const planId = plan?.id;
 
     // Build dynamic SET clause
     const setFrags: string[] = [];
