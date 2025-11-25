@@ -89,6 +89,10 @@ export class InternalStripeService {
       priceId = sub.items.data[0]?.price?.id;
     }
     const plan = await this.resolvePlanFromPrice(priceId);
+    if (process.env.DEV_DB_DEBUG === '1') {
+      // eslint-disable-next-line no-console
+      console.log('[internal-stripe] handleSubscription evt=', evt.type, 'subId=', stripeSubId, 'priceId=', priceId, 'planResolved=', plan?.code || null);
+    }
     const planCode = plan?.code;
     const planId = plan?.id;
 
@@ -134,6 +138,10 @@ export class InternalStripeService {
     const userLookup = await this.db.query<{ user_id: string }>(`SELECT user_id FROM stripe_customers WHERE stripe_customer_id=$1 LIMIT 1`, [stripeCustomerId]);
     const userId = userLookup.rows[0]?.user_id;
     if (!userId || !planId || !periodStart || !periodEnd) {
+      if (process.env.DEV_DB_DEBUG === '1') {
+        // eslint-disable-next-line no-console
+        console.warn('[internal-stripe] fallback_insert skipped userId=', userId, 'planId=', planId, 'periodStart=', periodStart, 'periodEnd=', periodEnd);
+      }
       return { ok: true, updated: 0, warning: 'no_matching_row_and_missing_context' };
     }
     const newId = this.newUuid();
