@@ -404,8 +404,15 @@ export class SubscriptionsController {
         return { ok: true, mode: 'stub', usage: { included_chats: 2, consumed_chats: 0, included_videos: 1, consumed_videos: 0, overage_chats: 0, overage_videos: 0 } };
       }
       const usage = await this.db.runInTx(async (q) => {
+        // Use underlying table to include scheduled-cancel subs until period end
         const { rows: subs } = await q<{ id: string }>(
-          `select id from v_active_user_subscriptions where user_id = auth.uid() order by current_period_end desc limit 1`
+          `select id
+             from user_subscriptions
+            where user_id = auth.uid()
+              and status = 'active'
+              and coalesce(current_period_end, now()) > now()
+            order by current_period_end desc nulls last
+            limit 1`
         );
         if (!subs[0]) return null;
         const subId = subs[0].id;
@@ -489,8 +496,15 @@ export class SubscriptionsController {
         return { ok: true, usage: { included_chats: 0, consumed_chats: 0, included_videos: 0, consumed_videos: 0, period_start: new Date().toISOString(), period_end: new Date().toISOString() }, msg: 'stub' } as any;
       }
       const usage = await this.db.runInTx(async (q) => {
+        // Use underlying table to include scheduled-cancel subs until period end
         const { rows: subs } = await q<{ id: string }>(
-          `select id from v_active_user_subscriptions where user_id = auth.uid() order by current_period_end desc limit 1`
+          `select id
+             from user_subscriptions
+            where user_id = auth.uid()
+              and status = 'active'
+              and coalesce(current_period_end, now()) > now()
+            order by current_period_end desc nulls last
+            limit 1`
         );
         if (!subs[0]) return null;
         const subId = subs[0].id;
