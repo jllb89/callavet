@@ -131,11 +131,7 @@ export class SubscriptionsController {
     const planCurrency = (planMeta.rows[0].currency || 'usd').toLowerCase();
     // Fetch price from DB (flexible schema) using actual plan currency & period. Fallback to legacy env mapping if absent.
     const priceEntry = await this.prices.getActivePrice(planCode, billingPeriod, planCurrency);
-    let priceId = priceEntry.stripePriceId;
-    if (!priceId) {
-      // Legacy fallback (will be removed after migration populated)
-      priceId = process.env[`STRIPE_PRICE_${planCode.toUpperCase()}`] || null;
-    }
+    const priceId = priceEntry.stripePriceId;
     if (!priceId) throw new HttpException({ ok: false, reason: 'price_id_missing_for_plan', plan: planCode, currency: planCurrency, billing_period: billingPeriod }, HttpStatus.BAD_REQUEST);
     const sk = process.env.STRIPE_SECRET_KEY || '';
     if (!sk) throw new HttpException({ ok: false, reason: 'stripe_secret_missing' }, HttpStatus.INTERNAL_SERVER_ERROR);
