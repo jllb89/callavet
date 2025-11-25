@@ -180,6 +180,27 @@ export class SubscriptionsController {
     }
   }
 
+  // Lightweight DB status (no transaction) for connectivity diagnostics
+  @Get('db-status')
+  async dbStatus(){
+    try {
+      const status = this.db.status;
+      // Attempt simple probe if pool exists
+      let probe: string | null = null;
+      if (!status.stub) {
+        try {
+          await this.db.query('select 1 as ok');
+          probe = 'ok';
+        } catch (e: any){
+          probe = 'error:' + (e?.message || String(e));
+        }
+      }
+      return { ok: true, status, probe };
+    } catch (e: any){
+      return { ok: false, error: e?.message || String(e) };
+    }
+  }
+
   // Debug: inspect active view vs underlying table
   @Get('debug-active')
   async debugActive(){
