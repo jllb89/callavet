@@ -116,12 +116,70 @@ export class SessionsController {
         const ok = reserve?.ok === true;
         const consumptionId = reserve?.consumption_id || undefined;
         const msg = reserve?.msg;
-        const overage = !ok || !consumptionId;
+        let overage = !ok || !consumptionId;
+        let creditConsumptionId: string | null = null;
+        let creditUsedCode: string | null = null;
+        let creditRemaining: number | null = null;
+        // Ensure we have a subscription id before trying credits
+        let subIdForCredit: string | undefined = reserve?.subscription_id;
+        if (overage && !subIdForCredit) {
+          const { rows: subs } = await q<{ id: string }>(
+            `select id
+               from user_subscriptions
+              where user_id = auth.uid()
+                and status = 'active'
+                and coalesce(current_period_end, now()) > now()
+              order by current_period_end desc nulls last
+              limit 1`
+          );
+          subIdForCredit = subs[0]?.id;
+        }
+        // Try auto credit draw when out of entitlement
+        if (overage && subIdForCredit) {
+          const { rows: creditRows } = await q<{ id: string; code: string }>(
+            `select oc.id, oi.code
+               from overage_credits oc
+               join overage_items oi on oi.id = oc.overage_item_id
+              where oc.user_id = auth.uid()
+                and oc.remaining_units > 0
+                and (oi.metadata->>'type') = $1
+              order by oc.expires_at nulls last
+              limit 1
+              for update`,
+            [kind]
+          );
+          if (creditRows[0]) {
+            const creditId = creditRows[0].id;
+            creditUsedCode = creditRows[0].code;
+            const { rows: upd } = await q<{ remaining_units: number }>(
+              `update overage_credits
+                  set remaining_units = remaining_units - 1,
+                      updated_at = now()
+                where id = $1
+                  and remaining_units > 0
+                returning remaining_units`,
+              [creditId]
+            );
+            if (upd[0]) {
+              creditRemaining = upd[0].remaining_units;
+              const { rows: cons } = await q<{ id: string }>(
+                `insert into entitlement_consumptions (id, subscription_id, session_id, consumption_type, amount, source, created_at)
+                 values (gen_random_uuid(), $1::uuid, $2::uuid, $3::text, 1, 'credit', now())
+                 returning id`,
+                [subIdForCredit, dbSessionId, kind]
+              );
+              creditConsumptionId = cons[0]?.id || null;
+              if (creditConsumptionId) {
+                overage = false;
+              }
+            }
+          }
+        }
+        // If still overage, mark session pending payment for clarity
         if (overage) {
-          // Mark session as pending_payment for clarity (optional workflow state)
           await q('update chat_sessions set status = $2, updated_at = now() where id = $1', [dbSessionId, 'pending_payment']);
         }
-        return { dbSessionId, consumptionId, overage, msg };
+        return { dbSessionId, consumptionId, overage, msg, creditConsumptionId, creditUsedCode, creditRemaining };
       });
       if (result.overage) {
         return {
@@ -141,7 +199,15 @@ export class SessionsController {
           },
         };
       }
-      return { ok: true, sessionId: result.dbSessionId, consumptionId: result.consumptionId, kind, overage: false };
+      const finalConsumption = result.consumptionId || result.creditConsumptionId || undefined;
+      return {
+        ok: true,
+        sessionId: result.dbSessionId,
+        consumptionId: finalConsumption,
+        kind,
+        overage: false,
+        credit: result.creditConsumptionId ? { used: true, code: result.creditUsedCode, remaining: result.creditRemaining } : undefined,
+      };
     } catch (e: any) {
       throw new HttpException(e?.message || 'start_failed', HttpStatus.BAD_REQUEST);
     }

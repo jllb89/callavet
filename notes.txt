@@ -284,27 +284,8 @@ If RLS is confirmed, remove placeholder.local email fallback (only use claims.em
 Consider server-side provisioning after sign-up via webhook to centralize logic, and keep GET /me strictly read-only.
 
 
-estoy en el flujo de las suscripciones, tengo que probar terminar una desde stripe y que se refleje en la db
-
-
 
 export DATABASE_URL="postgresql://postgres:RwmNw5aE2EOvPavL@db.oajnhvizipicnypdxcrb.supabase.co:5432/postgres?sslmode=require"
-
-
-Recommended Production Approach (avoid ephemeral mismatch)
-
-Create a permanent webhook endpoint in the Stripe Dashboard pointing to https://cav-webhooks-staging-ugvx.onrender.com/stripe/webhook.
-Use THAT endpoint’s signing secret in STRIPE_WEBHOOK_SECRET. Do not rely on stripe listen for staging once permanent endpoint exists.
-Keep stripe listen only for local development (forwarding to localhost).
-
-
-Optional Next Enhancements
-
-Expose an admin endpoint POST /admin/pricing/sync calling StripeSyncService.sync().
-Metrics counters for cache hits/misses.
-Support yearly/currency variations by inserting rows in subscription_plan_prices.
-
-
 
 
 
@@ -316,3 +297,94 @@ I’ll add a webhook handler that:
 On checkout.session.completed or payment_intent.succeeded with metadata.overage_type and metadata.user_id, resolves the active subscription and inserts an entitlement_consumptions with source='overage'.
 We’ll keep idempotency via a unique constraint or by checking for an existing consumption for the same original_session_id.
 Tell me when you’ve completed the manual test; I’ll implement the webhook auto-consume to finish the flow.
+
+
+
+
+Missing or Partial
+
+Phase 2: POST /subscriptions/overage/consume (manual) — not implemented/hardened. Optional now, since webhooks auto-consume works; still useful for admin/manual ops.
+Phase 2: Auto-draw from credits in /sessions/start — your recent start showed overage:true and payment.stub:true; credits did not auto-decrement. Needs wiring to consume from overage_credits before prompting overage.
+Phase 3: Payment failure/refund paths — not yet validated. Handler should set failed/refunded and skip consume/credit.
+Phase 4 (Admin & Ops): CRUD for items, purchases/consumptions listing, basic reporting — not implemented.
+Phase 5 (Tests): Edge-case tests (failure/refund, idempotent re-delivery) and a simple uniqueness/index or guard for duplicate consumptions are only guarded by a SELECT; consider a unique index on (overage_purchase_id) or (overage_purchase_id, session_id) depending on your model.
+Recurring membership flow smoke: Plan checkout → user_subscriptions upsert verified once previously, but not re-run in this last pass; advisable to do a quick check again.
+
+
+
+
+
+Phase 1: Data Model Migrations
+
+Overage Items:
+Create overage_items (id, code, name, description, currency, amount_cents, is_active, metadata JSONB, created_at, updated_at).
+Overage Purchases:
+Create overage_purchases (id, user_id, overage_item_id, status, stripe_checkout_session_id, stripe_payment_intent_id, quantity, amount_cents_total, currency, original_session_id, created_at, updated_at).
+Overage Credits (units-based):
+Create overage_credits (id, user_id, overage_item_id, remaining_units, expires_at nullable, created_at, updated_at).
+Consumptions link:
+Alter entitlement_consumptions to add overage_purchase_id nullable FK.
+Seed Items:
+Insert initial items: chat_unit, video_unit, emergency_consult, sms_unit with prices (MXN, and optionally USD).
+Cleanup (already done):
+Ensure 0018_cleanup_legacy_rows.sql is applied (entitlement_consumptions → usage → subscriptions order).
+Phase 2: Gateway Endpoints
+
+Catalog:
+GET /overage/items: List active items for the current currency.
+Checkout (units or session-bound):
+POST /overage/checkout: Body { code, quantity?, original_session_id? } → creates Stripe Checkout Session; upserts overage_purchases with status='checkout_created'.
+Consume (manual step, session-bound or credits draw):
+POST /overage/consume: Body { code, original_session_id } → consumes one unit or records session consumption; inserts entitlement_consumptions with source='overage' and overage_purchase_id when applicable.
+Credits:
+GET /overage/credits: Returns per-item remaining units for the user.
+Session start integration:
+In POST /sessions/start, when entitlements return no_*_entitlement_left, check credits; if none, return overage prompt with code suggestion (chat_unit/video_unit).
+Phase 3: Webhook Auto-Consume
+
+Webhooks service → Gateway:
+On checkout.session.completed or payment_intent.succeeded:
+Verify signature via STRIPE_WEBHOOK_SECRET.
+Update overage_purchases to status='paid' (idempotent by stripe_checkout_session_id).
+If original_session_id present: auto-call consume (insert entitlement_consumptions with source='overage').
+If no original_session_id and item is units-based: increment overage_credits.remaining_units by quantity.
+On payment_intent.payment_failed / refunds:
+Mark overage_purchases failed or refunded; do not consume.
+Phase 4: Admin & Ops
+
+Admin endpoints:
+POST /admin/overage/items CRUD (create/update/deactivate items).
+GET /admin/overage/purchases: List purchases (status, Stripe ids, totals).
+GET /admin/overage/consumptions: Audit trail by user/item/date.
+Reporting views:
+Revenue by item and period; credits utilization rate; overage vs plan usage ratio.
+Phase 5: Tests (Order and Scope)
+
+Migrations:
+Apply new migrations in dev/staging; verify FKs and seed present:
+select code, amount_cents from overage_items;
+select column_name from information_schema.columns where table_name='entitlement_consumptions'; (ensure overage_purchase_id).
+Catalog:
+GET /overage/items returns seeded items, correct currency.
+Checkout:
+POST /overage/checkout with code='chat_unit', quantity=1 → returns session_id and url; row appears in overage_purchases with status='checkout_created'.
+Payment + Webhook:
+Complete hosted checkout; ensure webhook fires; overage_purchases.status='paid'.
+Consume (session-bound):
+Call POST /overage/consume with original_session_id → inserts entitlement_consumptions with source='overage' and links overage_purchase_id.
+Verify:
+select source, overage_purchase_id from entitlement_consumptions order by created_at desc limit 1;
+Credits (units-based):
+Checkout with quantity=3 and no original_session_id; post-webhook, verify credits:
+select remaining_units from overage_credits where user_id=... and overage_item_id=...;
+Start session with exhausted plan → draw from credits automatically in sessions/start.
+Edge cases:
+Payment failure → overage_purchases.status='failed', no consumption or credit.
+Idempotency:
+Re-deliver same webhook: purchase stays paid once; no duplicate consumption (unique check on (overage_purchase_id, original_session_id) or guard query).
+Phase 6: Production Checklist (already created)
+
+Confirm permanent webhook, Stripe keys/secrets, DB RLS, and auth flows.
+Validate cancel/resume flag propagation (done), entitlement functions (done), fallback removal (done).
+Add backups, rate limits, observability tags, and admin tools.
+
