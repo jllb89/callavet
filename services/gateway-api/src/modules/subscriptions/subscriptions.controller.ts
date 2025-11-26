@@ -344,6 +344,46 @@ export class SubscriptionsController {
         );
         return rows[0];
       });
+      // Fallback path: if function indicates no_active_subscription but usage endpoint would show an active
+      if (result && result.msg === 'no_active_subscription') {
+        const fallback = await this.db.runInTx(async (q) => {
+          // Resolve active subscription directly (include scheduled-cancel until period end)
+          const { rows: subs } = await q<{ id: string }>(
+            `select id
+               from user_subscriptions
+              where user_id = auth.uid()
+                and status = 'active'
+                and coalesce(current_period_end, now()) > now()
+              order by current_period_end desc nulls last
+              limit 1`
+          );
+          if (!subs[0]) return { ok: false, reason: 'no_active_subscription' };
+          const subId = subs[0].id;
+          // Ensure usage row exists (fn_current_usage will create if absent)
+          const { rows: usageRows } = await q<any>(`select * from fn_current_usage($1::uuid)`, [subId]);
+          const usage = usageRows[0];
+          if (!usage) return { ok: false, reason: 'usage_row_missing' };
+          // Attempt consumption
+          const { rows: updRows } = await q<any>(
+            `update subscription_usage
+                set consumed_chats = consumed_chats + 1,
+                    updated_at = now()
+              where id = $1
+                and consumed_chats < included_chats
+              returning id`,
+            [usage.id]
+          );
+          if (!updRows[0]) return { ok: false, reason: 'no_chat_entitlement_left' };
+          const { rows: consumptionRows } = await q<any>(
+            `insert into entitlement_consumptions (id, subscription_id, session_id, consumption_type, amount, source, created_at)
+             values (gen_random_uuid(), $1::uuid, $2::uuid, 'chat', 1, 'system', now())
+             returning id`,
+            [subId, body.sessionId]
+          );
+          return { ok: true, subscription_id: subId, consumption_id: consumptionRows[0].id, msg: 'ok', mode: 'fallback' };
+        });
+        return { ok: true, result: fallback };
+      }
       return { ok: true, result };
     } catch (e: any) {
       throw new HttpException(e?.message || 'reserve_chat_failed', HttpStatus.BAD_REQUEST);
@@ -363,6 +403,42 @@ export class SubscriptionsController {
         );
         return rows[0];
       });
+      if (result && result.msg === 'no_active_subscription') {
+        const fallback = await this.db.runInTx(async (q) => {
+          const { rows: subs } = await q<{ id: string }>(
+            `select id
+               from user_subscriptions
+              where user_id = auth.uid()
+                and status = 'active'
+                and coalesce(current_period_end, now()) > now()
+              order by current_period_end desc nulls last
+              limit 1`
+          );
+          if (!subs[0]) return { ok: false, reason: 'no_active_subscription' };
+          const subId = subs[0].id;
+          const { rows: usageRows } = await q<any>(`select * from fn_current_usage($1::uuid)`, [subId]);
+          const usage = usageRows[0];
+          if (!usage) return { ok: false, reason: 'usage_row_missing' };
+          const { rows: updRows } = await q<any>(
+            `update subscription_usage
+                set consumed_videos = consumed_videos + 1,
+                    updated_at = now()
+              where id = $1
+                and consumed_videos < included_videos
+              returning id`,
+            [usage.id]
+          );
+          if (!updRows[0]) return { ok: false, reason: 'no_video_entitlement_left' };
+          const { rows: consumptionRows } = await q<any>(
+            `insert into entitlement_consumptions (id, subscription_id, session_id, consumption_type, amount, source, created_at)
+             values (gen_random_uuid(), $1::uuid, $2::uuid, 'video', 1, 'system', now())
+             returning id`,
+            [subId, body.sessionId]
+          );
+          return { ok: true, subscription_id: subId, consumption_id: consumptionRows[0].id, msg: 'ok', mode: 'fallback' };
+        });
+        return { ok: true, result: fallback };
+      }
       return { ok: true, result };
     } catch (e: any) {
       throw new HttpException(e?.message || 'reserve_video_failed', HttpStatus.BAD_REQUEST);
