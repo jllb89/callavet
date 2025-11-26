@@ -15,8 +15,10 @@ export PGCONNECT_TIMEOUT=10
 
 echo "Applying migrations to: ${DATABASE_URL%%@*}@***"
 
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$MIG_DIR/0001_full_schema.sql"
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$MIG_DIR/0002_seed.sql"
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$MIG_DIR/0003_search_triggers.sql"
+echo "Running all migrations in $MIG_DIR"
+for f in "$MIG_DIR"/0*.sql; do
+  echo "Applying $(basename "$f")"
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"
+done
 
-echo "Migrations applied successfully"
+echo "All migrations applied successfully"

@@ -296,3 +296,10 @@ Recommended Production Approach (avoid ephemeral mismatch)
 Create a permanent webhook endpoint in the Stripe Dashboard pointing to https://cav-webhooks-staging-ugvx.onrender.com/stripe/webhook.
 Use THAT endpoint’s signing secret in STRIPE_WEBHOOK_SECRET. Do not rely on stripe listen for staging once permanent endpoint exists.
 Keep stripe listen only for local development (forwarding to localhost).
+
+
+Optional Next Enhancements
+
+Expose an admin endpoint POST /admin/pricing/sync calling StripeSyncService.sync().
+Metrics counters for cache hits/misses.
+Support yearly/currency variations by inserting rows in subscription_plan_prices.
