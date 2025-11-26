@@ -63,6 +63,11 @@ export class InternalStripeService {
         return this.handleCheckoutSession(evt);
       case 'payment_intent.succeeded':
         return this.handlePaymentIntentSucceeded(evt);
+      case 'payment_intent.payment_failed':
+        return this.handlePaymentIntentFailed(evt);
+      case 'charge.refunded':
+      case 'charge.refund.updated':
+        return this.handleChargeRefunded(evt);
       default:
         return { ok: true, unhandled: evt.type };
     }
@@ -356,6 +361,60 @@ export class InternalStripeService {
       return { matched: 1 } as any;
     });
     return { ok: true, payment_intent: piId, overage: res };
+  }
+
+  private async handlePaymentIntentFailed(evt: IncomingStripeEvent) {
+    const pi = evt.data || {};
+    const piId: string | undefined = pi.id;
+    if (!piId) return { ok: true, ignored: 'no_payment_intent_id' };
+    const res = await this.db.query(
+      `update overage_purchases set status='failed', updated_at=now() where stripe_payment_intent_id=$1 returning id`,
+      [piId]
+    );
+    return { ok: true, failed: res.rows.length, payment_intent: piId };
+  }
+
+  private async handleChargeRefunded(evt: IncomingStripeEvent) {
+    const charge = evt.data || {};
+    const piId: string | undefined = typeof charge.payment_intent === 'string' ? charge.payment_intent : (charge.payment_intent?.id || undefined);
+    if (!piId) return { ok: true, ignored: 'refund_no_payment_intent' };
+    const res = await this.db.runInTx(async (q) => {
+      const { rows: purchases } = await q<any>(
+        `select id, user_id, overage_item_id, quantity, status
+           from overage_purchases
+          where stripe_payment_intent_id = $1
+          limit 1 for update`,
+        [piId]
+      );
+      if (!purchases[0]) return { matched: 0 } as any;
+      const p = purchases[0];
+      // If purchase was credited, attempt to remove unused credits equal to quantity
+      if (p.status === 'credited') {
+        // Subtract min(quantity, remaining_units)
+        await q(
+          `update overage_credits
+              set remaining_units = GREATEST(remaining_units - $3, 0), updated_at=now()
+            where user_id=$1::uuid and overage_item_id=$2::uuid`,
+          [p.user_id, p.overage_item_id, p.quantity]
+        );
+      }
+      // If purchase was consumed we cannot easily revert entitlement; optionally grant compensating credit (business decision)
+      if (p.status === 'consumed') {
+        // Insert compensation credit so user retains usage after refund (can be toggled via env flag)
+        if (process.env.OVERAGE_REFUND_GRANT_CREDIT === '1') {
+          await q(
+            `insert into overage_credits (user_id, overage_item_id, remaining_units)
+             values ($1::uuid, $2::uuid, $3)
+             on conflict (user_id, overage_item_id)
+             do update set remaining_units = overage_credits.remaining_units + EXCLUDED.remaining_units, updated_at=now()`,
+            [p.user_id, p.overage_item_id, p.quantity]
+          );
+        }
+      }
+      await q(`update overage_purchases set status='refunded', updated_at=now() where id=$1`, [p.id]);
+      return { matched: 1, purchase_id: p.id, previous_status: p.status } as any;
+    });
+    return { ok: true, charge_refund: true, payment_intent: piId, overage: res };
   }
 
   private newUuid(): string {

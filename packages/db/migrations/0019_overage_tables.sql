@@ -43,3 +43,13 @@ CREATE TABLE IF NOT EXISTS overage_credits (
 -- Link consumptions to purchases
 ALTER TABLE entitlement_consumptions
   ADD COLUMN IF NOT EXISTS overage_purchase_id uuid REFERENCES overage_purchases(id) ON DELETE SET NULL;
+
+-- Prevent duplicate overage purchase consumption rows (one consumption per purchase id)
+CREATE UNIQUE INDEX IF NOT EXISTS entitlement_consumptions_overage_purchase_unique
+  ON entitlement_consumptions (overage_purchase_id)
+  WHERE overage_purchase_id IS NOT NULL;
+
+-- Optional safeguard: prevent multiple credit/source entries for same session & type before finalization
+CREATE UNIQUE INDEX IF NOT EXISTS entitlement_consumptions_session_type_source_unique
+  ON entitlement_consumptions (session_id, consumption_type, source)
+  WHERE session_id IS NOT NULL AND finalized = false AND source IN ('credit','overage');

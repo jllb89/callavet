@@ -288,12 +288,18 @@ export class SubscriptionsController {
       if (this.db.isStub) return { ok: true, stub: true } as any;
       const code = (body?.code || '').trim();
       if (!code) throw new HttpException({ ok: false, reason: 'code_required' }, HttpStatus.BAD_REQUEST);
-      // Resolve item and consumption type
-      const itemRow = await this.db.query<any>(`select id, metadata from overage_items where lower(code)=lower($1) limit 1`, [code]);
+      // Lookup item (for type mapping)
+      const itemRow = await this.db.query<any>(
+        `select id, metadata from overage_items where is_active and lower(code)=lower($1) limit 1`,
+        [code]
+      );
       if (!itemRow.rows[0]) throw new HttpException({ ok: false, reason: 'item_not_found' }, HttpStatus.BAD_REQUEST);
+      const itemId = itemRow.rows[0].id;
       const meta = itemRow.rows[0].metadata || {};
       const t = (meta.type || '').toString() || (code.includes('video') ? 'video' : code.includes('chat') ? 'chat' : code.includes('sms') ? 'sms' : 'emergency');
+      const sessionId = (body?.original_session_id || '').trim();
       const res = await this.db.runInTx(async (q) => {
+        // Active subscription required to attach consumption
         const { rows: subs } = await q<{ id: string }>(
           `select id
              from user_subscriptions
@@ -301,20 +307,84 @@ export class SubscriptionsController {
               and status = 'active'
               and coalesce(current_period_end, now()) > now()
             order by current_period_end desc nulls last
-            limit 1`
+            limit 1 for update`
         );
-        if (!subs[0]) return { notFound: true } as any;
+        if (!subs[0]) return { noSub: true } as any;
         const subId = subs[0].id;
-        const { rows: ins } = await q<any>(
-          `insert into entitlement_consumptions (id, subscription_id, session_id, consumption_type, amount, source, created_at)
-           values (gen_random_uuid(), $1::uuid, nullif($2,'')::uuid, $3::text, 1, 'overage', now())
-           returning id`,
-          [subId, body?.original_session_id || '', t]
+
+        // Attempt to find an unconsumed paid purchase for this item & optional session binding
+        const { rows: purchaseRows } = await q<{ id: string }>(
+          `select p.id
+             from overage_purchases p
+             left join entitlement_consumptions ec on ec.overage_purchase_id = p.id
+            where p.user_id = auth.uid()
+              and p.overage_item_id = $1::uuid
+              and p.status = 'paid'
+              and ec.id is null
+              and ($2::uuid is null or p.original_session_id = $2::uuid)
+            order by p.created_at asc
+            limit 1 for update`,
+          [itemId, sessionId || null]
         );
-        return { subId, consumptionId: ins[0]?.id };
+        if (purchaseRows[0]) {
+          const purchaseId = purchaseRows[0].id;
+          // Insert consumption referencing purchase
+          const { rows: cons } = await q<{ id: string }>(
+            `insert into entitlement_consumptions (id, subscription_id, session_id, consumption_type, amount, source, overage_purchase_id, created_at)
+             values (gen_random_uuid(), $1::uuid, nullif($2,'')::uuid, $3::text, 1, 'overage', $4::uuid, now())
+             returning id`,
+            [subId, sessionId || '', t, purchaseId]
+          );
+          // Mark purchase consumed
+          await q(`update overage_purchases set status='consumed', updated_at=now() where id=$1`, [purchaseId]);
+          return { mode: 'purchase', purchaseId, consumptionId: cons[0]?.id, subId };
+        }
+
+        // Fallback: draw from credit bucket
+        const { rows: creditRows } = await q<{ id: string; remaining_units: number }>(
+          `select oc.id, oc.remaining_units
+             from overage_credits oc
+             join overage_items oi on oi.id = oc.overage_item_id
+            where oc.user_id = auth.uid()
+              and oc.overage_item_id = $1::uuid
+              and oc.remaining_units > 0
+            limit 1 for update`,
+          [itemId]
+        );
+        if (creditRows[0]) {
+          const creditId = creditRows[0].id;
+          const { rows: upd } = await q<{ remaining_units: number }>(
+            `update overage_credits
+                set remaining_units = remaining_units - 1,
+                    updated_at = now()
+              where id = $1
+                and remaining_units > 0
+              returning remaining_units`,
+            [creditId]
+          );
+          if (upd[0]) {
+            const remaining = upd[0].remaining_units;
+            const { rows: cons } = await q<{ id: string }>(
+              `insert into entitlement_consumptions (id, subscription_id, session_id, consumption_type, amount, source, created_at)
+               values (gen_random_uuid(), $1::uuid, nullif($2,'')::uuid, $3::text, 1, 'credit', now())
+               returning id`,
+              [subId, sessionId || '', t]
+            );
+            return { mode: 'credit', creditRemaining: remaining, consumptionId: cons[0]?.id, subId };
+          }
+        }
+
+        return { none: true } as any;
       });
-      if ((res as any).notFound) return { ok: false, reason: 'no_active_subscription' };
-      return { ok: true, sub_id: (res as any).subId, consumption_id: (res as any).consumptionId };
+      if ((res as any).noSub) return { ok: false, reason: 'no_active_subscription' };
+      if ((res as any).none) return { ok: false, reason: 'no_purchase_or_credit_available' };
+      if ((res as any).mode === 'purchase') {
+        return { ok: true, mode: 'purchase', purchase_id: (res as any).purchaseId, consumption_id: (res as any).consumptionId };
+      }
+      if ((res as any).mode === 'credit') {
+        return { ok: true, mode: 'credit', remaining_units: (res as any).creditRemaining, consumption_id: (res as any).consumptionId };
+      }
+      return { ok: false, reason: 'unexpected_state' };
     } catch (e: any) {
       throw new HttpException(e?.message || 'overage_consume_failed', HttpStatus.BAD_REQUEST);
     }
