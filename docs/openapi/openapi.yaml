@@ -38,6 +38,74 @@ tags:
   - name: Webhooks
   - name: AI (internal)
 
+components:
+  schemas:
+    ErrorReason:
+      type: string
+      description: Standardized error reasons for subscriptions/overage/session flows
+      enum:
+        - validation_error
+        - unauthenticated
+        - plan_not_found
+        - already_has_active_subscription
+        - no_active_subscription
+        - cannot_resume_not_canceled
+        - change_plan_same_plan
+        - code_required
+        - item_not_found
+        - no_purchase_or_credit_available
+        - checkout_failed
+        - cancel_failed
+        - resume_failed
+        - change_plan_failed
+        - usage_failed
+        - start_failed
+        - end_failed
+        - commit_failed
+        - release_failed
+    Session:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        vet_id: { type: string, format: uuid, nullable: true }
+        pet_id: { type: string, format: uuid, nullable: true }
+        status: { type: string, enum: [active, completed, canceled, pending_payment] }
+        mode: { type: string, enum: [chat, video] }
+        started_at: { type: string, format: date-time }
+        ended_at: { type: string, format: date-time, nullable: true }
+    SessionEndResponse:
+      type: object
+      properties:
+        ok: { type: boolean }
+        sessionId: { type: string, format: uuid }
+        ended: { type: boolean }
+    SessionStartResponse:
+      type: object
+      properties:
+        ok: { type: boolean }
+        sessionId: { type: string, format: uuid }
+        consumptionId: { type: string, format: uuid, nullable: true }
+        kind: { type: string, enum: [chat, video] }
+        overage: { type: boolean }
+        credit:
+          type: object
+          nullable: true
+          properties:
+            used: { type: boolean }
+            code: { type: string }
+            remaining: { type: integer }
+        payment:
+          type: object
+          nullable: true
+          properties:
+            stub: { type: boolean }
+            status: { type: string }
+            type: { type: string }
+            currency: { type: string }
+            amount: { type: integer, nullable: true }
+            reason: { type: string }
+
 paths:
 
   /health:
@@ -308,7 +376,17 @@ paths:
       tags: [Plans & Subscriptions]
       summary: Current-period usage snapshot
       security: [{ bearerAuth: [] }]
-      responses: { "200": { $ref: "#/components/responses/Usage" } }
+      responses:
+        "200": { $ref: "#/components/responses/Usage" }
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
 
   /subscriptions/checkout:
     post:
@@ -316,28 +394,68 @@ paths:
       summary: Start Stripe Checkout for a plan
       security: [{ bearerAuth: [] }]
       requestBody: { $ref: "#/components/requestBodies/Checkout" }
-      responses: { "200": { $ref: "#/components/responses/StripeCheckout" } }
+      responses:
+        "200": { $ref: "#/components/responses/StripeCheckout" }
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
 
   /subscriptions/portal:
     post:
       tags: [Plans & Subscriptions]
       summary: Create Stripe Billing Portal session
       security: [{ bearerAuth: [] }]
-      responses: { "200": { $ref: "#/components/responses/StripePortal" } }
+      responses:
+        "200": { $ref: "#/components/responses/StripePortal" }
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
 
   /subscriptions/cancel:
     post:
       tags: [Plans & Subscriptions]
       summary: Cancel at period end
       security: [{ bearerAuth: [] }]
-      responses: { "200": { $ref: "#/components/responses/Subscription" } }
+      responses:
+        "200": { $ref: "#/components/responses/Subscription" }
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
 
   /subscriptions/resume:
     post:
       tags: [Plans & Subscriptions]
       summary: Resume subscription
       security: [{ bearerAuth: [] }]
-      responses: { "200": { $ref: "#/components/responses/Subscription" } }
+      responses:
+        "200": { $ref: "#/components/responses/Subscription" }
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
 
   /subscriptions/change-plan:
     post:
@@ -345,7 +463,198 @@ paths:
       summary: Change plan (prorated)
       security: [{ bearerAuth: [] }]
       requestBody: { $ref: "#/components/requestBodies/ChangePlan" }
-      responses: { "200": { $ref: "#/components/responses/Subscription" } }
+      responses:
+        "200": { $ref: "#/components/responses/Subscription" }
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
+
+  /subscriptions/stripe/checkout:
+    post:
+      tags: [Plans & Subscriptions]
+      summary: Create Stripe Checkout Session for a plan
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                plan_code: { type: string }
+                success_url: { type: string }
+                cancel_url: { type: string }
+      responses:
+        "200":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  session_id: { type: string }
+                  url: { type: string }
+                  plan_code: { type: string }
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
+
+  /subscriptions/overage/checkout:
+    post:
+      tags: [Plans & Subscriptions]
+      summary: Create Stripe Checkout Session for overage item
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                code: { type: string, description: Overage item code }
+                quantity: { type: integer, minimum: 1, default: 1 }
+                original_session_id: { type: string, format: uuid }
+                currency: { type: string }
+      responses:
+        "200":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  session_id: { type: string }
+                  url: { type: string }
+                  code: { type: string }
+                  quantity: { type: integer }
+                  currency: { type: string }
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
+
+  /subscriptions/overage/items:
+    get:
+      tags: [Plans & Subscriptions]
+      summary: List active overage items
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        code: { type: string }
+                        name: { type: string }
+                        description: { type: string }
+                        currency: { type: string }
+                        amount_cents: { type: integer }
+                        is_active: { type: boolean }
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
+
+  /subscriptions/overage/credits:
+    get:
+      tags: [Plans & Subscriptions]
+      summary: List overage credits for current user
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  credits:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        code: { type: string }
+                        remaining_units: { type: integer }
+                        expires_at: { type: string, nullable: true }
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
+
+  /subscriptions/overage/consume:
+    post:
+      tags: [Plans & Subscriptions]
+      summary: Manually consume a paid overage purchase or draw credit
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                code: { type: string }
+                original_session_id: { type: string, format: uuid }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  mode: { type: string, enum: [purchase, credit] }
+                  purchase_id: { type: string, format: uuid }
+                  consumption_id: { type: string, format: uuid }
+                  remaining_units: { type: integer }
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
 
   /entitlements/reserve:
     post:
@@ -388,6 +697,123 @@ paths:
             type: string
       requestBody: { $ref: "#/components/requestBodies/EntitlementRelease" }
       responses: { "200": { $ref: "#/components/responses/Ok" } }
+
+  /sessions:
+    get:
+      tags: [Sessions]
+      summary: List sessions for user or vet
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string, format: uuid }
+                        user_id: { type: string, format: uuid }
+                        vet_id: { type: string, format: uuid, nullable: true }
+                        pet_id: { type: string, format: uuid, nullable: true }
+                        status: { type: string }
+                        mode: { type: string, enum: [chat, video] }
+                        started_at: { type: string }
+                        ended_at: { type: string, nullable: true }
+
+  /sessions/{sessionId}:
+    get:
+      tags: [Sessions]
+      summary: Get session by id
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: sessionId
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+    patch:
+      tags: [Sessions]
+      summary: Update session status
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: sessionId
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: string, enum: [active, completed, canceled, pending_payment] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+
+  /sessions/start:
+    post:
+      tags: [Sessions]
+      summary: Start a chat or video session
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                type: { type: string, enum: [chat, video] }
+                kind: { type: string, enum: [chat, video] }
+                sessionId: { type: string, format: uuid }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionStartResponse" }
+
+  /sessions/end:
+    post:
+      tags: [Sessions]
+      summary: End a session and optionally commit consumption
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sessionId: { type: string, format: uuid }
+                consumptionId: { type: string, format: uuid, nullable: true }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionEndResponse" }
 
   /payments:
     get:

@@ -28,6 +28,10 @@ paths:
           name: sessionId
           required: true
           schema: { type: string, format: uuid }
+        - in: query
+          name: kind
+          required: false
+          schema: { type: string, enum: [chat, video] }
       responses:
         "101":
           description: Switching Protocols
@@ -124,6 +128,7 @@ components:
       properties:
         sessionId: { type: string, format: uuid }
         userId: { type: string, format: uuid }
+        kind: { type: string, enum: [chat, video] }
 
     server.message.appended:
       type: object

@@ -56,6 +56,7 @@ paths:
             schema:
               type: object
               properties:
+                id: { type: string, description: Stripe event id }
                 type: { type: string }
                 data: { type: object, additionalProperties: true }
       responses:
