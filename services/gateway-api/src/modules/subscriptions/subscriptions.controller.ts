@@ -230,6 +230,116 @@ export class SubscriptionsController {
     };
   }
 
+  // ---- Overage (one-off purchase when quota exhausted) ----
+  // Creates a one-off Stripe Checkout Session for overage unit (chat/video).
+  @Post('overage/checkout')
+  async overageCheckout(@Body() body: { code: string; quantity?: number; original_session_id?: string; currency?: string; success_url?: string; cancel_url?: string }, @Req() req: any) {
+    const code = (body?.code || '').trim();
+    if (!code) throw new HttpException({ ok: false, reason: 'code_required' }, HttpStatus.BAD_REQUEST);
+    const quantity = body?.quantity && body.quantity > 0 ? Math.floor(body.quantity) : 1;
+    const currency = (body?.currency || 'mxn').toLowerCase();
+    // Resolve user id
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    let userId: string | null = (this.rc.claims && (this.rc.claims as any).sub) || null;
+    if (!userId && req?.authClaims?.sub) userId = req.authClaims.sub;
+    if (!userId || !uuidRegex.test(userId)) throw new HttpException({ ok: false, reason: 'unauthenticated' }, HttpStatus.UNAUTHORIZED);
+    // Lookup catalog item
+    const itemRow = await this.db.query<any>(
+      `select id, code, name, currency, amount_cents, metadata from overage_items where is_active and lower(code)=lower($1) and lower(currency)=lower($2) limit 1`,
+      [code, currency]
+    );
+    if (!itemRow.rows[0]) throw new HttpException({ ok: false, reason: 'item_not_found', code, currency }, HttpStatus.BAD_REQUEST);
+    const item = itemRow.rows[0];
+    const sk = process.env.STRIPE_SECRET_KEY || '';
+    if (!sk) throw new HttpException({ ok: false, reason: 'stripe_secret_missing' }, HttpStatus.INTERNAL_SERVER_ERROR);
+    const Stripe = require('stripe');
+    const stripe = new Stripe(sk, { apiVersion: '2024-06-20' });
+    const successUrl = body?.success_url || process.env.CHECKOUT_SUCCESS_URL || 'http://localhost:3000/overage/success';
+    const cancelUrl = body?.cancel_url || process.env.CHECKOUT_CANCEL_URL || 'http://localhost:3000/overage/cancel';
+    const session = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      line_items: [{
+        price_data: {
+          currency,
+          product_data: { name: item.name },
+          unit_amount: item.amount_cents,
+        },
+        quantity,
+      }],
+      success_url: successUrl + '?session_id={CHECKOUT_SESSION_ID}',
+      cancel_url: cancelUrl,
+      metadata: { user_id: userId, overage_item_code: code, original_session_id: body?.original_session_id || '' },
+    });
+    // Persist purchase
+    const amountTotal = item.amount_cents * quantity;
+    await this.db.query(
+      `insert into overage_purchases (user_id, overage_item_id, status, stripe_checkout_session_id, quantity, amount_cents_total, currency, original_session_id)
+       values ($1::uuid, $2::uuid, 'checkout_created', $3, $4, $5, $6, nullif($7,'')::uuid)
+       on conflict (stripe_checkout_session_id) do nothing`,
+      [userId, item.id, session.id, quantity, amountTotal, currency, body?.original_session_id || '']
+    );
+    return { ok: true, session_id: session.id, url: session.url, code, quantity, currency };
+  }
+
+  // Confirms overage purchase and records a consumption (even if quota exhausted).
+  @Post('overage/consume')
+  async overageConsume(@Body() body: { code: string; original_session_id?: string }) {
+    try {
+      if (this.db.isStub) return { ok: true, stub: true } as any;
+      const code = (body?.code || '').trim();
+      if (!code) throw new HttpException({ ok: false, reason: 'code_required' }, HttpStatus.BAD_REQUEST);
+      // Resolve item and consumption type
+      const itemRow = await this.db.query<any>(`select id, metadata from overage_items where lower(code)=lower($1) limit 1`, [code]);
+      if (!itemRow.rows[0]) throw new HttpException({ ok: false, reason: 'item_not_found' }, HttpStatus.BAD_REQUEST);
+      const meta = itemRow.rows[0].metadata || {};
+      const t = (meta.type || '').toString() || (code.includes('video') ? 'video' : code.includes('chat') ? 'chat' : code.includes('sms') ? 'sms' : 'emergency');
+      const res = await this.db.runInTx(async (q) => {
+        const { rows: subs } = await q<{ id: string }>(
+          `select id
+             from user_subscriptions
+            where user_id = auth.uid()
+              and status = 'active'
+              and coalesce(current_period_end, now()) > now()
+            order by current_period_end desc nulls last
+            limit 1`
+        );
+        if (!subs[0]) return { notFound: true } as any;
+        const subId = subs[0].id;
+        const { rows: ins } = await q<any>(
+          `insert into entitlement_consumptions (id, subscription_id, session_id, consumption_type, amount, source, created_at)
+           values (gen_random_uuid(), $1::uuid, nullif($2,'')::uuid, $3::text, 1, 'overage', now())
+           returning id`,
+          [subId, body?.original_session_id || '', t]
+        );
+        return { subId, consumptionId: ins[0]?.id };
+      });
+      if ((res as any).notFound) return { ok: false, reason: 'no_active_subscription' };
+      return { ok: true, sub_id: (res as any).subId, consumption_id: (res as any).consumptionId };
+    } catch (e: any) {
+      throw new HttpException(e?.message || 'overage_consume_failed', HttpStatus.BAD_REQUEST);
+    }
+  }
+
+  @Get('overage/items')
+  async listOverageItems() {
+    const { rows } = await this.db.query<any>(`select code, name, description, currency, amount_cents, is_active from overage_items where is_active order by name asc`);
+    return { ok: true, items: rows };
+  }
+
+  @Get('overage/credits')
+  async listOverageCredits() {
+    const rows = await this.db.runInTx(async (q) => {
+      const { rows } = await q<any>(
+        `select oi.code, oc.remaining_units, oc.expires_at
+           from overage_credits oc
+           join overage_items oi on oi.id = oc.overage_item_id
+          where oc.user_id = auth.uid()`
+      );
+      return rows;
+    });
+    return { ok: true, credits: rows };
+  }
+
   @Post('cancel')
   async cancel(@Body() body: { immediate?: boolean }) {
     try {
