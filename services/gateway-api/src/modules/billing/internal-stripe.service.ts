@@ -61,6 +61,8 @@ export class InternalStripeService {
         return this.handleInvoicePayment(evt, false);
       case 'checkout.session.completed':
         return this.handleCheckoutSession(evt);
+      case 'payment_intent.succeeded':
+        return this.handlePaymentIntentSucceeded(evt);
       default:
         return { ok: true, unhandled: evt.type };
     }
@@ -213,11 +215,147 @@ export class InternalStripeService {
     const session = evt.data || {};
     const stripeCustomerId: string | undefined = session.customer;
     const userId: string | undefined = session.metadata?.user_id;
+    const overageCode: string | undefined = session.metadata?.overage_item_code;
+    const originalSessionId: string | undefined = session.metadata?.original_session_id;
+    const sessionId: string | undefined = session.id;
+    const paymentIntentId: string | undefined = typeof session.payment_intent === 'string' ? session.payment_intent : (session.payment_intent?.id || undefined);
     if (!stripeCustomerId) return { ok: true, ignored: 'no_customer_in_session' };
     if (userId) {
       await this.db.query(`INSERT INTO stripe_customers (user_id, stripe_customer_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [userId, stripeCustomerId]);
     }
+    // If this was an overage checkout, mark purchase paid and apply side-effects
+    if (sessionId) {
+      const res = await this.db.runInTx(async (q) => {
+        const upd = await q<any>(
+          `update overage_purchases
+              set status = 'paid',
+                  stripe_payment_intent_id = coalesce(stripe_payment_intent_id, $2),
+                  updated_at = now()
+            where stripe_checkout_session_id = $1
+            returning id, user_id, overage_item_id, quantity, original_session_id`,
+          [sessionId, paymentIntentId || null]
+        );
+        if (!upd.rows[0]) return { matched: 0 } as any;
+        const p = upd.rows[0];
+        // If original_session_id present, auto-consume one unit immediately
+        if (p.original_session_id) {
+          // Ensure we don't duplicate consumption for this purchase
+          const exists = await q<{ id: string }>(`select id from entitlement_consumptions where overage_purchase_id = $1 limit 1`, [p.id]);
+          if (!exists.rows[0]) {
+            // Resolve consumption type from item metadata or code
+            const { rows: items } = await q<any>(`select code, coalesce((metadata->>'type')::text,'') as meta_type from overage_items where id = $1`, [p.overage_item_id]);
+            const code = (items[0]?.code || '').toString();
+            const mtype = (items[0]?.meta_type || '').toString();
+            const t = mtype || (code.includes('video') ? 'video' : code.includes('chat') ? 'chat' : code.includes('sms') ? 'sms' : 'emergency');
+            // Find active subscription for user
+            const { rows: subs } = await q<{ id: string }>(
+              `select id
+                 from user_subscriptions
+                where user_id = $1::uuid
+                  and status = 'active'
+                  and coalesce(current_period_end, now()) > now()
+                order by current_period_end desc nulls last
+                limit 1`,
+              [p.user_id]
+            );
+            if (subs[0]) {
+              await q(
+                `insert into entitlement_consumptions (id, subscription_id, session_id, consumption_type, amount, source, created_at, overage_purchase_id)
+                 values (gen_random_uuid(), $1::uuid, $2::uuid, $3::text, 1, 'overage', now(), $4::uuid)
+                 on conflict do nothing`,
+                [subs[0].id, p.original_session_id, t, p.id]
+              );
+              // Mark purchase consumed
+              await q(`update overage_purchases set status='consumed', updated_at=now() where id=$1`, [p.id]);
+            } else {
+              // No active subscription: credit the units for later
+              await q(
+                `insert into overage_credits (user_id, overage_item_id, remaining_units)
+                 values ($1::uuid, $2::uuid, $3)
+                 on conflict (user_id, overage_item_id)
+                 do update set remaining_units = overage_credits.remaining_units + EXCLUDED.remaining_units, updated_at=now()`,
+                [p.user_id, p.overage_item_id, p.quantity]
+              );
+              await q(`update overage_purchases set status='credited', updated_at=now() where id=$1`, [p.id]);
+            }
+          }
+        } else {
+          // No session binding: credit the units
+          await q(
+            `insert into overage_credits (user_id, overage_item_id, remaining_units)
+             values ($1::uuid, $2::uuid, $3)
+             on conflict (user_id, overage_item_id)
+             do update set remaining_units = overage_credits.remaining_units + EXCLUDED.remaining_units, updated_at=now()`,
+            [p.user_id, p.overage_item_id, p.quantity]
+          );
+          await q(`update overage_purchases set status='credited', updated_at=now() where id=$1`, [p.id]);
+        }
+        return { matched: 1, purchase_id: p.id } as any;
+      });
+      return { ok: true, session: sessionId, overage: res };
+    }
     return { ok: true, session: session.id, mapped: !!userId };
+  }
+
+  private async handlePaymentIntentSucceeded(evt: IncomingStripeEvent) {
+    const pi = evt.data || {};
+    const piId: string | undefined = pi.id;
+    if (!piId) return { ok: true, ignored: 'no_payment_intent_id' };
+    // Update purchase by payment intent id if present
+    const res = await this.db.runInTx(async (q) => {
+      const upd = await q<any>(
+        `update overage_purchases
+            set status = 'paid',
+                updated_at = now()
+          where stripe_payment_intent_id = $1
+          returning id, user_id, overage_item_id, quantity, original_session_id`,
+        [piId]
+      );
+      if (!upd.rows[0]) return { matched: 0 } as any;
+      const p = upd.rows[0];
+      // If not yet consumed/credited, apply same side-effects as in checkout.session.completed
+      const exists = await q<{ id: string }>(`select id from entitlement_consumptions where overage_purchase_id=$1 limit 1`, [p.id]);
+      if (exists.rows[0]) return { matched: 1, alreadyConsumed: true } as any;
+      if (p.original_session_id) {
+        const { rows: items } = await q<any>(`select code, coalesce((metadata->>'type')::text,'') as meta_type from overage_items where id = $1`, [p.overage_item_id]);
+        const code = (items[0]?.code || '').toString();
+        const mtype = (items[0]?.meta_type || '').toString();
+        const t = mtype || (code.includes('video') ? 'video' : code.includes('chat') ? 'chat' : code.includes('sms') ? 'sms' : 'emergency');
+        const { rows: subs } = await q<{ id: string }>(
+          `select id from user_subscriptions where user_id=$1::uuid and status='active' and coalesce(current_period_end, now()) > now() order by current_period_end desc nulls last limit 1`,
+          [p.user_id]
+        );
+        if (subs[0]) {
+          await q(
+            `insert into entitlement_consumptions (id, subscription_id, session_id, consumption_type, amount, source, created_at, overage_purchase_id)
+             values (gen_random_uuid(), $1::uuid, $2::uuid, $3::text, 1, 'overage', now(), $4::uuid)
+             on conflict do nothing`,
+            [subs[0].id, p.original_session_id, t, p.id]
+          );
+          await q(`update overage_purchases set status='consumed', updated_at=now() where id=$1`, [p.id]);
+        } else {
+          await q(
+            `insert into overage_credits (user_id, overage_item_id, remaining_units)
+             values ($1::uuid, $2::uuid, $3)
+             on conflict (user_id, overage_item_id)
+             do update set remaining_units = overage_credits.remaining_units + EXCLUDED.remaining_units, updated_at=now()`,
+            [p.user_id, p.overage_item_id, p.quantity]
+          );
+          await q(`update overage_purchases set status='credited', updated_at=now() where id=$1`, [p.id]);
+        }
+      } else {
+        await q(
+          `insert into overage_credits (user_id, overage_item_id, remaining_units)
+           values ($1::uuid, $2::uuid, $3)
+           on conflict (user_id, overage_item_id)
+           do update set remaining_units = overage_credits.remaining_units + EXCLUDED.remaining_units, updated_at=now()`,
+          [p.user_id, p.overage_item_id, p.quantity]
+        );
+        await q(`update overage_purchases set status='credited', updated_at=now() where id=$1`, [p.id]);
+      }
+      return { matched: 1 } as any;
+    });
+    return { ok: true, payment_intent: piId, overage: res };
   }
 
   private newUuid(): string {
