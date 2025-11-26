@@ -96,40 +96,46 @@ export class InternalStripeService {
     const planCode = plan?.code;
     const planId = plan?.id;
 
-    // Build dynamic SET clause
+    // Build dynamic SET clause with stable placeholder indexing (no filtering afterwards)
     const setFrags: string[] = [];
     const values: any[] = [];
-    const push = (sql: string, val: any) => { setFrags.push(sql); values.push(val); };
+    const pushVal = (columnSql: string, value: any, transformTimestamp?: boolean) => {
+      const idx = values.length + 1;
+      if (transformTimestamp) {
+        setFrags.push(`${columnSql}=to_timestamp($${idx})`);
+      } else {
+        setFrags.push(`${columnSql}=$${idx}`);
+      }
+      values.push(value);
+    };
     const mappedStatus = this.mapStatus(status);
-    push(`status=$${values.length+1}`, mappedStatus);
-    if (periodStart) push(`current_period_start=to_timestamp($${values.length+1})`, periodStart);
-    if (periodEnd) push(`current_period_end=to_timestamp($${values.length+1})`, periodEnd);
-    push(`stripe_customer_id=$${values.length+1}`, stripeCustomerId);
-    push(`stripe_subscription_id=$${values.length+1}`, stripeSubId);
-    // Mirror legacy provider_* for backwards compatibility
-    push(`provider_customer_id=$${values.length+1}`, stripeCustomerId);
-    push(`provider_subscription_id=$${values.length+1}`, stripeSubId);
-    if (planId) push(`plan_id=$${values.length+1}`, planId);
-    if (cancelAtPeriodEnd !== null) push(`cancel_at_period_end=$${values.length+1}`, cancelAtPeriodEnd);
+    pushVal('status', mappedStatus);
+    if (periodStart) pushVal('current_period_start', periodStart, true);
+    if (periodEnd) pushVal('current_period_end', periodEnd, true);
+    pushVal('stripe_customer_id', stripeCustomerId);
+    pushVal('stripe_subscription_id', stripeSubId);
+    // Legacy mirrors
+    pushVal('provider_customer_id', stripeCustomerId);
+    pushVal('provider_subscription_id', stripeSubId);
+    if (planId) pushVal('plan_id', planId);
+    if (cancelAtPeriodEnd !== null) pushVal('cancel_at_period_end', cancelAtPeriodEnd);
     if (mappedStatus === 'canceled' && stripeCanceledAt) {
-      push(`canceled_at=to_timestamp($${values.length+1})`, stripeCanceledAt);
-      push(`auto_renew=$${values.length+1}`, false);
+      pushVal('canceled_at', stripeCanceledAt, true);
+      pushVal('auto_renew', false);
     }
-    push(`updated_at=now()`, null); // will ignore value
-
-    // Filter out null placeholder value (for updated_at)
-    const filteredValues = values.filter(v => v !== null);
+    // updated_at without placeholder
+    setFrags.push('updated_at=now()');
 
     // Attempt update by stripe_subscription_id first
-    const sqlBySub = `UPDATE user_subscriptions SET ${setFrags.join(', ')} WHERE stripe_subscription_id=$${filteredValues.length+1} RETURNING id`;
-    const bySub = await this.db.query<{ id: string }>(sqlBySub, [...filteredValues, stripeSubId]);
+    const sqlBySub = `UPDATE user_subscriptions SET ${setFrags.join(', ')} WHERE stripe_subscription_id=$${values.length+1} RETURNING id`;
+    const bySub = await this.db.query<{ id: string }>(sqlBySub, [...values, stripeSubId]);
     if (bySub.rows.length) {
       return { ok: true, updated: bySub.rows.length, mode: 'by_subscription_id' };
     }
 
     // Attempt update by customer id where subscription id missing
-    const sqlByCustomer = `UPDATE user_subscriptions SET ${setFrags.join(', ')} WHERE stripe_customer_id=$${filteredValues.length+1} AND (stripe_subscription_id IS NULL OR stripe_subscription_id='') RETURNING id`;
-    const byCust = await this.db.query<{ id: string }>(sqlByCustomer, [...filteredValues, stripeCustomerId]);
+    const sqlByCustomer = `UPDATE user_subscriptions SET ${setFrags.join(', ')} WHERE stripe_customer_id=$${values.length+1} AND (stripe_subscription_id IS NULL OR stripe_subscription_id='') RETURNING id`;
+    const byCust = await this.db.query<{ id: string }>(sqlByCustomer, [...values, stripeCustomerId]);
     if (byCust.rows.length) {
       return { ok: true, updated: byCust.rows.length, mode: 'by_customer_id' };
     }
