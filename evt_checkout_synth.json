@@ -1,0 +1,189 @@
+{
+  "id": "synthetic_evt_checkout",
+  "type": "checkout.session.completed",
+  "data": {
+    "object": {
+      "id": "cs_test_a1U6DxzVHqioZsUbh15zTXvunsjB7VtaXZRPsbZHHyW6rIEg5bQERFuK4J",
+      "object": "checkout.session",
+      "adaptive_pricing": {
+        "enabled": true
+      },
+      "after_expiration": null,
+      "allow_promotion_codes": null,
+      "amount_subtotal": 9900,
+      "amount_total": 9900,
+      "automatic_tax": {
+        "enabled": false,
+        "liability": null,
+        "provider": null,
+        "status": null
+      },
+      "billing_address_collection": null,
+      "branding_settings": {
+        "background_color": "#ffffff",
+        "border_style": "rounded",
+        "button_color": "#0074d4",
+        "display_name": "Call a Vet sandbox",
+        "font_family": "default",
+        "icon": null,
+        "logo": null
+      },
+      "cancel_url": "http://localhost:3000/overage/cancel",
+      "client_reference_id": null,
+      "client_secret": null,
+      "collected_information": null,
+      "consent": null,
+      "consent_collection": null,
+      "created": 1764181012,
+      "currency": "mxn",
+      "currency_conversion": null,
+      "custom_fields": [],
+      "custom_text": {
+        "after_submit": null,
+        "shipping_address": null,
+        "submit": null,
+        "terms_of_service_acceptance": null
+      },
+      "customer": null,
+      "customer_creation": "if_required",
+      "customer_details": {
+        "address": {
+          "city": "Ciudad de México",
+          "country": "MX",
+          "line1": "Avenida Insurgentes Sur 2411",
+          "line2": "Tizapán",
+          "postal_code": "01000",
+          "state": "CDMX"
+        },
+        "business_name": null,
+        "email": "lopezb.jl@gmail.com",
+        "individual_name": null,
+        "name": "Jorge Luis Lopez Barrera",
+        "phone": null,
+        "tax_exempt": "none",
+        "tax_ids": []
+      },
+      "customer_email": null,
+      "discounts": [],
+      "expires_at": 1764267412,
+      "invoice": null,
+      "invoice_creation": {
+        "enabled": false,
+        "invoice_data": {
+          "account_tax_ids": null,
+          "custom_fields": null,
+          "description": null,
+          "footer": null,
+          "issuer": null,
+          "metadata": {},
+          "rendering_options": null
+        }
+      },
+      "livemode": false,
+      "locale": null,
+      "metadata": {
+        "original_session_id": "bc33eea8-23d8-4bfd-b1da-003f7228d8b3",
+        "overage_item_code": "chat_unit",
+        "user_id": "b9222356-d0e4-43e6-ba02-8f2a5f37ec76"
+      },
+      "mode": "payment",
+      "origin_context": null,
+      "payment_intent": {
+        "id": "pi_3SXnJERrUOLNfmDO0z1QXC50",
+        "object": "payment_intent",
+        "amount": 9900,
+        "amount_capturable": 0,
+        "amount_details": {
+          "shipping": {
+            "amount": 0,
+            "from_postal_code": null,
+            "to_postal_code": null
+          },
+          "tax": {
+            "total_tax_amount": 0
+          },
+          "tip": {}
+        },
+        "amount_received": 9900,
+        "application": null,
+        "application_fee_amount": null,
+        "automatic_payment_methods": null,
+        "canceled_at": null,
+        "cancellation_reason": null,
+        "capture_method": "automatic_async",
+        "client_secret": "pi_3SXnJERrUOLNfmDO0z1QXC50_secret_DRiRYRm2hJGCXWRXjmZQ0lCCp",
+        "confirmation_method": "automatic",
+        "created": 1764181160,
+        "currency": "mxn",
+        "customer": null,
+        "description": null,
+        "excluded_payment_method_types": null,
+        "last_payment_error": null,
+        "latest_charge": "py_3SXnJERrUOLNfmDO0JIFLol0",
+        "livemode": false,
+        "metadata": {},
+        "next_action": null,
+        "on_behalf_of": null,
+        "payment_details": {
+          "customer_reference": null,
+          "order_reference": "prod_TUmqY75fSdV3Ae"
+        },
+        "payment_method": "pm_1SXnJERrUOLNfmDO9PH6geVk",
+        "payment_method_configuration_details": null,
+        "payment_method_options": {
+          "link": {
+            "persistent_token": null
+          }
+        },
+        "payment_method_types": [
+          "link"
+        ],
+        "processing": null,
+        "receipt_email": null,
+        "review": null,
+        "setup_future_usage": null,
+        "shipping": null,
+        "source": null,
+        "statement_descriptor": null,
+        "statement_descriptor_suffix": null,
+        "status": "succeeded",
+        "transfer_data": null,
+        "transfer_group": null
+      },
+      "payment_link": null,
+      "payment_method_collection": "if_required",
+      "payment_method_configuration_details": {
+        "id": "pmc_1SNh3yRrUOLNfmDOlCqrdXDK",
+        "parent": null
+      },
+      "payment_method_options": {},
+      "payment_method_types": [
+        "card",
+        "link"
+      ],
+      "payment_status": "paid",
+      "permissions": null,
+      "phone_number_collection": {
+        "enabled": false
+      },
+      "recovered_from": null,
+      "saved_payment_method_options": null,
+      "setup_intent": null,
+      "shipping_address_collection": null,
+      "shipping_cost": null,
+      "shipping_options": [],
+      "status": "complete",
+      "submit_type": null,
+      "subscription": null,
+      "success_url": "http://localhost:3000/overage/success?session_id={CHECKOUT_SESSION_ID}",
+      "total_details": {
+        "amount_discount": 0,
+        "amount_shipping": 0,
+        "amount_tax": 0
+      },
+      "ui_mode": "hosted",
+      "url": null,
+      "wallet_options": null
+    }
+  }
+}

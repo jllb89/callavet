@@ -219,8 +219,8 @@ export class InternalStripeService {
     const originalSessionId: string | undefined = session.metadata?.original_session_id;
     const sessionId: string | undefined = session.id;
     const paymentIntentId: string | undefined = typeof session.payment_intent === 'string' ? session.payment_intent : (session.payment_intent?.id || undefined);
-    if (!stripeCustomerId) return { ok: true, ignored: 'no_customer_in_session' };
-    if (userId) {
+    // Do not require Stripe customer for overage one-off flows; proceed if we have session metadata
+    if (userId && stripeCustomerId) {
       await this.db.query(`INSERT INTO stripe_customers (user_id, stripe_customer_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [userId, stripeCustomerId]);
     }
     // If this was an overage checkout, mark purchase paid and apply side-effects

@@ -1,0 +1,68 @@
+{
+  "id": "synthetic_evt_pi",
+  "type": "payment_intent.succeeded",
+  "data": {
+    "object": {
+      "id": "pi_3SXnJERrUOLNfmDO0z1QXC50",
+      "object": "payment_intent",
+      "amount": 9900,
+      "amount_capturable": 0,
+      "amount_details": {
+        "shipping": {
+          "amount": 0,
+          "from_postal_code": null,
+          "to_postal_code": null
+        },
+        "tax": {
+          "total_tax_amount": 0
+        },
+        "tip": {}
+      },
+      "amount_received": 9900,
+      "application": null,
+      "application_fee_amount": null,
+      "automatic_payment_methods": null,
+      "canceled_at": null,
+      "cancellation_reason": null,
+      "capture_method": "automatic_async",
+      "client_secret": "pi_3SXnJERrUOLNfmDO0z1QXC50_secret_DRiRYRm2hJGCXWRXjmZQ0lCCp",
+      "confirmation_method": "automatic",
+      "created": 1764181160,
+      "currency": "mxn",
+      "customer": null,
+      "description": null,
+      "excluded_payment_method_types": null,
+      "last_payment_error": null,
+      "latest_charge": "py_3SXnJERrUOLNfmDO0JIFLol0",
+      "livemode": false,
+      "metadata": {},
+      "next_action": null,
+      "on_behalf_of": null,
+      "payment_details": {
+        "customer_reference": null,
+        "order_reference": "prod_TUmqY75fSdV3Ae"
+      },
+      "payment_method": "pm_1SXnJERrUOLNfmDO9PH6geVk",
+      "payment_method_configuration_details": null,
+      "payment_method_options": {
+        "link": {
+          "persistent_token": null
+        }
+      },
+      "payment_method_types": [
+        "link"
+      ],
+      "processing": null,
+      "receipt_email": null,
+      "review": null,
+      "setup_future_usage": null,
+      "shipping": null,
+      "source": null,
+      "statement_descriptor": null,
+      "statement_descriptor_suffix": null,
+      "status": "succeeded",
+      "transfer_data": null,
+      "transfer_group": null
+    }
+  }
+}

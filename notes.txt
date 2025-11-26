@@ -303,3 +303,16 @@ Optional Next Enhancements
 Expose an admin endpoint POST /admin/pricing/sync calling StripeSyncService.sync().
 Metrics counters for cache hits/misses.
 Support yearly/currency variations by inserting rows in subscription_plan_prices.
+
+
+
+
+
+
+
+Next step (auto-consume handler)
+
+I’ll add a webhook handler that:
+On checkout.session.completed or payment_intent.succeeded with metadata.overage_type and metadata.user_id, resolves the active subscription and inserts an entitlement_consumptions with source='overage'.
+We’ll keep idempotency via a unique constraint or by checking for an existing consumption for the same original_session_id.
+Tell me when you’ve completed the manual test; I’ll implement the webhook auto-consume to finish the flow.
