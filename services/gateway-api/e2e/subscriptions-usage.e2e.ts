@@ -69,7 +69,12 @@ async function main() {
 
   const target = new URL('/subscriptions/usage', SERVER_URL).toString();
 
-  const authHeaders = process.env.AUTH_TOKEN ? { Authorization: `Bearer ${process.env.AUTH_TOKEN}` } : { 'x-user-id': USER_ID };
+  let authHeaders: Record<string,string> = {};
+  if (process.env.AUTH_TOKEN) {
+    authHeaders.Authorization = `Bearer ${process.env.AUTH_TOKEN}`;
+  } else {
+    authHeaders['x-user-id'] = USER_ID;
+  }
   const res = await requestJson('GET', target, authHeaders);
 
   assert(res && res.ok === true, 'response.ok should be true');
