@@ -80,8 +80,12 @@ export class InternalStripeService {
     const periodStart = sub.current_period_start ? Number(sub.current_period_start) : null;
     const periodEnd = sub.current_period_end ? Number(sub.current_period_end) : null;
     const status: string = sub.status;
-    const cancelAtPeriodEnd: boolean | null = typeof sub.cancel_at_period_end === 'boolean' ? sub.cancel_at_period_end : null;
     const stripeCanceledAt: number | null = sub.canceled_at ? Number(sub.canceled_at) : null;
+    const stripeCancelAt: number | null = sub.cancel_at ? Number(sub.cancel_at) : null;
+    // Derive cancel flag: true if explicit boolean true OR cancel_at timestamp present; false if explicit false; otherwise null (no change)
+    const cancelAtPeriodEnd: boolean | null =
+      sub.cancel_at_period_end === true || !!stripeCancelAt ? true :
+      (sub.cancel_at_period_end === false ? false : null);
 
     // Determine plan code via first line item's price id
     let priceId: string | undefined;
