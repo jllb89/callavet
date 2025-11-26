@@ -9,40 +9,46 @@
 */
 
 import http from 'http';
+import https from 'https';
 import { URL } from 'url';
 
 type Json = any;
 
 function requestJson(method: string, urlStr: string, headers: Record<string, string> = {}): Promise<Json> {
-  const url = new URL(urlStr);
-  const options: http.RequestOptions = {
+  const u = new URL(urlStr);
+  const isHttps = u.protocol === 'https:';
+  const client = isHttps ? https : http;
+  const options: https.RequestOptions = {
     method,
-    hostname: url.hostname,
-    port: url.port || 80,
-    path: url.pathname + url.search,
+    hostname: u.hostname,
+    port: u.port || (isHttps ? 443 : 80),
+    path: u.pathname + u.search,
     headers: {
+      'accept': 'application/json',
       'content-type': 'application/json',
       ...headers,
     },
   };
-
   return new Promise((resolve, reject) => {
-    const req = http.request(options, (res) => {
+    const req = client.request(options, (res) => {
+      // Follow up to one redirect manually (301/302/307/308)
+      if (res.statusCode && [301,302,307,308].includes(res.statusCode) && res.headers.location) {
+        req.destroy();
+        return resolve(requestJson(method, res.headers.location!, headers));
+      }
       let data = '';
-      res.setEncoding('utf8');
-      res.on('data', (chunk) => (data += chunk));
+      res.on('data', (c) => (data += c));
       res.on('end', () => {
+        const ct = (res.headers['content-type'] || '').toString();
+        const looksJson = ct.includes('application/json') && !data.startsWith('<');
         try {
-          const json = data ? JSON.parse(data) : {};
-          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-            resolve(json);
-          } else {
-            const err = new Error(`HTTP ${res.statusCode}: ${data}`);
-            (err as any).response = json;
-            reject(err);
-          }
-        } catch (e) {
-          reject(new Error(`Invalid JSON response: ${e instanceof Error ? e.message : String(e)} | body=${data}`));
+          const json = looksJson && data ? JSON.parse(data) : (looksJson ? {} : { raw: data });
+          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) return resolve(json);
+          const err = new Error(`HTTP ${res.statusCode}: ${data}`);
+          (err as any).response = json;
+          return reject(err);
+        } catch (e:any) {
+          return reject(new Error(`Invalid JSON response: ${e.message} | body=${data.substring(0,200)}`));
         }
       });
     });
@@ -58,12 +64,13 @@ function assert(condition: any, msg: string): asserts condition {
 }
 
 async function main() {
-  const SERVER_URL = process.env.SERVER_URL || 'http://localhost:4000';
+  const SERVER_URL = process.env.SERVER_URL || process.env.GATEWAY || 'http://localhost:4000';
   const USER_ID = process.env.USER_ID || '00000000-0000-0000-0000-000000000002';
 
   const target = new URL('/subscriptions/usage', SERVER_URL).toString();
 
-  const res = await requestJson('GET', target, { 'x-user-id': USER_ID });
+  const authHeaders = process.env.AUTH_TOKEN ? { Authorization: `Bearer ${process.env.AUTH_TOKEN}` } : { 'x-user-id': USER_ID };
+  const res = await requestJson('GET', target, authHeaders);
 
   assert(res && res.ok === true, 'response.ok should be true');
   assert(res.msg === 'ok', `expected msg=ok, got ${res.msg}`);

@@ -7,8 +7,9 @@
     "build": "tsc",
     "start:dev": "node --enable-source-maps dist/main.js",
     "start:prod": "node dist/main.js",
-  "e2e:subscriptions": "node e2e/subscriptions-usage.e2e.js",
-    "e2e": "pnpm run e2e:subscriptions"
+  "e2e:subscriptions": "ts-node e2e/subscriptions-usage.e2e.ts",
+  "e2e:overage": "ts-node e2e/overage-credit-draw.e2e.ts",
+    "e2e": "pnpm run e2e:subscriptions && pnpm run e2e:overage"
   },
   "dependencies": {
     "@nestjs/common": "^10.4.7",
