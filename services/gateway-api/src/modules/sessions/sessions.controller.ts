@@ -88,10 +88,10 @@ export class SessionsController {
   }
 
   @Post('start')
-  async start(@Body() body: { userId?: string; kind?: 'chat'|'video'; mode?: 'chat'|'video'; sessionId?: string }) {
+  async start(@Body() body: { userId?: string; kind?: 'chat'|'video'; mode?: 'chat'|'video'; type?: 'chat'|'video'; sessionId?: string }) {
     try {
-      // Support either `kind` or legacy `mode` field from clients; default chat
-      const incoming = (body.kind || body.mode || 'chat')?.toString().toLowerCase();
+      // Support `kind`, `mode`, or `type` field from clients; default chat
+      const incoming = (body.kind || body.mode || body.type || 'chat')?.toString().toLowerCase();
       const kind: 'chat'|'video' = incoming === 'video' ? 'video' : 'chat';
       if (this.db.isStub) {
         const sessionId = body.sessionId || `sess_${Date.now()}`;
