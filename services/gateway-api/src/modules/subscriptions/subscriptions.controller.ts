@@ -410,6 +410,214 @@ export class SubscriptionsController {
     return { ok: true, credits: rows };
   }
 
+  // List overage purchases for current user
+  @Get('overage/purchases')
+  async listOveragePurchases() {
+    try {
+      if (this.db.isStub) return { ok: true, stub: true, purchases: [] } as any;
+      const rows = await this.db.runInTx(async (q) => {
+        const { rows } = await q<any>(
+          `select p.id, oi.code, p.status, p.quantity, p.amount_cents_total, p.currency, p.original_session_id, p.created_at, p.updated_at
+             from overage_purchases p
+             join overage_items oi on oi.id = p.overage_item_id
+            where p.user_id = auth.uid()
+            order by p.created_at desc`
+        );
+        return rows;
+      });
+      return { ok: true, purchases: rows };
+    } catch (e: any) {
+      throw new HttpException(e?.message || 'overage_purchases_list_failed', HttpStatus.BAD_REQUEST);
+    }
+  }
+
+  // List overage/credit consumptions for current user (sources overage|credit)
+  @Get('overage/consumptions')
+  async listOverageConsumptions() {
+    try {
+      if (this.db.isStub) return { ok: true, stub: true, consumptions: [] } as any;
+      const rows = await this.db.runInTx(async (q) => {
+        const { rows } = await q<any>(
+          `select ec.id, ec.source, ec.session_id, ec.consumption_type, ec.amount, ec.created_at, ec.overage_purchase_id
+             from entitlement_consumptions ec
+            where ec.user_id = auth.uid()
+              and ec.source in ('overage','credit')
+            order by ec.created_at desc`
+        );
+        return rows;
+      });
+      return { ok: true, consumptions: rows };
+    } catch (e: any) {
+      throw new HttpException(e?.message || 'overage_consumptions_list_failed', HttpStatus.BAD_REQUEST);
+    }
+  }
+
+  // Mark a purchase paid manually (admin or dev use) and optionally auto-consume if session-bound.
+  @Post('overage/mark-paid')
+  async markOveragePaid(@Body() body: { purchase_id?: string; force_consume?: boolean }) {
+    try {
+      if (this.db.isStub) return { ok: true, stub: true } as any;
+      const pid = (body?.purchase_id || '').trim();
+      if (!pid) return { ok: false, reason: 'purchase_id_required' };
+      const row = await this.db.runInTx(async (q) => {
+        // Lock purchase
+        const { rows: purchaseRows } = await q<any>(
+          `select p.id, p.user_id, p.status, p.original_session_id, p.overage_item_id, p.quantity
+             from overage_purchases p
+            where p.id = $1::uuid and p.user_id = auth.uid()
+            limit 1 for update`, [pid]
+        );
+        if (!purchaseRows[0]) return { notFound: true } as any;
+        const purchase = purchaseRows[0];
+        if (purchase.status === 'paid' || purchase.status === 'consumed') return { already: true, purchase } as any;
+        // Transition to paid
+        await q(`update overage_purchases set status='paid', updated_at=now() where id=$1`, [pid]);
+        // Auto credit if not session-bound
+        if (!purchase.original_session_id) {
+          // Credit bucket increment
+            const { rows: creditItemRow } = await q<any>(`select id, code from overage_items where id=$1`, [purchase.overage_item_id]);
+            const itemCode = creditItemRow[0]?.code;
+            if (itemCode) {
+              // Find or create credits row
+              const { rows: existingCredits } = await q<any>(
+                `select id from overage_credits where user_id = auth.uid() and overage_item_id=$1 limit 1 for update`,
+                [purchase.overage_item_id]
+              );
+              if (existingCredits[0]) {
+                await q(`update overage_credits set remaining_units = remaining_units + $2, updated_at=now() where id=$1`, [existingCredits[0].id, purchase.quantity]);
+              } else {
+                await q(`insert into overage_credits (id, user_id, overage_item_id, remaining_units, created_at, updated_at) values (gen_random_uuid(), auth.uid(), $1, $2, now(), now())`, [purchase.overage_item_id, purchase.quantity]);
+              }
+              return { mode: 'credited', purchase_id: purchase.id, quantity: purchase.quantity } as any;
+            }
+        }
+        // Session-bound auto consume if requested and original_session_id present
+        if (purchase.original_session_id && body?.force_consume) {
+          // Need active subscription id
+          const { rows: subs } = await q<{ id: string }>(`select id from v_active_user_subscriptions where user_id=auth.uid() limit 1`);
+          const subId = subs[0]?.id;
+          if (!subId) return { noSub: true } as any;
+          // Map item type
+          const { rows: itemMeta } = await q<any>(`select metadata from overage_items where id=$1`, [purchase.overage_item_id]);
+          const meta = itemMeta[0]?.metadata || {};
+          const t = (meta.type || '').toString() || (itemMeta[0] && itemMeta[0].metadata?.type) || 'chat';
+          const { rows: cons } = await q<{ id: string }>(
+            `insert into entitlement_consumptions (id, subscription_id, session_id, consumption_type, amount, source, overage_purchase_id, created_at)
+             values (gen_random_uuid(), $1::uuid, $2::uuid, $3::text, 1, 'overage', $4::uuid, now()) returning id`,
+            [subId, purchase.original_session_id, t, purchase.id]
+          );
+          await q(`update overage_purchases set status='consumed', updated_at=now() where id=$1`, [purchase.id]);
+          return { mode: 'consumed', purchase_id: purchase.id, consumption_id: cons[0]?.id } as any;
+        }
+        return { mode: 'paid', purchase_id: purchase.id } as any;
+      });
+      if ((row as any).notFound) return { ok: false, reason: 'purchase_not_found' };
+      if ((row as any).already) return { ok: true, already: true, purchase: (row as any).purchase };
+      if ((row as any).noSub) return { ok: false, reason: 'no_active_subscription' };
+      return { ok: true, ...row };
+    } catch (e: any) {
+      throw new HttpException(e?.message || 'overage_mark_paid_failed', HttpStatus.BAD_REQUEST);
+    }
+  }
+
+  // Mark purchase refunded and reverse credits if still in paid state (not yet consumed).
+  @Post('overage/mark-refunded')
+  async markOverageRefunded(@Body() body: { purchase_id?: string }) {
+    try {
+      if (this.db.isStub) return { ok: true, stub: true } as any;
+      const pid = (body?.purchase_id || '').trim();
+      if (!pid) return { ok: false, reason: 'purchase_id_required' };
+      const row = await this.db.runInTx(async (q) => {
+        const { rows: purchaseRows } = await q<any>(
+          `select p.id, p.status, p.quantity, p.original_session_id, p.overage_item_id
+             from overage_purchases p
+            where p.id=$1::uuid and p.user_id=auth.uid()
+            limit 1 for update`, [pid]
+        );
+        if (!purchaseRows[0]) return { notFound: true } as any;
+        const purchase = purchaseRows[0];
+        const prevStatus = purchase.status;
+        // Reverse credits only if it was a paid (not consumed) unit purchase (no original_session_id)
+        let creditsReversed = 0;
+        if (prevStatus === 'paid' && !purchase.original_session_id) {
+          // decrement credits bucket
+          const { rows: creditRow } = await q<any>(
+            `select id, remaining_units from overage_credits where user_id=auth.uid() and overage_item_id=$1 limit 1 for update`,
+            [purchase.overage_item_id]
+          );
+            if (creditRow[0]) {
+              const toRemove = Math.min(creditRow[0].remaining_units, purchase.quantity);
+              if (toRemove > 0) {
+                await q(`update overage_credits set remaining_units = remaining_units - $2, updated_at=now() where id=$1`, [creditRow[0].id, toRemove]);
+                creditsReversed = toRemove;
+              }
+            }
+        }
+        await q(`update overage_purchases set status='refunded', updated_at=now() where id=$1`, [purchase.id]);
+        return { purchase_id: purchase.id, previous_status: prevStatus, credits_reversed: creditsReversed };
+      });
+      if ((row as any).notFound) return { ok: false, reason: 'purchase_not_found' };
+      return { ok: true, ...row };
+    } catch (e: any) {
+      throw new HttpException(e?.message || 'overage_mark_refunded_failed', HttpStatus.BAD_REQUEST);
+    }
+  }
+
+  // Adjust credit units manually (delta can be positive to grant or negative to revoke)
+  @Post('overage/adjust-credits')
+  async adjustCredits(@Body() body: { code?: string; delta?: number; expires_at?: string }) {
+    try {
+      if (this.db.isStub) return { ok: true, stub: true } as any;
+      const code = (body?.code || '').trim();
+      const deltaRaw = body?.delta;
+      if (!code) return { ok: false, reason: 'code_required' };
+      if (typeof deltaRaw !== 'number' || !Number.isFinite(deltaRaw) || deltaRaw === 0) return { ok: false, reason: 'delta_required_nonzero' };
+      const delta = Math.trunc(deltaRaw);
+      const row = await this.db.runInTx(async (q) => {
+        const { rows: itemRows } = await q<any>(`select id from overage_items where is_active and lower(code)=lower($1) limit 1`, [code]);
+        if (!itemRows[0]) return { itemNotFound: true } as any;
+        const itemId = itemRows[0].id;
+        // Lock existing credit row
+        const { rows: creditRows } = await q<any>(
+          `select id, remaining_units from overage_credits where user_id = auth.uid() and overage_item_id=$1 limit 1 for update`,
+          [itemId]
+        );
+        if (delta > 0) {
+          if (creditRows[0]) {
+            const { rows: upd } = await q<any>(
+              `update overage_credits set remaining_units = remaining_units + $2, expires_at = coalesce($3::timestamptz, expires_at), updated_at=now()
+               where id=$1 returning remaining_units`,
+              [creditRows[0].id, delta, body?.expires_at || null]
+            );
+            return { mode: 'increment', remaining: upd[0].remaining_units };
+          } else {
+            const { rows: ins } = await q<any>(
+              `insert into overage_credits (id, user_id, overage_item_id, remaining_units, expires_at, created_at, updated_at)
+               values (gen_random_uuid(), auth.uid(), $1, $2, $3::timestamptz, now(), now()) returning remaining_units`,
+              [itemId, delta, body?.expires_at || null]
+            );
+            return { mode: 'create', remaining: ins[0].remaining_units };
+          }
+        } else {
+          if (!creditRows[0]) return { noCredits: true } as any;
+          const abs = Math.min(creditRows[0].remaining_units, Math.abs(delta));
+          if (abs === 0) return { nothingToRemove: true } as any;
+          const { rows: upd } = await q<any>(
+            `update overage_credits set remaining_units = remaining_units - $2, updated_at=now() where id=$1 returning remaining_units`,
+            [creditRows[0].id, abs]
+          );
+          return { mode: 'decrement', removed: abs, remaining: upd[0].remaining_units };
+        }
+      });
+      if ((row as any).itemNotFound) return { ok: false, reason: 'item_not_found' };
+      if ((row as any).noCredits) return { ok: false, reason: 'no_existing_credit_row' };
+      if ((row as any).nothingToRemove) return { ok: false, reason: 'nothing_to_remove' };
+      return { ok: true, ...row };
+    } catch (e: any) {
+      throw new HttpException(e?.message || 'overage_adjust_credits_failed', HttpStatus.BAD_REQUEST);
+    }
+  }
+
   @Post('cancel')
   async cancel(@Body() body: { immediate?: boolean }) {
     try {
