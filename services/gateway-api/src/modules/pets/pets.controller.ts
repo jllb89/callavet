@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpException, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpException, HttpStatus, Param, Patch, Post, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '../auth/auth.guard';
 import { DbService } from '../db/db.service';
 import { RequestContext } from '../auth/request-context.service';
@@ -10,7 +10,7 @@ export class PetsController {
 
   @Get()
   async list() {
-    if (this.db.isStub) return { items: [] } as any;
+    if (this.db.isStub) return { data: [] } as any;
     const { rows } = await this.db.runInTx(async (q) => {
       const r = await q(
         `select id::text as id, name, species, breed, color, sex, birthdate, archived_at
@@ -21,7 +21,7 @@ export class PetsController {
       );
       return r;
     });
-    return { items: rows };
+    return { data: rows };
   }
 
   @Get(':id')
@@ -41,6 +41,7 @@ export class PetsController {
   }
 
   @Post()
+  @HttpCode(HttpStatus.CREATED)
   async create(@Body() body: any) {
     if (!body?.name) throw new HttpException('name required', 400);
     const { rows } = await this.db.runInTx(async (q) => {
@@ -81,6 +82,7 @@ export class PetsController {
   }
 
   @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
   async remove(@Param('id') id: string) {
     const { rows } = await this.db.runInTx(async (q) => {
       const r = await q(
@@ -91,6 +93,14 @@ export class PetsController {
       return r;
     });
     if (!rows.length) throw new HttpException('Not Found', 404);
-    return { ok: true };
+    return;
+  }
+
+  // POST /pets/:id/files/signed-url (stub integration with storage)
+  @Post(':id/files/signed-url')
+  async petSignedUrl(@Param('id') id: string, @Body() body: any) {
+    // In a future iteration, validate pet ownership & call storage client.
+    const path = body?.path || `pets/${id}/${Date.now()}-${Math.random().toString(36).slice(2)}.bin`;
+    return { path, url: `https://storage.supabase.fake/upload/${encodeURIComponent(path)}`, expires_in: 3600 };
   }
 }

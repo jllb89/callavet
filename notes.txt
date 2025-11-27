@@ -263,3 +263,7 @@ Rate limiting and observability tags: add per-path limits for sessions/start, ov
 Reporting endpoints: minimal read-only summaries for overage revenue by item, credit utilization, overage vs plan usage ratio.
 Confirm concurrency safeguards at the DB level for credits decrement and entitlement reserve (advisable: single atomic function).
 Optional: if user-facing overage endpoints remain, add them to frontend flows and ensure they’re discoverable in OpenAPI tags.
+
+
+
+implement the global list/transcripts next and add pagination + filters

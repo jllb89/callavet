@@ -10,8 +10,9 @@ pass=0; fail=0
 assert_ok() { if [[ $1 -eq 0 ]]; then pass=$((pass+1)); echo "PASS: $2"; else fail=$((fail+1)); echo "FAIL: $2"; fi }
 
 # List pets
-resp=$(curl -sS -H "$AUTH_HEADER" "$BASE/pets") || true
-echo "$resp" | $JQ -e '.items | type == "array"' >/dev/null 2>&1; assert_ok $? "pets list"
+code=$(curl -sS -o /dev/null -w '%{http_code}' -H "$AUTH_HEADER" "$BASE/pets" || echo 000)
+resp=$(curl -sS -H "$AUTH_HEADER" "$BASE/pets" || true)
+echo "$resp" | $JQ -e '.data | type == "array"' >/dev/null 2>&1; assert_ok $? "pets list (code=$code)"
 
 # Create pet
 resp=$(curl -sS -X POST -H "$AUTH_HEADER" -H 'Content-Type: application/json' \
@@ -31,8 +32,14 @@ resp=$(curl -sS -X PATCH -H "$AUTH_HEADER" -H 'Content-Type: application/json' \
 echo "$resp" | $JQ -e '.name == "Fido II"' >/dev/null 2>&1; assert_ok $? "pets patch"
 
 # Delete (archive)
-resp=$(curl -sS -X DELETE -H "$AUTH_HEADER" "$BASE/pets/$pet_id") || true
-echo "$resp" | $JQ -e '.ok == true' >/dev/null 2>&1; assert_ok $? "pets delete"
+del_code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE -H "$AUTH_HEADER" "$BASE/pets/$pet_id" || echo 000)
+if [[ "$del_code" == "204" ]]; then pass=$((pass+1)); echo "PASS: pets delete (204)"; else fail=$((fail+1)); echo "FAIL: pets delete (expected 204 got $del_code)"; fi
+
+# Signed URL
+resp=$(curl -sS -X POST -H "$AUTH_HEADER" -H 'Content-Type: application/json' \
+  -d '{"path":"pets/'"$pet_id"'/test.txt"}' \
+  "$BASE/pets/$pet_id/files/signed-url") || true
+echo "$resp" | $JQ -e '.url | length > 0' >/dev/null 2>&1; assert_ok $? "pets signed-url"
 
 # Summary
 echo "Summary: PASS=$pass FAIL=$fail"
