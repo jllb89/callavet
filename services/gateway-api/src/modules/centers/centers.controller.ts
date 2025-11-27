@@ -10,11 +10,52 @@ export class CentersController {
     const lat = Number(latStr ?? '0');
     const lng = Number(lngStr ?? '0');
     const radius = Number(radiusStr ?? '50');
-    if (this.db.isStub) {
-      return { ok: true, mode: 'stub', centers: [ { id: 'center_1', name: 'Centro Vet MX', lat, lng, distanceKm: 1.2 } ] };
+    // If coordinates provided, attempt simple radius filter using stored geo_location as "lat,lng" (text)
+    let rows: any[] = [];
+    if (!Number.isNaN(lat) && !Number.isNaN(lng) && radius > 0) {
+      const sql = `
+        with centers as (
+          select
+            id,
+            name,
+            address,
+            phone,
+            website,
+            is_partner,
+            geo_location
+          from vet_care_centers
+        )
+        select
+          id,
+          name,
+          address,
+          phone,
+          website,
+          is_partner
+        from centers
+        where geo_location is not null
+          and geo_location like '%,%'
+          and (
+            -- Haversine (approx) distance in km
+            6371 * acos(
+              cos(radians($1)) * cos(radians(split_part(geo_location, ',', 1)::float)) *
+              cos(radians(split_part(geo_location, ',', 2)::float) - radians($2)) +
+              sin(radians($1)) * sin(radians(split_part(geo_location, ',', 1)::float))
+            )
+          ) <= $3
+        order by name asc
+        limit 100
+      `;
+      const res = await this.db.query(sql, [lat, lng, radius]);
+      rows = res.rows;
     }
-    // minimal stub query; replace with geo filtering as needed
-    const { rows } = await this.db.query('select id, name from vet_care_centers limit 10');
-    return { ok: true, centers: rows };
+    // Fallback: return top centers without geo filter
+    if (!rows.length) {
+      const res = await this.db.query(
+        'select id, name, address, phone, website, is_partner from vet_care_centers order by created_at desc limit 50'
+      );
+      rows = res.rows;
+    }
+    return { data: rows };
   }
 }

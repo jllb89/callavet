@@ -148,15 +148,30 @@ Verification
 - Group smoke `env/scripts/smoke-kb-search.sh`: PASS after adjusting unauth check; covers KB list/create/get, lexical search, vector GET/POST.
 
 ## Pets
-- [ ] GET /pets → responses: ListPets
-- [ ] POST /pets → responses: 201 Pet
-- [ ] GET /pets/{petId} → responses: Pet
-- [ ] PATCH /pets/{petId} → responses: Pet
-- [ ] DELETE /pets/{petId} → responses: 204 No Content
-- [ ] POST /pets/{petId}/files/signed-url → responses: SignedUrl
+- [x] GET /pets → responses: ListPets
+- [x] POST /pets → responses: 201 Pet
+- [x] GET /pets/{petId} → responses: Pet
+- [x] PATCH /pets/{petId} → responses: Pet
+- [x] DELETE /pets/{petId} → responses: 204 No Content
+- [x] POST /pets/{petId}/files/signed-url → responses: SignedUrl
+
+Routing Notes (Frontend)
+- Base URL: `GATEWAY_BASE` (fallback `SERVER_URL`).
+- Auth: Bearer required for all `/pets` endpoints (list/create/detail/patch/delete, signed-url).
+- List: `GET /pets` returns `{ data: [...] }` (no pagination yet; capped at 100 newest).
+- Create: `POST /pets` body per `PetInput` (`name`, `species` required) returns `201` Pet object.
+- Detail: `GET /pets/{id}` returns Pet; `404` if not owned / not visible (RLS handles scope).
+- Patch: `PATCH /pets/{id}` partial fields (name, species, breed, birthdate, sex, weight_kg, medical_notes) → full Pet.
+- Delete: `DELETE /pets/{id}` returns `204` empty body (hard delete for now; consider future soft delete with `archived_at`).
+- Signed URL: `POST /pets/{id}/files/signed-url` body `{ path? }` returns `{ path, url, expires_in }`; path pattern recommended `pets/{petId}/{filename}`. Currently stubbed; integrate Supabase Storage client later.
+- Errors: `400` on missing required fields (`name`, `species`); `404` when id not found.
+- Ownership: `user_id` comes from JWT `sub`; ensure bearer is set before create.
+
+Verification
+- Smoke script `env/scripts/smoke-pets.sh`: PASS (6/6) list, create, detail, patch, delete (204), signed-url stub.
 
 ## Centers
-- [ ] GET /centers/near → responses: ListCenters
+- [x] GET /centers/near → responses: ListCenters
 - [ ] (spec-only) Implement detail/admin CRUD + vet-center assign/unassign if needed
 
 ## Payments & Invoices (read-only)
