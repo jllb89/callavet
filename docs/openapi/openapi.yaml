@@ -40,6 +40,16 @@ tags:
 
 components:
   schemas:
+    ApiOk:
+      type: object
+      properties:
+        ok: { type: boolean, enum: [true] }
+        reason: { type: string, nullable: true }
+    ApiError:
+      type: object
+      properties:
+        ok: { type: boolean, enum: [false] }
+        reason: { type: string }
     ErrorReason:
       type: string
       description: Standardized error reasons for subscriptions/overage/session flows
@@ -507,7 +517,28 @@ paths:
           summary: List overage purchases (admin)
           security: [{ bearerAuth: [] }, { adminSecret: [] }]
           responses:
-            "200": { description: Purchases list }
+            "200":
+              description: Purchases list
+              content:
+                application/json:
+                  examples:
+                    sample:
+                      value:
+                        ok: true
+                        purchases:
+                          - id: "a86c8a43-07cc-44c1-9c32-2f5c9d277d0b"
+                            code: "chat_unit"
+                            status: "paid"
+                            quantity: 1
+                            amount_cents_total: 500
+                            currency: "usd"
+                            original_session_id: "b1c2-..."
+            "403":
+              description: Admin forbidden
+              content:
+                application/json:
+                  schema: { $ref: "#/components/schemas/ApiError" }
+                  examples: { forbidden: { value: { ok: false, reason: "admin_forbidden" } } }
 
       /subscriptions/admin/overage/consumptions:
         get:
@@ -515,7 +546,29 @@ paths:
           summary: List overage/credit consumptions (admin)
           security: [{ bearerAuth: [] }, { adminSecret: [] }]
           responses:
-            "200": { description: Consumptions list }
+            "200":
+              description: Consumptions list
+              content:
+                application/json:
+                  examples:
+                    sample:
+                      value:
+                        ok: true
+                        consumptions:
+                          - id: "c5..."
+                            source: "credit"
+                            overage_purchase_id: null
+                            created_at: "2025-11-26T12:00:00Z"
+                          - id: "d6..."
+                            source: "overage"
+                            overage_purchase_id: "a86c8a43-07cc-44c1-9c32-2f5c9d277d0b"
+                            original_session_id: "b1c2..."
+            "403":
+              description: Admin forbidden
+              content:
+                application/json:
+                  schema: { $ref: "#/components/schemas/ApiError" }
+                  examples: { forbidden: { value: { ok: false, reason: "admin_forbidden" } } }
 
       /subscriptions/admin/overage/mark-paid:
         post:
@@ -532,7 +585,25 @@ paths:
                     purchase_id: { type: string, format: uuid }
                     force_consume: { type: boolean }
           responses:
-            "200": { description: Paid marked }
+            "200":
+              description: Paid marked
+              content:
+                application/json:
+                  examples:
+                    sample:
+                      value:
+                        ok: true
+                        previous_status: "checkout_created"
+                        new_status: "paid"
+                        consumed: false
+            "400":
+              description: Error
+              content:
+                application/json:
+                  schema: { $ref: "#/components/schemas/ApiError" }
+                  examples:
+                    not_found: { value: { ok: false, reason: "purchase_not_found" } }
+                    invalid: { value: { ok: false, reason: "invalid_status_transition" } }
 
       /subscriptions/admin/overage/mark-refunded:
         post:
@@ -548,7 +619,25 @@ paths:
                   properties:
                     purchase_id: { type: string, format: uuid }
           responses:
-            "200": { description: Refunded marked }
+            "200":
+              description: Refunded marked
+              content:
+                application/json:
+                  examples:
+                    sample:
+                      value:
+                        ok: true
+                        previous_status: "paid"
+                        new_status: "refunded"
+                        credits_reversed: 1
+            "400":
+              description: Error
+              content:
+                application/json:
+                  schema: { $ref: "#/components/schemas/ApiError" }
+                  examples:
+                    not_found: { value: { ok: false, reason: "purchase_not_found" } }
+                    already_refunded: { value: { ok: false, reason: "already_refunded" } }
 
       /subscriptions/admin/overage/adjust-credits:
         post:
@@ -566,7 +655,24 @@ paths:
                     delta: { type: integer }
                     expires_at: { type: string, format: date-time, nullable: true }
           responses:
-            "200": { description: Credits adjusted }
+            "200":
+              description: Credits adjusted
+              content:
+                application/json:
+                  examples:
+                    sample:
+                      value:
+                        ok: true
+                        code: "chat_unit"
+                        delta: 1
+                        remaining: 3
+            "400":
+              description: Error
+              content:
+                application/json:
+                  schema: { $ref: "#/components/schemas/ApiError" }
+                  examples:
+                    invalid_code: { value: { ok: false, reason: "item_not_found" } }
 
       /subscriptions/admin/overage/items:
         get:
@@ -574,7 +680,20 @@ paths:
           summary: List overage items (admin)
           security: [{ bearerAuth: [] }, { adminSecret: [] }]
           responses:
-            "200": { description: Items list }
+            "200":
+              description: Items list
+              content:
+                application/json:
+                  examples:
+                    sample:
+                      value:
+                        ok: true
+                        items:
+                          - code: "chat_unit"
+                            name: "Chat Overage Unit"
+                            currency: "usd"
+                            amount_cents: 500
+                            is_active: true
         post:
           tags: [Plans & Subscriptions, Admin]
           summary: Create/update overage item (admin)
@@ -594,7 +713,27 @@ paths:
                     is_active: { type: boolean }
                     metadata: { type: object }
           responses:
-            "200": { description: Item upserted }
+            "200":
+              description: Item upserted
+              content:
+                application/json:
+                  examples:
+                    sample:
+                      value:
+                        ok: true
+                        item:
+                          code: "chat_unit"
+                          name: "Chat Overage Unit"
+                          currency: "usd"
+                          amount_cents: 500
+                          is_active: true
+            "400":
+              description: Error
+              content:
+                application/json:
+                  schema: { $ref: "#/components/schemas/ApiError" }
+                  examples:
+                    invalid: { value: { ok: false, reason: "invalid_payload" } }
                   session_id: { type: string }
                   url: { type: string }
                   plan_code: { type: string }
@@ -638,6 +777,23 @@ paths:
                   code: { type: string }
                   quantity: { type: integer }
                   currency: { type: string }
+              examples:
+                session_bound:
+                  value:
+                    ok: true
+                    session_id: "cs_test_..."
+                    url: "https://checkout.stripe.com/..."
+                    code: "chat_unit"
+                    quantity: 1
+                    currency: "usd"
+                units:
+                  value:
+                    ok: true
+                    session_id: "cs_test_..."
+                    url: "https://checkout.stripe.com/..."
+                    code: "chat_unit"
+                    quantity: 3
+                    currency: "usd"
         "400":
           description: Error
           content:
@@ -705,6 +861,14 @@ paths:
                         code: { type: string }
                         remaining_units: { type: integer }
                         expires_at: { type: string, nullable: true }
+              examples:
+                sample:
+                  value:
+                    ok: true
+                    credits:
+                      - code: "chat_unit"
+                        remaining_units: 2
+                        expires_at: null
         "400":
           description: Error
           content:

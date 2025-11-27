@@ -76,6 +76,10 @@ Status legend
 - `POST /subscriptions/admin/overage/adjust-credits` — Admin
   - Grants/revokes credits by `delta` (+/-) for an item.
   - Requires header `x-admin-secret` matching `ADMIN_PRICING_SYNC_SECRET` env var (fallback: `ADMIN_SECRET`).
+ - `GET /subscriptions/admin/overage/items` — Admin
+   - Lists catalog items.
+ - `POST /subscriptions/admin/overage/items` — Admin
+   - Upsert item: `code`, `name`, `description`, `currency`, `amount_cents`, `is_active`, `metadata`.
 
 ## Plans (Public)
 
@@ -105,6 +109,7 @@ Status legend
   - Creates a session, reserves entitlement via `fn_reserve_*`.
   - Auto-credit draw when exhausted: decrement credits and insert `consumption` `source='credit'`.
   - On overage with no credits: initiates one-off Stripe Checkout bound to `original_session_id` and returns `payment.url` for completion (consolidated; no stub).
+  - Response includes `payment.checkout_session_id` and `payment.url` when overage is required.
 - `POST /sessions/end`
   - Marks session ended; commits `consumptionId` if provided.
 
@@ -229,6 +234,7 @@ Status legend
 
 - Add `sessions` endpoints and payloads:
   - `POST /sessions/start` request/response including `credit` block and `overage` stub structure.
+    - Document `payment.url` and `payment.checkout_session_id` fields.
   - `POST /sessions/end` request accepts `sessionId` and optional `consumptionId`.
   - `GET /sessions`, `GET /sessions/{sessionId}`, `PATCH /sessions/{sessionId}`.
 - Subscriptions lifecycle:

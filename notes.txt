@@ -388,3 +388,4 @@ Confirm permanent webhook, Stripe keys/secrets, DB RLS, and auth flows.
 Validate cancel/resume flag propagation (done), entitlement functions (done), fallback removal (done).
 Add backups, rate limits, observability tags, and admin tools.
 
+printenv
