@@ -494,7 +494,7 @@ export class SubscriptionsController {
   @Post('admin/overage/adjust-credits')
   async adjustCredits(@Body() body: { code?: string; delta?: number; expires_at?: string }, @Req() req: any) {
     try {
-      const secret = process.env.ADMIN_SECRET || '';
+      const secret = process.env.ADMIN_PRICING_SYNC_SECRET || process.env.ADMIN_SECRET || '';
       const hdr = req?.headers?.['x-admin-secret'];
       if (!secret || hdr !== secret) return { ok: false, reason: 'admin_forbidden' };
       if (this.db.isStub) return { ok: true, stub: true } as any;

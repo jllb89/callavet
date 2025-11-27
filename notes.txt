@@ -389,3 +389,10 @@ Validate cancel/resume flag propagation (done), entitlement functions (done), fa
 Add backups, rate limits, observability tags, and admin tools.
 
 printenv
+
+Flesh out OpenAPI with full response schemas (not only examples) for admin lists (purchases/consumptions/items) and standardize ok/error envelopes across all paths.
+Webhook E2E verification against Stripe CLI with real event shapes to confirm handler mappings (current script uses simplified payloads).
+Rate limiting and observability tags: add per-path limits for sessions/start, overage checkout; include request tracing fields in responses/logs.
+Reporting endpoints: minimal read-only summaries for overage revenue by item, credit utilization, overage vs plan usage ratio.
+Confirm concurrency safeguards at the DB level for credits decrement and entitlement reserve (advisable: single atomic function).
+Optional: if user-facing overage endpoints remain, add them to frontend flows and ensure they’re discoverable in OpenAPI tags.
