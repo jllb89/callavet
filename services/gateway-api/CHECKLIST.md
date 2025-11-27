@@ -97,18 +97,18 @@ Routing Notes (Frontend)
 - Errors: `400` with reason strings like `list_failed`, `detail_failed`, `patch_failed`, `start_failed`, `end_failed`; `404` when not found.
 
 ## Messages
-- [ ] GET /sessions/{sessionId}/messages → responses: ListMessages
-- [ ] POST /sessions/{sessionId}/messages → responses: Message
-- [ ] GET /sessions/{sessionId}/transcript → responses: Transcript
+- [x] GET /sessions/{sessionId}/messages → responses: ListMessages
+- [x] POST /sessions/{sessionId}/messages → responses: Message
+- [x] GET /sessions/{sessionId}/transcript → responses: Transcript
 - [ ] GET /messages → responses: inline list (runtime)
 - [ ] GET /messages/transcripts → responses: inline list (runtime)
-- [ ] GET /messages/{id} → responses: Message (runtime)
+- [x] GET /messages/{id} → responses: Message (runtime)
 
 Routing Notes (Frontend)
 - Session-scoped: prefer `GET/POST /sessions/{sessionId}/messages` and `GET /sessions/{sessionId}/transcript` per spec.
-- Global endpoints exist: `GET /messages`, `GET /messages/transcripts`, `GET /messages/{id}`; can be used for dashboards.
+- Global endpoints exist: `GET /messages`, `GET /messages/transcripts`, `GET /messages/{id}`; detail is live; list/transcripts pending.
 - Auth: Bearer required for all messages endpoints.
-- Create body: `{ role: 'user'|'assistant', content: string }`.
+- Create body: `{ role: 'user'|'vet'|'ai', content: string }`.
 - Response shapes: list returns `{ ok, sessionId, items[] }`; create returns `{ ok, sessionId, message{...} }`; transcript returns `{ ok, sessionId, transcript[] }`.
 
 ## KB & Search

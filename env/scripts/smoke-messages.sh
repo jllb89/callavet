@@ -58,6 +58,16 @@ else
   set -e
   if [[ $code -eq 0 && -n "$c" ]]; then ok "session message create"; else bad "session message create" "$c"; fi
 
+  # Parse created message id for global detail check
+  if command -v jq >/dev/null 2>&1; then
+    CREATED_MID=$(echo "$c" | jq -r '.message.id // .id // empty')
+  else
+    CREATED_MID=$(echo "$c" | sed -n 's/.*"id"\s*:\s*"\([^"]*\)".*/\1/p')
+  fi
+  if [[ -n "$CREATED_MID" ]]; then
+    export MESSAGE_ID="$CREATED_MID"
+  fi
+
   # Transcript
   set +e
   t=$(curl_get "/sessions/$SESSION_ID/transcript")
