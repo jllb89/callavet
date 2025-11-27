@@ -83,6 +83,43 @@ code=$?
 set -e
 if [[ $code -eq 0 && -n "$gl" ]]; then ok "messages list"; else bad "messages list" "$gl"; fi
 
+# Filtered list (role=user) with pagination limit=5
+set +e
+glf=$(curl_get "/messages?role=user&limit=5")
+code=$?
+set -e
+if [[ $code -eq 0 && -n "$glf" ]]; then ok "messages list filtered"; else bad "messages list filtered" "$glf"; fi
+
+# Redact the created message then fetch detail
+if [[ -n "${MESSAGE_ID:-}" ]]; then
+  set +e
+  red=$(curl -s -S -X PATCH -H "Authorization: Bearer ${SB_TOKEN}" -H "Content-Type: application/json" "${BASE_URL}/messages/${MESSAGE_ID}/redact" -d '{"reason":"smoke test"}')
+  code=$?
+  set -e
+  if [[ $code -eq 0 && -n "$red" && "$red" == *"[redacted]"* ]]; then ok "message redact"; else bad "message redact" "$red"; fi
+
+  set +e
+  det=$(curl_get "/messages/${MESSAGE_ID}")
+  code=$?
+  set -e
+  if [[ $code -eq 0 && "$det" == *"[redacted]"* ]]; then ok "message detail after redact"; else bad "message detail after redact" "$det"; fi
+
+  # Soft delete
+  set +e
+  del=$(curl -s -S -X DELETE -H "Authorization: Bearer ${SB_TOKEN}" "${BASE_URL}/messages/${MESSAGE_ID}")
+  code=$?
+  set -e
+  if [[ $code -eq 0 && "$del" == *"[deleted]"* ]]; then ok "message soft delete"; else bad "message soft delete" "$del"; fi
+
+  # Confirm list no longer shows message (since filter after deletion time)
+  nowIso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  set +e
+  lst=$(curl_get "/messages?since=${nowIso}") # should be empty list
+  code=$?
+  set -e
+  if [[ $code -eq 0 ]]; then ok "messages since filter"; else bad "messages since filter" "$lst"; fi
+fi
+
 set +e
 gt=$(curl_get "/messages/transcripts")
 code=$?

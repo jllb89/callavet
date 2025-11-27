@@ -100,16 +100,25 @@ Routing Notes (Frontend)
 - [x] GET /sessions/{sessionId}/messages → responses: ListMessages
 - [x] POST /sessions/{sessionId}/messages → responses: Message
 - [x] GET /sessions/{sessionId}/transcript → responses: Transcript
-- [ ] GET /messages → responses: inline list (runtime)
-- [ ] GET /messages/transcripts → responses: inline list (runtime)
+- [x] GET /messages → responses: GlobalMessagesList (pagination + filters)
+- [x] GET /messages/transcripts → responses: GlobalTranscripts (recent sessions, limited per session)
 - [x] GET /messages/{id} → responses: Message (runtime)
+- [x] PATCH /messages/{id}/redact → responses: Message (redacted)
+- [x] DELETE /messages/{id} → responses: Message (deleted)
 
 Routing Notes (Frontend)
-- Session-scoped: prefer `GET/POST /sessions/{sessionId}/messages` and `GET /sessions/{sessionId}/transcript` per spec.
-- Global endpoints exist: `GET /messages`, `GET /messages/transcripts`, `GET /messages/{id}`; detail is live; list/transcripts pending.
+- Session-scoped preferred for in-consult UIs: `GET/POST /sessions/{sessionId}/messages`, `GET /sessions/{sessionId}/transcript`.
+- Global list: `GET /messages?limit=50&offset=0&role=user&sessionId=...&senderId=...` returns `{ ok, items[], limit, offset, count }` ordered newest first.
+- Global transcripts: `GET /messages/transcripts?sessionsLimit=10&perLimit=100` returns `{ ok, sessions:[{ session_id, items[] }] }` each items ordered ascending (chronological).
+- Detail: `GET /messages/{id}` returns single message row (useful for deep-links / sharing).
 - Auth: Bearer required for all messages endpoints.
-- Create body: `{ role: 'user'|'vet'|'ai', content: string }`.
-- Response shapes: list returns `{ ok, sessionId, items[] }`; create returns `{ ok, sessionId, message{...} }`; transcript returns `{ ok, sessionId, transcript[] }`.
+- Create body: `{ role: 'user'|'vet'|'ai', content: string }` (role normalized to lowercase; defaults 'user').
+- Pagination caps: list `limit` max 200; transcripts `sessionsLimit` max 50, `perLimit` max 500.
+- Filters are AND-combined; omit to broaden. Empty result is not an error.
+- Time filtering: `since` / `until` (ISO8601) applied to `created_at`.
+- Sort: `sort=created_at.asc|created_at.desc` (default desc for global list; asc for session transcript).
+- Redaction: `PATCH /messages/{id}/redact { reason? }` replaces `content` with `[redacted]`, stores original in `redacted_original_content`, sets `redacted_at`.
+- Soft delete: `DELETE /messages/{id}` sets `deleted_at`, replaces content with `[deleted]`. Deleted messages excluded from lists/transcripts by default.
 
 ## KB & Search
 - [ ] GET /kb → responses: ListKB

@@ -12,6 +12,9 @@ export class SessionMessagesController {
     @Param('sessionId') sessionId: string,
     @Query('limit') limitStr?: string,
     @Query('offset') offsetStr?: string,
+    @Query('since') since?: string,
+    @Query('until') until?: string,
+    @Query('sort') sort?: string,
   ) {
     try {
       const limit = Math.min(Math.max(parseInt(limitStr || '50', 10) || 50, 1), 200);
@@ -20,17 +23,33 @@ export class SessionMessagesController {
         return { ok: true, sessionId, items: [], mode: 'stub' } as any;
       }
       const rows = await this.db.runInTx(async (q) => {
+        const filters: string[] = ['session_id = $1', 'deleted_at is null'];
+        const args: any[] = [sessionId];
+        let idx = 2;
+        if (since) {
+          const d = new Date(since); if (!isNaN(d.getTime())) { filters.push(`created_at >= $${idx++}`); args.push(d.toISOString()); }
+        }
+        if (until) {
+          const d = new Date(until); if (!isNaN(d.getTime())) { filters.push(`created_at <= $${idx++}`); args.push(d.toISOString()); }
+        }
+        let order = 'created_at asc';
+        if (sort) {
+          const v = sort.toLowerCase();
+          if (v === 'created_at.asc') order = 'created_at asc';
+          else if (v === 'created_at.desc') order = 'created_at desc';
+        }
+        const where = 'where ' + filters.join(' and ');
         const { rows } = await q(
           `select id, session_id, sender_id, role, content, created_at
              from messages
-            where session_id = $1
-            order by created_at asc
-            limit $2 offset $3`,
-          [sessionId, limit, offset]
+             ${where}
+            order by ${order}
+            limit $${idx} offset $${idx+1}`,
+          [...args, limit, offset]
         );
         return rows as any[];
       });
-      return { ok: true, sessionId, items: rows };
+      return { ok: true, sessionId, items: rows, sort: sort || 'created_at.asc', since: since || null, until: until || null };
     } catch (e: any) {
       throw new HttpException(e?.message || 'list_failed', HttpStatus.BAD_REQUEST);
     }
@@ -70,20 +89,26 @@ export class SessionMessagesController {
   }
 
   @Get(':sessionId/transcript')
-  async transcript(@Param('sessionId') sessionId: string) {
+  async transcript(@Param('sessionId') sessionId: string, @Query('since') since?: string, @Query('until') until?: string) {
     try {
       if (this.db.isStub) return { ok: true, sessionId, transcript: [], mode: 'stub' } as any;
       const rows = await this.db.runInTx(async (q) => {
+        const filters: string[] = ['session_id = $1', 'deleted_at is null'];
+        const args: any[] = [sessionId];
+        let idx = 2;
+        if (since) { const d = new Date(since); if (!isNaN(d.getTime())) { filters.push(`created_at >= $${idx++}`); args.push(d.toISOString()); } }
+        if (until) { const d = new Date(until); if (!isNaN(d.getTime())) { filters.push(`created_at <= $${idx++}`); args.push(d.toISOString()); } }
+        const where = 'where ' + filters.join(' and ');
         const { rows } = await q(
           `select id, role, content, created_at
              from messages
-            where session_id = $1
+             ${where}
             order by created_at asc`,
-          [sessionId]
+          args
         );
         return rows as any[];
       });
-      return { ok: true, sessionId, transcript: rows };
+      return { ok: true, sessionId, transcript: rows, since: since || null, until: until || null };
     } catch (e: any) {
       throw new HttpException(e?.message || 'transcript_failed', HttpStatus.BAD_REQUEST);
     }
