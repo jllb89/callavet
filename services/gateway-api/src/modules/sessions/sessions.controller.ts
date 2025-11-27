@@ -175,11 +175,48 @@ export class SessionsController {
             }
           }
         }
-        // If still overage, mark session pending payment for clarity
+        // If still overage, mark session pending payment and create a one-off checkout
+        let checkout: { session_id: string; url: string } | null = null;
         if (overage) {
           await q('update chat_sessions set status = $2, updated_at = now() where id = $1', [dbSessionId, 'pending_payment']);
+          const sk = process.env.STRIPE_SECRET_KEY || '';
+          const successUrl = process.env.CHECKOUT_SUCCESS_URL || 'http://localhost:3000/overage/success';
+          const cancelUrl = process.env.CHECKOUT_CANCEL_URL || 'http://localhost:3000/overage/cancel';
+          if (sk) {
+            // Resolve overage item by kind
+            const { rows: itemRow } = await q<any>(
+              `select id, name, amount_cents, currency from overage_items where is_active and (metadata->>'type') = $1 limit 1`,
+              [kind]
+            );
+            if (itemRow[0]) {
+              const Stripe = require('stripe');
+              const stripe = new Stripe(sk, { apiVersion: '2024-06-20' });
+              const session = await stripe.checkout.sessions.create({
+                mode: 'payment',
+                line_items: [{
+                  price_data: {
+                    currency: (itemRow[0].currency || 'mxn').toLowerCase(),
+                    product_data: { name: itemRow[0].name },
+                    unit_amount: itemRow[0].amount_cents,
+                  },
+                  quantity: 1,
+                }],
+                success_url: successUrl + '?session_id={CHECKOUT_SESSION_ID}',
+                cancel_url: cancelUrl,
+                metadata: { user_id: (this.rc.claims && (this.rc.claims as any).sub) || '', overage_item_code: (kind === 'video' ? 'video_unit' : 'chat_unit'), original_session_id: dbSessionId },
+              });
+              // Persist purchase
+              await q(
+                `insert into overage_purchases (user_id, overage_item_id, status, stripe_checkout_session_id, quantity, amount_cents_total, currency, original_session_id)
+                 values (auth.uid(), $1::uuid, 'checkout_created', $2, 1, $3, $4, $5::uuid)
+                 on conflict (stripe_checkout_session_id) do nothing`,
+                [itemRow[0].id, session.id, itemRow[0].amount_cents, (itemRow[0].currency || 'mxn').toLowerCase(), dbSessionId]
+              );
+              checkout = { session_id: session.id, url: session.url };
+            }
+          }
         }
-        return { dbSessionId, consumptionId, overage, msg, creditConsumptionId, creditUsedCode, creditRemaining };
+        return { dbSessionId, consumptionId, overage, msg, creditConsumptionId, creditUsedCode, creditRemaining, checkout };
       });
       if (result.overage) {
         return {
@@ -189,13 +226,18 @@ export class SessionsController {
           overage: true,
           overageReason: result.msg || 'no_entitlement',
           consumptionId: result.consumptionId || null,
-          payment: {
+          payment: result.checkout ? {
+            checkout_session_id: result.checkout.session_id,
+            url: result.checkout.url,
+            status: 'pending',
+            type: 'one_off'
+          } : {
             stub: true,
             status: 'pending',
             type: 'one_off',
             currency: 'usd',
             amount: null,
-            reason: result.msg || 'no_entitlement',
+            reason: result.msg || 'no_entitlement'
           },
         };
       }

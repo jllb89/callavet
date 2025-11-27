@@ -9,14 +9,19 @@ This document inventories all implemented endpoints, internal flows, data models
 - `admin/pricing`: Stripe products/prices reconciliation
 - `internal/stripe`: webhook ingestion (secret-guarded)
 
+Status legend
+- Real: implemented against Stripe/DB and used in staging
+- Stub: local-only behavior (no Stripe); requires consolidation or removal
+- Admin: management/ops; should be guarded by admin secret/role
+- Needs work: endpoint exists but behavior incomplete/placeholder
+
 ## Subscriptions
 
-- `POST /subscriptions/checkout`
-  - DB-only checkout stub that creates a local active subscription and usage row.
-  - Returns subscription + plan attributes.
-- `POST /subscriptions/stripe/checkout`
+
+- `POST /subscriptions/stripe/checkout` — Real
   - Creates Stripe Checkout Session for recurring plans.
-  - Attaches `metadata.user_id` to session and subscription.
+  - Attaches `metadata.user_id`; webhook should upsert `user_subscriptions` and open `subscription_usage`.
+  - Needs work: README + OpenAPI must reflect final payloads; ensure portal link and success/cancel URLs handled.
 - `GET /subscriptions/debug-auth-tx`
   - Shows `auth.uid()` inside transaction + claims for diagnostics.
 - `GET /subscriptions/debug-auth`
@@ -27,35 +32,50 @@ This document inventories all implemented endpoints, internal flows, data models
   - Compares active view vs underlying table for current user.
 - `POST /subscriptions/portal`
   - Returns placeholder for Stripe customer portal (frontend to implement).
-- `POST /subscriptions/overage/checkout`
-  - Creates one-off Stripe Checkout Session for overage items (chat/video units).
-  - Persists `overage_purchases` with `status='checkout_created'` and optional `original_session_id`.
-- `POST /subscriptions/overage/consume`
-  - Manual consume: links paid purchase to a session consumption (`overage_purchase_id`) or decrements credits if no session binding.
-- `GET /subscriptions/overage/items`
-  - Lists active overage catalog items.
-- `GET /subscriptions/overage/credits`
+- `POST /subscriptions/overage/checkout` — Real
+  - Creates one-off Stripe Checkout Session for overage items (units or session-bound).
+  - Persists `overage_purchases` with `status='checkout_created'` (+ optional `original_session_id`).
+  - Webhook should mark `paid` and then credit units or consume if session-bound.
+- `POST /subscriptions/overage/consume` — Real
+  - Manual consume: prefers a `paid` purchase link; else decrements credits.
+  - Idempotent by checking for prior consumption for a given purchase.
+- `GET /subscriptions/overage/items` — Real
+  - Lists active overage catalog items (`chat_unit`, `video_unit`, `emergency_consult`, `sms_unit`).
+- `GET /subscriptions/overage/credits` — Real
   - Lists remaining credit units per item for the current user.
-- `POST /subscriptions/cancel`
+- `POST /subscriptions/cancel` — Real
   - Cancels active subscription: immediate or at period end.
-- `POST /subscriptions/resume`
+- `POST /subscriptions/resume` — Real
   - Resumes a scheduled cancellation.
-- `POST /subscriptions/change-plan`
-  - Changes plan code and updates included usage counts.
-- `POST /subscriptions/reserve-chat`
+- `POST /subscriptions/change-plan` — Real
+  - Changes plan code and updates included usage counts without resetting consumed.
+- `POST /subscriptions/reserve-chat` — Real (internal)
   - Calls `fn_reserve_chat(sessionId)` to reserve a chat entitlement.
-- `POST /subscriptions/reserve-video`
+- `POST /subscriptions/reserve-video` — Real (internal)
   - Calls `fn_reserve_video(sessionId)` to reserve a video entitlement.
-- `POST /subscriptions/commit`
+- `POST /subscriptions/commit` — Real (internal)
   - Finalizes a pending consumption (`fn_commit_consumption`).
-- `POST /subscriptions/release`
+- `POST /subscriptions/release` — Real (internal)
   - Releases a pending consumption (`fn_release_consumption`).
-- `GET /subscriptions/usage`
+- `GET /subscriptions/usage` — Real
   - Returns full usage from `fn_current_usage` for the active subscription.
-- `GET /subscriptions/my`
+- `GET /subscriptions/my` — Real
   - Lists user subscriptions with embedded plan details.
-- `GET /subscriptions/usage/current`
+- `GET /subscriptions/usage/current` — Real
   - Minimal snapshot of current period usage.
+
+### Overage Management (Admin)
+- `GET /subscriptions/admin/overage/purchases` — Admin
+  - Lists user overage purchases (code, status, quantity, totals, original_session_id).
+- `GET /subscriptions/admin/overage/consumptions` — Admin
+  - Lists consumptions with `source in ('overage','credit')`.
+- `POST /subscriptions/admin/overage/mark-paid` — Admin
+  - Marks purchase `paid`; session-bound optional `force_consume`, units credit increment.
+- `POST /subscriptions/admin/overage/mark-refunded` — Admin
+  - Marks purchase `refunded`; reverses credits if previously `paid` and unconsumed units.
+- `POST /subscriptions/admin/overage/adjust-credits` — Admin
+  - Grants/revokes credits by `delta` (+/-) for an item.
+  - Requires header `x-admin-secret` matching `ADMIN_PRICING_SYNC_SECRET` env var (fallback: `ADMIN_SECRET`).
 
 ## Plans (Public)
 
@@ -81,21 +101,21 @@ This document inventories all implemented endpoints, internal flows, data models
   - Returns session details with ownership validation.
 - `PATCH /sessions/:sessionId`
   - Updates status; sets `ended_at` when terminal (completed/canceled).
-- `POST /sessions/start`
+- `POST /sessions/start` — Real
   - Creates a session, reserves entitlement via `fn_reserve_*`.
-  - Auto-credit draw when subscription entitlement exhausted: decrement `overage_credits` and insert `entitlement_consumptions` with `source='credit'`.
-  - If still exhausted, marks session `pending_payment` and returns `overage: true` with payment stub.
+  - Auto-credit draw when exhausted: decrement credits and insert `consumption` `source='credit'`.
+  - On overage with no credits: initiates one-off Stripe Checkout bound to `original_session_id` and returns `payment.url` for completion (consolidated; no stub).
 - `POST /sessions/end`
   - Marks session ended; commits `consumptionId` if provided.
 
 ## Admin Pricing
 
 - `POST /admin/pricing/sync`
-  - Admin-only endpoint (guarded by `x-admin-secret`) to reconcile Stripe Products/Prices into `subscription_plan_prices`.
+  - Admin-only endpoint guarded by `x-admin-secret` using `ADMIN_PRICING_SYNC_SECRET`.
 
 ## Internal Stripe Webhooks
 
-- `POST /internal/stripe/event`
+- `POST /internal/stripe/event` — Real
   - Secret-guarded ingestion. Records idempotency in `stripe_subscription_events` and dispatches handlers.
 
 ### Handled Events
@@ -107,16 +127,15 @@ This document inventories all implemented endpoints, internal flows, data models
   - Updates `user_subscriptions.status` to `active|past_due`.
 - `checkout.session.completed`
   - Marks `overage_purchases` `paid`.
-  - If `original_session_id` exists and user has active subscription, inserts `entitlement_consumptions` with `source='overage'` and sets `consumed`.
-  - Otherwise, credits units (`overage_credits`) and sets `credited`.
+  - Session-bound: auto-consume and set `consumed`.
+  - Units-based: increment credits and set `credited`.
 - `payment_intent.succeeded`
-  - Same side-effects as `checkout.session.completed` for purchases keyed by `stripe_payment_intent_id`.
+  - Same side-effects as above for purchases keyed by `stripe_payment_intent_id`.
 - `payment_intent.payment_failed`
   - Marks `overage_purchases` `failed`.
 - `charge.refunded|charge.refund.updated`
   - Marks `overage_purchases` `refunded`.
-  - Reverses credits if previously `credited`.
-  - Optional compensating credit for `consumed` when `OVERAGE_REFUND_GRANT_CREDIT=1`.
+  - Reverses credits if previously `credited`; optional compensating credit for consumed based on policy.
 
 ### Customer Linkage
 
@@ -133,7 +152,7 @@ This document inventories all implemented endpoints, internal flows, data models
 - Sources: `entitlement_consumptions.source ∈ {'subscription','credit','overage'}`.
 - Functions: `fn_reserve_chat|video`, `fn_commit_consumption`, `fn_release_consumption`, `fn_current_usage`.
 - Unique Indexes:
-  - Single consumption per `overage_purchase_id`.
+  - Single consumption per `overage_purchase_id` (enforced by `uniq_consumptions_overage_purchase`).
   - Pending guard for one `(session_id, consumption_type, source)` non-finalized record.
 
 ## Current Status — Verified
@@ -145,14 +164,29 @@ This document inventories all implemented endpoints, internal flows, data models
 
 ## Missing / To Validate
 
-- Video parity: verify auto-credit draw and overage prompt for `type='video'`.
-- Failure/refund paths: exercise with Stripe CLI and confirm status transitions and credit reversals/compensation.
+- Failure/refund paths: exercise with Stripe CLI and confirm transitions and credit reversals/compensation.
 - Idempotent re-delivery: resend identical events and confirm no double consume/credit.
 - Recurring membership smoke: end-to-end plan checkout → webhook → `user_subscriptions` upsert consistency.
 - Admin/Ops UI: items CRUD (enable/disable), lists for purchases/consumptions/credits, bind overage to current session.
 - Reporting: lightweight usage/overage summaries and exports.
 - Concurrency tests: simultaneous `sessions/start` requests consuming credits.
 - Runbooks: manual consume workflow, refund expectations, credit adjustment policies, Stripe event mapping.
+
+## What To Test Next
+- Admin guard: call admin endpoints with and without `x-admin-secret`; expect `admin_forbidden` when missing/mismatch. Set `ADMIN_PRICING_SYNC_SECRET` (or `ADMIN_SECRET`).
+- Session overage: start session without entitlements/credits; verify response includes `payment.url` and a `checkout_created` purchase bound to `original_session_id`.
+- Unique index: attempt double consume linking the same `overage_purchase_id`; expect DB error or endpoint `reason` indicating duplicate prevented.
+- Webhook idempotency: resend `checkout.session.completed` for same `session_id`; expect handler to skip.
+
+## Work Plan — One by One
+- Replace stub `POST /subscriptions/checkout` with real Stripe path or deprecate; standardize on `stripe/checkout`.
+- Sessions overage: implement one-off checkout creation + return URL when `pending_payment` would occur.
+- Guard admin endpoints: move `mark-paid`, `mark-refunded`, `adjust-credits` under `admin/overage/*` with secret/role.
+- Item CRUD: `POST /admin/overage/items` (create/update/deactivate), plus list endpoints.
+- Add unique index: prevent double consume on same `overage_purchase_id`.
+- Add user invoices/billing history endpoint.
+- OpenAPI: reflect all current/added endpoints with clear status and error enums.
+- Observability: health endpoints for search/AI/queue; rate limits on hot paths.
 
 ## OpenAPI Spec Updates — Proposed
 

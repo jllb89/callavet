@@ -9,92 +9,6 @@ import { RequestContext } from '../auth/request-context.service';
 export class SubscriptionsController {
   constructor(private readonly db: DbService, private readonly rc: RequestContext, private readonly prices: PriceService) {}
 
-  // ---- Lifecycle stubs (checkout/portal/cancel/resume/change-plan) ----
-  // These are intentionally not implemented yet. Return NOT_IMPLEMENTED (501) with structured payload
-  // so the Observability UI can distinguish between "missing route" (404) and "planned but deferred".
-
-  @Post('checkout')
-  async checkout(@Body() body: { plan_code?: string; seats?: number }) {
-    try {
-      if (this.db.isStub) return { ok: true, stub: true, reason: 'db_unavailable' } as any;
-      const planCode = (body?.plan_code || '').trim();
-      if (!planCode) return { ok: false, reason: 'validation_error', details: 'plan_code required' };
-      const dbgClaims = this.rc.claims || null;
-      const row = await this.db.runInTx(async (q) => {
-        // Ensure auth.uid() is available; if not, attempt to derive from request context claims
-        const uidRow = await q(`select auth.uid()::text as uid`);
-        const uid = uidRow.rows[0]?.uid;
-        if (!uid) {
-          return { noAuthUid: true, dbgClaims } as any;
-        }
-        // Ensure no active subscription
-        const active = await q(`select id from v_active_user_subscriptions where user_id = auth.uid() limit 1`);
-        if (active.rows[0]) return { alreadyActive: true } as any;
-        const plan = await q(
-          `select id, code, name, description, price_cents, currency, billing_period, included_chats, included_videos, pets_included_default, tax_rate
-             from subscription_plans
-            where is_active = true and lower(code) = lower($1)
-            limit 1`,
-          [planCode]
-        );
-        if (!plan.rows[0]) return { planNotFound: true } as any;
-        const billingPeriod = plan.rows[0].billing_period || 'month';
-        const seats = body?.seats && body.seats > 0 ? body.seats : plan.rows[0].pets_included_default || 1;
-        // Period end calculation
-        const sub = await q(
-          `insert into user_subscriptions(
-             id, user_id, plan_id, status, current_period_start, current_period_end, cancel_at_period_end, pets_included
-           ) values (
-             gen_random_uuid(), auth.uid(), $1::uuid, 'active', now(),
-             (now() + case when $2 = 'month' then interval '1 month' when $2 = 'year' then interval '1 year' else interval '1 month' end),
-             false, $3
-           ) returning id, plan_id, status, current_period_start, current_period_end, cancel_at_period_end, pets_included`,
-          [plan.rows[0].id, billingPeriod, seats]
-        );
-        const usage = await q(
-          `insert into subscription_usage(
-             id, subscription_id, period_start, period_end, included_chats, included_videos, consumed_chats, consumed_videos
-           ) values (
-             gen_random_uuid(), $1::uuid, $2, $3, $4, $5, 0, 0
-           ) returning id`,
-          [sub.rows[0].id, sub.rows[0].current_period_start, sub.rows[0].current_period_end, plan.rows[0].included_chats, plan.rows[0].included_videos]
-        );
-        return { plan: plan.rows[0], sub: sub.rows[0], usageId: usage.rows[0].id };
-      });
-      if ((row as any).alreadyActive) return { ok: false, reason: 'already_has_active_subscription' };
-      if ((row as any).planNotFound) return { ok: false, reason: 'plan_not_found' };
-      if ((row as any).noAuthUid) return { ok: false, reason: 'unauthenticated', details: 'JWT missing or invalid', dbgClaims: (row as any).dbgClaims };
-      const plan = (row as any).plan;
-      const sub = (row as any).sub;
-      return {
-        ok: true,
-        action: 'checkout',
-        subscription: {
-          id: sub.id,
-          status: sub.status,
-          current_period_start: sub.current_period_start,
-          current_period_end: sub.current_period_end,
-          cancel_at_period_end: sub.cancel_at_period_end,
-          pets_included: sub.pets_included,
-          plan: {
-            id: plan.id,
-            code: plan.code,
-            name: plan.name,
-            description: plan.description,
-            price_cents: plan.price_cents,
-            currency: plan.currency,
-            billing_period: plan.billing_period,
-            included_chats: plan.included_chats,
-            included_videos: plan.included_videos,
-            pets_included_default: plan.pets_included_default,
-            tax_rate: plan.tax_rate,
-          },
-        },
-      };
-    } catch (e: any) {
-      throw new (require('@nestjs/common').HttpException)({ ok: false, reason: 'checkout_failed', error: e?.message }, 400);
-    }
-  }
 
   // New Stripe Checkout Session endpoint enforcing metadata.user_id
   @Post('stripe/checkout')
@@ -411,9 +325,12 @@ export class SubscriptionsController {
   }
 
   // List overage purchases for current user
-  @Get('overage/purchases')
-  async listOveragePurchases() {
+  @Get('admin/overage/purchases')
+  async listOveragePurchases(@Req() req: any) {
     try {
+      const secret = process.env.ADMIN_PRICING_SYNC_SECRET || process.env.ADMIN_SECRET || '';
+      const hdr = req?.headers?.['x-admin-secret'];
+      if (!secret || hdr !== secret) return { ok: false, reason: 'admin_forbidden' };
       if (this.db.isStub) return { ok: true, stub: true, purchases: [] } as any;
       const rows = await this.db.runInTx(async (q) => {
         const { rows } = await q<any>(
@@ -432,9 +349,12 @@ export class SubscriptionsController {
   }
 
   // List overage/credit consumptions for current user (sources overage|credit)
-  @Get('overage/consumptions')
-  async listOverageConsumptions() {
+  @Get('admin/overage/consumptions')
+  async listOverageConsumptions(@Req() req: any) {
     try {
+      const secret = process.env.ADMIN_PRICING_SYNC_SECRET || process.env.ADMIN_SECRET || '';
+      const hdr = req?.headers?.['x-admin-secret'];
+      if (!secret || hdr !== secret) return { ok: false, reason: 'admin_forbidden' };
       if (this.db.isStub) return { ok: true, stub: true, consumptions: [] } as any;
       const rows = await this.db.runInTx(async (q) => {
         const { rows } = await q<any>(
@@ -453,9 +373,12 @@ export class SubscriptionsController {
   }
 
   // Mark a purchase paid manually (admin or dev use) and optionally auto-consume if session-bound.
-  @Post('overage/mark-paid')
-  async markOveragePaid(@Body() body: { purchase_id?: string; force_consume?: boolean }) {
+  @Post('admin/overage/mark-paid')
+  async markOveragePaid(@Body() body: { purchase_id?: string; force_consume?: boolean }, @Req() req: any) {
     try {
+      const secret = process.env.ADMIN_PRICING_SYNC_SECRET || process.env.ADMIN_SECRET || '';
+      const hdr = req?.headers?.['x-admin-secret'];
+      if (!secret || hdr !== secret) return { ok: false, reason: 'admin_forbidden' };
       if (this.db.isStub) return { ok: true, stub: true } as any;
       const pid = (body?.purchase_id || '').trim();
       if (!pid) return { ok: false, reason: 'purchase_id_required' };
@@ -521,9 +444,12 @@ export class SubscriptionsController {
   }
 
   // Mark purchase refunded and reverse credits if still in paid state (not yet consumed).
-  @Post('overage/mark-refunded')
-  async markOverageRefunded(@Body() body: { purchase_id?: string }) {
+  @Post('admin/overage/mark-refunded')
+  async markOverageRefunded(@Body() body: { purchase_id?: string }, @Req() req: any) {
     try {
+      const secret = process.env.ADMIN_PRICING_SYNC_SECRET || process.env.ADMIN_SECRET || '';
+      const hdr = req?.headers?.['x-admin-secret'];
+      if (!secret || hdr !== secret) return { ok: false, reason: 'admin_forbidden' };
       if (this.db.isStub) return { ok: true, stub: true } as any;
       const pid = (body?.purchase_id || '').trim();
       if (!pid) return { ok: false, reason: 'purchase_id_required' };
@@ -564,9 +490,12 @@ export class SubscriptionsController {
   }
 
   // Adjust credit units manually (delta can be positive to grant or negative to revoke)
-  @Post('overage/adjust-credits')
-  async adjustCredits(@Body() body: { code?: string; delta?: number; expires_at?: string }) {
+  @Post('admin/overage/adjust-credits')
+  async adjustCredits(@Body() body: { code?: string; delta?: number; expires_at?: string }, @Req() req: any) {
     try {
+      const secret = process.env.ADMIN_SECRET || '';
+      const hdr = req?.headers?.['x-admin-secret'];
+      if (!secret || hdr !== secret) return { ok: false, reason: 'admin_forbidden' };
       if (this.db.isStub) return { ok: true, stub: true } as any;
       const code = (body?.code || '').trim();
       const deltaRaw = body?.delta;
