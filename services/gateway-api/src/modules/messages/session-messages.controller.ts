@@ -15,6 +15,7 @@ export class SessionMessagesController {
     @Query('since') since?: string,
     @Query('until') until?: string,
     @Query('sort') sort?: string,
+    @Query('includeDeleted') includeDeletedStr?: string,
   ) {
     try {
       const limit = Math.min(Math.max(parseInt(limitStr || '50', 10) || 50, 1), 200);
@@ -23,9 +24,11 @@ export class SessionMessagesController {
         return { ok: true, sessionId, items: [], mode: 'stub' } as any;
       }
       const rows = await this.db.runInTx(async (q) => {
-        const filters: string[] = ['session_id = $1', 'deleted_at is null'];
+        const includeDeleted = ['1','true','yes'].includes((includeDeletedStr || '').toLowerCase());
+        const filters: string[] = ['session_id = $1'];
         const args: any[] = [sessionId];
         let idx = 2;
+        filters.push(`( ( ${includeDeleted ? 'true' : 'false'} ) = true AND is_admin() ) OR deleted_at IS NULL`);
         if (since) {
           const d = new Date(since); if (!isNaN(d.getTime())) { filters.push(`created_at >= $${idx++}`); args.push(d.toISOString()); }
         }
@@ -49,7 +52,7 @@ export class SessionMessagesController {
         );
         return rows as any[];
       });
-      return { ok: true, sessionId, items: rows, sort: sort || 'created_at.asc', since: since || null, until: until || null };
+      return { ok: true, sessionId, items: rows, sort: sort || 'created_at.asc', since: since || null, until: until || null, includeDeleted: !!includeDeletedStr };
     } catch (e: any) {
       throw new HttpException(e?.message || 'list_failed', HttpStatus.BAD_REQUEST);
     }
@@ -89,13 +92,15 @@ export class SessionMessagesController {
   }
 
   @Get(':sessionId/transcript')
-  async transcript(@Param('sessionId') sessionId: string, @Query('since') since?: string, @Query('until') until?: string) {
+  async transcript(@Param('sessionId') sessionId: string, @Query('since') since?: string, @Query('until') until?: string, @Query('includeDeleted') includeDeletedStr?: string) {
     try {
       if (this.db.isStub) return { ok: true, sessionId, transcript: [], mode: 'stub' } as any;
       const rows = await this.db.runInTx(async (q) => {
+        const includeDeleted = ['1','true','yes'].includes((includeDeletedStr || '').toLowerCase());
         const filters: string[] = ['session_id = $1', 'deleted_at is null'];
         const args: any[] = [sessionId];
         let idx = 2;
+        filters[1] = `( ( ${includeDeleted ? 'true' : 'false'} ) = true AND is_admin() ) OR deleted_at IS NULL`;
         if (since) { const d = new Date(since); if (!isNaN(d.getTime())) { filters.push(`created_at >= $${idx++}`); args.push(d.toISOString()); } }
         if (until) { const d = new Date(until); if (!isNaN(d.getTime())) { filters.push(`created_at <= $${idx++}`); args.push(d.toISOString()); } }
         const where = 'where ' + filters.join(' and ');
@@ -108,7 +113,7 @@ export class SessionMessagesController {
         );
         return rows as any[];
       });
-      return { ok: true, sessionId, transcript: rows, since: since || null, until: until || null };
+      return { ok: true, sessionId, transcript: rows, since: since || null, until: until || null, includeDeleted: !!includeDeletedStr };
     } catch (e: any) {
       throw new HttpException(e?.message || 'transcript_failed', HttpStatus.BAD_REQUEST);
     }

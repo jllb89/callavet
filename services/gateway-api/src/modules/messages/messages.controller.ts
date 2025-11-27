@@ -16,6 +16,7 @@ export class MessagesController {
     @Query('since') since?: string,
     @Query('until') until?: string,
     @Query('sort') sort?: string,
+    @Query('includeDeleted') includeDeletedStr?: string,
   ) {
     try {
       const limit = Math.min(Math.max(parseInt(limitStr || '50', 10) || 50, 1), 200);
@@ -24,9 +25,12 @@ export class MessagesController {
         return { ok: true, mode: 'stub', items: [] } as any;
       }
       const rows = await this.db.runInTx(async (q) => {
-        const filters: string[] = ["(s.user_id = auth.uid() or s.vet_id = auth.uid())", "m.deleted_at is null"]; // participant + not deleted
+        const includeDeleted = ['1','true','yes'].includes((includeDeletedStr || '').toLowerCase());
+        const filters: string[] = ["(s.user_id = auth.uid() or s.vet_id = auth.uid())"];
         const args: any[] = [];
         let idx = 1;
+        // Deleted filter: include only when admin and includeDeleted=true
+        filters.push(`( ( ${includeDeleted ? 'true' : 'false'} ) = true AND is_admin() ) OR m.deleted_at IS NULL`);
         if (sessionId) { filters.push(`m.session_id = $${idx++}`); args.push(sessionId); }
         if (role) { filters.push(`m.role = $${idx++}`); args.push(role.toLowerCase()); }
         if (senderId) { filters.push(`m.sender_id = $${idx++}`); args.push(senderId); }
@@ -58,7 +62,7 @@ export class MessagesController {
         );
         return rows as any[];
       });
-      return { ok: true, items: rows, limit, offset, count: rows.length, sort: sort || 'created_at.desc', since: since || null, until: until || null };
+      return { ok: true, items: rows, limit, offset, count: rows.length, sort: sort || 'created_at.desc', since: since || null, until: until || null, includeDeleted: !!includeDeletedStr };
     } catch (e: any) {
       throw new HttpException(e?.message || 'list_failed', HttpStatus.BAD_REQUEST);
     }
@@ -70,6 +74,7 @@ export class MessagesController {
     @Query('perLimit') perLimitStr?: string,
     @Query('since') since?: string,
     @Query('until') until?: string,
+    @Query('includeDeleted') includeDeletedStr?: string,
   ) {
     try {
       const sessionsLimit = Math.min(Math.max(parseInt(sessionsLimitStr || '10', 10) || 10, 1), 50);
@@ -78,6 +83,7 @@ export class MessagesController {
         return { ok: true, mode: 'stub', sessions: [] } as any;
       }
       const data = await this.db.runInTx(async (q) => {
+        const includeDeleted = ['1','true','yes'].includes((includeDeletedStr || '').toLowerCase());
         let sinceFilter = '';
         let untilFilter = '';
         const argsSessions: any[] = [];
@@ -93,7 +99,7 @@ export class MessagesController {
              from chat_sessions s
              join messages m on m.session_id = s.id
             where (s.user_id = auth.uid() or s.vet_id = auth.uid())
-              and m.deleted_at is null
+              and ( ( ${includeDeleted ? 'true' : 'false'} ) = true AND is_admin() OR m.deleted_at is null )
               ${sinceFilter} ${untilFilter}
             group by s.id
             order by max(m.created_at) desc
@@ -106,7 +112,7 @@ export class MessagesController {
           `select m.id, m.session_id, m.sender_id, m.role, m.content, m.created_at
              from messages m
             where m.session_id = any($1::uuid[])
-              and m.deleted_at is null
+              and ( ( ${includeDeleted ? 'true' : 'false'} ) = true AND is_admin() OR m.deleted_at is null )
             order by m.session_id, m.created_at asc`,
           [sessionIds]
         );
@@ -118,7 +124,7 @@ export class MessagesController {
         }
         return Object.entries(grouped).map(([session_id, items]) => ({ session_id, items }));
       });
-      return { ok: true, sessions: data, sessionsLimit, perLimit, since: since || null, until: until || null };
+      return { ok: true, sessions: data, sessionsLimit, perLimit, since: since || null, until: until || null, includeDeleted: !!includeDeletedStr };
     } catch (e: any) {
       throw new HttpException(e?.message || 'transcripts_failed', HttpStatus.BAD_REQUEST);
     }

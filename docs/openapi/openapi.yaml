@@ -1168,7 +1168,28 @@ paths:
       tags: [Messages]
       summary: List messages in a session
       security: [{ bearerAuth: [] }]
-      parameters: [ { $ref: "#/components/parameters/sessionId" }, { $ref: "#/components/parameters/pagingLimit" }, { $ref: "#/components/parameters/pagingCursor" } ]
+      parameters:
+        - { $ref: "#/components/parameters/sessionId" }
+        - { $ref: "#/components/parameters/pagingLimit" }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+        - in: query
+          name: since
+          schema: { type: string, format: date-time }
+        - in: query
+          name: until
+          schema: { type: string, format: date-time }
+        - in: query
+          name: sort
+          schema:
+            type: string
+            enum: [created_at.asc, created_at.desc]
+            default: created_at.asc
+        - in: query
+          name: includeDeleted
+          schema: { type: boolean }
+          description: Admin-only; include soft-deleted messages
       responses: { "200": { $ref: "#/components/responses/ListMessages" } }
     post:
       tags: [Messages]
@@ -1183,8 +1204,157 @@ paths:
       tags: [Messages]
       summary: Export transcript
       security: [{ bearerAuth: [] }]
-      parameters: [ { $ref: "#/components/parameters/sessionId" } ]
+      parameters:
+        - { $ref: "#/components/parameters/sessionId" }
+        - in: query
+          name: since
+          schema: { type: string, format: date-time }
+        - in: query
+          name: until
+          schema: { type: string, format: date-time }
+        - in: query
+          name: includeDeleted
+          schema: { type: boolean }
+          description: Admin-only; include soft-deleted messages
       responses: { "200": { $ref: "#/components/responses/Transcript" } }
+
+  /messages:
+    get:
+      tags: [Messages]
+      summary: List messages (global)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+        - in: query
+          name: sessionId
+          schema: { type: string, format: uuid }
+        - in: query
+          name: role
+          schema: { type: string, enum: [user, vet, ai] }
+        - in: query
+          name: senderId
+          schema: { type: string, format: uuid }
+        - in: query
+          name: since
+          schema: { type: string, format: date-time }
+        - in: query
+          name: until
+          schema: { type: string, format: date-time }
+        - in: query
+          name: sort
+          schema: { type: string, enum: [created_at.asc, created_at.desc], default: created_at.desc }
+        - in: query
+          name: includeDeleted
+          schema: { type: boolean }
+          description: Admin-only; include soft-deleted messages
+      responses:
+        "200":
+          description: Global messages list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  items: { type: array, items: { $ref: "#/components/schemas/Message" } }
+                  limit: { type: integer }
+                  offset: { type: integer }
+                  count: { type: integer }
+                  sort: { type: string }
+                  since: { type: string, format: date-time, nullable: true }
+                  until: { type: string, format: date-time, nullable: true }
+                  includeDeleted: { type: boolean }
+
+  /messages/transcripts:
+    get:
+      tags: [Messages]
+      summary: Global transcripts (recent sessions)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: sessionsLimit
+          schema: { type: integer, minimum: 1, maximum: 50, default: 10 }
+        - in: query
+          name: perLimit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+        - in: query
+          name: since
+          schema: { type: string, format: date-time }
+        - in: query
+          name: until
+          schema: { type: string, format: date-time }
+        - in: query
+          name: includeDeleted
+          schema: { type: boolean }
+          description: Admin-only; include soft-deleted messages
+      responses:
+        "200":
+          description: Global transcripts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  sessions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        session_id: { type: string, format: uuid }
+                        items: { type: array, items: { $ref: "#/components/schemas/Message" } }
+                  sessionsLimit: { type: integer }
+                  perLimit: { type: integer }
+                  since: { type: string, format: date-time, nullable: true }
+                  until: { type: string, format: date-time, nullable: true }
+                  includeDeleted: { type: boolean }
+
+  /messages/{id}:
+    get:
+      tags: [Messages]
+      summary: Message detail
+      security: [{ bearerAuth: [] }]
+      parameters: [ { in: path, name: id, required: true, schema: { type: string, format: uuid } } ]
+      responses: { "200": { $ref: "#/components/schemas/Message" } }
+    patch:
+      tags: [Messages]
+      summary: Redact message
+      security: [{ bearerAuth: [] }]
+      parameters: [ { in: path, name: id, required: true, schema: { type: string, format: uuid } } ]
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { reason: { type: string, maxLength: 500 } } }
+      responses:
+        "200":
+          description: Redacted message
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  message: { $ref: "#/components/schemas/Message" }
+    delete:
+      tags: [Messages]
+      summary: Soft delete message
+      security: [{ bearerAuth: [] }]
+      parameters: [ { in: path, name: id, required: true, schema: { type: string, format: uuid } } ]
+      responses:
+        "200":
+          description: Soft-deleted message
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  message: { $ref: "#/components/schemas/Message" }
 
   /video/rooms:
     post:

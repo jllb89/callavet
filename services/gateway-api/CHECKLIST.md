@@ -119,6 +119,7 @@ Routing Notes (Frontend)
 - Sort: `sort=created_at.asc|created_at.desc` (default desc for global list; asc for session transcript).
 - Redaction: `PATCH /messages/{id}/redact { reason? }` replaces `content` with `[redacted]`, stores original in `redacted_original_content`, sets `redacted_at`.
 - Soft delete: `DELETE /messages/{id}` sets `deleted_at`, replaces content with `[deleted]`. Deleted messages excluded from lists/transcripts by default.
+- Admin override: `includeDeleted=true` only honored for admins (based on DB `is_admin()`); otherwise deleted rows are excluded.
 
 ## KB & Search
 - [ ] GET /kb → responses: ListKB
