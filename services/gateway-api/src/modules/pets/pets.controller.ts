@@ -13,9 +13,8 @@ export class PetsController {
     if (this.db.isStub) return { data: [] } as any;
     const { rows } = await this.db.runInTx(async (q) => {
       const r = await q(
-        `select id::text as id, name, species, breed, color, sex, birthdate, archived_at
+        `select id::text as id, user_id::text as user_id, name, species, breed, birthdate, sex, weight_kg, medical_notes
            from pets
-          where archived_at is null
           order by created_at desc
           limit 100`
       );
@@ -28,7 +27,7 @@ export class PetsController {
   async detail(@Param('id') id: string) {
     const { rows } = await this.db.runInTx(async (q) => {
       const r = await q(
-        `select id::text as id, name, species, breed, color, sex, birthdate, archived_at
+        `select id::text as id, user_id::text as user_id, name, species, breed, birthdate, sex, weight_kg, medical_notes
            from pets
           where id = $1::uuid
           limit 1`,
@@ -43,13 +42,25 @@ export class PetsController {
   @Post()
   @HttpCode(HttpStatus.CREATED)
   async create(@Body() body: any) {
-    if (!body?.name) throw new HttpException('name required', 400);
+    if (!body?.name || !body?.species) throw new HttpException('name and species required', 400);
+    const claims = this.rc.claims || {};
+    const userId = claims.sub;
+    if (!userId) throw new HttpException('Unauthorized', 401);
     const { rows } = await this.db.runInTx(async (q) => {
       const r = await q(
-        `insert into pets (name, species, breed, color, sex, birthdate)
-         values ($1, $2, $3, $4, $5, $6)
-         returning id::text as id, name, species, breed, color, sex, birthdate`,
-        [body.name, body.species || null, body.breed || null, body.color || null, body.sex || null, body.birthdate || null]
+        `insert into pets (id, user_id, name, species, breed, birthdate, sex, weight_kg, medical_notes)
+         values (gen_random_uuid(), $1::uuid, $2, $3, $4, $5::date, $6, $7::float, $8)
+         returning id::text as id, user_id::text as user_id, name, species, breed, birthdate, sex, weight_kg, medical_notes`,
+        [
+          userId,
+          body.name,
+          body.species,
+          body.breed || null,
+          body.birthdate || null,
+          body.sex || null,
+          body.weight_kg ?? null,
+          body.medical_notes || null,
+        ]
       );
       return r;
     });
@@ -58,7 +69,7 @@ export class PetsController {
 
   @Patch(':id')
   async patch(@Param('id') id: string, @Body() body: any) {
-    const fields = ['name', 'species', 'breed', 'color', 'sex', 'birthdate'];
+    const fields = ['name', 'species', 'breed', 'birthdate', 'sex', 'weight_kg', 'medical_notes'];
     const sets: string[] = [];
     const args: any[] = [];
     for (const f of fields) {
@@ -72,7 +83,7 @@ export class PetsController {
     const { rows } = await this.db.runInTx(async (q) => {
       const r = await q(
         `update pets set ${sets.join(', ')} where id = $${args.length}::uuid
-         returning id::text as id, name, species, breed, color, sex, birthdate, archived_at`,
+         returning id::text as id, user_id::text as user_id, name, species, breed, birthdate, sex, weight_kg, medical_notes`,
         args
       );
       return r;
@@ -86,8 +97,7 @@ export class PetsController {
   async remove(@Param('id') id: string) {
     const { rows } = await this.db.runInTx(async (q) => {
       const r = await q(
-        `update pets set archived_at = now() where id = $1::uuid
-         returning id::text as id`,
+        `delete from pets where id = $1::uuid returning id::text as id`,
         [id]
       );
       return r;
@@ -99,7 +109,6 @@ export class PetsController {
   // POST /pets/:id/files/signed-url (stub integration with storage)
   @Post(':id/files/signed-url')
   async petSignedUrl(@Param('id') id: string, @Body() body: any) {
-    // In a future iteration, validate pet ownership & call storage client.
     const path = body?.path || `pets/${id}/${Date.now()}-${Math.random().toString(36).slice(2)}.bin`;
     return { path, url: `https://storage.supabase.fake/upload/${encodeURIComponent(path)}`, expires_in: 3600 };
   }
