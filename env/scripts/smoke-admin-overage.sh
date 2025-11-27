@@ -15,7 +15,7 @@ log "Admin guard: expect forbidden without secret"
 curl -sS -H "$AUTH_HEADER" "$SERVER_URL/subscriptions/admin/overage/purchases" | jq '.ok,.reason'
 
 log "Admin guard: expect success with secret"
-curl -sS -H "$AUTH_HEADER" -H "x-admin-secret:$ADMIN_GUARD" "$SERVER_URL/subscriptions/admin/overage/purchases" | jq '.ok,.purchases | length'
+curl -sS -H "$AUTH_HEADER" -H "x-admin-secret:$ADMIN_GUARD" "$SERVER_URL/subscriptions/admin/overage/purchases" | jq '{ok, purchases_len: ((.purchases // []) | length)}'
 
 log "Start overage chat session (no credits/entitlements)"
 RESP=$(curl -sS -X POST -H "$AUTH_HEADER" -H 'Content-Type: application/json' \

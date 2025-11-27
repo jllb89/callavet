@@ -360,7 +360,8 @@ export class SubscriptionsController {
         const { rows } = await q<any>(
           `select ec.id, ec.source, ec.session_id, ec.consumption_type, ec.amount, ec.created_at, ec.overage_purchase_id
              from entitlement_consumptions ec
-            where ec.user_id = auth.uid()
+             join user_subscriptions us on us.id = ec.subscription_id
+            where us.user_id = auth.uid()
               and ec.source in ('overage','credit')
             order by ec.created_at desc`
         );
