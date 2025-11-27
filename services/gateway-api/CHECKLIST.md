@@ -195,6 +195,11 @@ Routing Notes (Frontend)
 - Auth: Bearer required; RLS scopes to current user; admin can view all.
 - Payments: `GET /payments` → `{ data: [...] }` ordered by `created_at desc` (cap 100); `GET /payments/{id}` → single row or 404.
 - Invoices: `GET /invoices` → `{ data: [...] }` ordered by `issued_at desc` (cap 100); `GET /invoices/{id}` → single row or 404.
+- Fallback (dev/staging): if no JWT token available, send `x-user-id: <uuid>` header (guard decodes and sets claims) for smoke scripts.
+- Seed script: `env/scripts/seed-payments.sh` inserts sample rows (`seed_pay_*`, `seed_inv_*`) for manual verification.
+- RLS: enabled on `payments`; invoices currently filtered at app layer only (optional future RLS policy: `ALTER TABLE invoices ENABLE ROW LEVEL SECURITY; CREATE POLICY invoices_owner_view ON invoices FOR SELECT USING (user_id = auth.uid() OR is_admin());`).
+- Debug: set `DEV_DB_DEBUG=1` to log `[payments:list]` and `[invoices:list]` with uid and row counts.
+- Verification: smoke `env/scripts/smoke-payments.sh` PASS after seeding (list returns 2 payments & 2 invoices; detail tested when present).
 
 ## Notifications
 - [ ] POST /notifications/test → responses: Ok
