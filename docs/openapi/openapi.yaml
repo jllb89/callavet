@@ -99,9 +99,10 @@ components:
           type: object
           nullable: true
           properties:
-            stub: { type: boolean }
-            status: { type: string }
-            type: { type: string }
+            url: { type: string, description: 'Stripe Checkout URL (one-off overage)'}
+            checkout_session_id: { type: string, description: 'Stripe Checkout Session id'}
+            status: { type: string, description: 'pending|paid|failed' }
+            type: { type: string, description: 'one_off' }
             currency: { type: string }
             amount: { type: integer, nullable: true }
             reason: { type: string }
@@ -499,6 +500,101 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+
+      /subscriptions/admin/overage/purchases:
+        get:
+          tags: [Plans & Subscriptions, Admin]
+          summary: List overage purchases (admin)
+          security: [{ bearerAuth: [] }, { adminSecret: [] }]
+          responses:
+            "200": { description: Purchases list }
+
+      /subscriptions/admin/overage/consumptions:
+        get:
+          tags: [Plans & Subscriptions, Admin]
+          summary: List overage/credit consumptions (admin)
+          security: [{ bearerAuth: [] }, { adminSecret: [] }]
+          responses:
+            "200": { description: Consumptions list }
+
+      /subscriptions/admin/overage/mark-paid:
+        post:
+          tags: [Plans & Subscriptions, Admin]
+          summary: Mark purchase paid (admin)
+          security: [{ bearerAuth: [] }, { adminSecret: [] }]
+          requestBody:
+            required: true
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    purchase_id: { type: string, format: uuid }
+                    force_consume: { type: boolean }
+          responses:
+            "200": { description: Paid marked }
+
+      /subscriptions/admin/overage/mark-refunded:
+        post:
+          tags: [Plans & Subscriptions, Admin]
+          summary: Mark purchase refunded (admin)
+          security: [{ bearerAuth: [] }, { adminSecret: [] }]
+          requestBody:
+            required: true
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    purchase_id: { type: string, format: uuid }
+          responses:
+            "200": { description: Refunded marked }
+
+      /subscriptions/admin/overage/adjust-credits:
+        post:
+          tags: [Plans & Subscriptions, Admin]
+          summary: Adjust credits (admin)
+          security: [{ bearerAuth: [] }, { adminSecret: [] }]
+          requestBody:
+            required: true
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    code: { type: string }
+                    delta: { type: integer }
+                    expires_at: { type: string, format: date-time, nullable: true }
+          responses:
+            "200": { description: Credits adjusted }
+
+      /subscriptions/admin/overage/items:
+        get:
+          tags: [Plans & Subscriptions, Admin]
+          summary: List overage items (admin)
+          security: [{ bearerAuth: [] }, { adminSecret: [] }]
+          responses:
+            "200": { description: Items list }
+        post:
+          tags: [Plans & Subscriptions, Admin]
+          summary: Create/update overage item (admin)
+          security: [{ bearerAuth: [] }, { adminSecret: [] }]
+          requestBody:
+            required: true
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    code: { type: string }
+                    name: { type: string }
+                    description: { type: string }
+                    currency: { type: string }
+                    amount_cents: { type: integer }
+                    is_active: { type: boolean }
+                    metadata: { type: object }
+          responses:
+            "200": { description: Item upserted }
                   session_id: { type: string }
                   url: { type: string }
                   plan_code: { type: string }
@@ -1528,6 +1624,10 @@ paths:
 
 components:
   securitySchemes:
+    adminSecret:
+      type: apiKey
+      in: header
+      name: x-admin-secret
     bearerAuth:
       type: http
       scheme: bearer

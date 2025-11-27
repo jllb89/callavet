@@ -548,6 +548,49 @@ export class SubscriptionsController {
     }
   }
 
+  // Admin: CRUD for overage items (create/update/deactivate)
+  @Post('admin/overage/items')
+  async upsertOverageItem(@Body() body: { id?: string; code?: string; name?: string; description?: string; currency?: string; amount_cents?: number; is_active?: boolean; metadata?: any }, @Req() req: any) {
+    try {
+      const secret = process.env.ADMIN_PRICING_SYNC_SECRET || process.env.ADMIN_SECRET || '';
+      const hdr = req?.headers?.['x-admin-secret'];
+      if (!secret || hdr !== secret) return { ok: false, reason: 'admin_forbidden' };
+      if (this.db.isStub) return { ok: true, stub: true } as any;
+      const { id, code, name, description, currency, amount_cents, is_active, metadata } = body || {} as any;
+      if (!code || !name || !currency || typeof amount_cents !== 'number') return { ok: false, reason: 'invalid_item_payload' };
+      const res = await this.db.runInTx(async (q) => {
+        const { rows: existing } = await q<any>(`select id from overage_items where code=$1 limit 1 for update`, [code]);
+        if (existing[0]) {
+          await q(`update overage_items set name=coalesce($2,name), description=coalesce($3,description), currency=coalesce($4,currency), amount_cents=coalesce($5,amount_cents), is_active=coalesce($6,is_active), metadata=coalesce($7,metadata), updated_at=now() where id=$1`, [existing[0].id, name, description, currency, amount_cents, is_active, metadata]);
+          return { mode: 'updated', id: existing[0].id } as any;
+        } else {
+          const newId = (await q<any>(`insert into overage_items (id, code, name, description, currency, amount_cents, is_active, metadata, created_at, updated_at) values (gen_random_uuid(), $1, $2, $3, $4, $5, coalesce($6,true), $7, now(), now()) returning id`, [code, name, description, currency, amount_cents, is_active, metadata])).rows[0].id;
+          return { mode: 'created', id: newId } as any;
+        }
+      });
+      return { ok: true, ...res };
+    } catch (e: any) {
+      throw new HttpException(e?.message || 'overage_items_upsert_failed', HttpStatus.BAD_REQUEST);
+    }
+  }
+
+  @Get('admin/overage/items')
+  async listOverageItemsAdmin(@Req() req: any) {
+    try {
+      const secret = process.env.ADMIN_PRICING_SYNC_SECRET || process.env.ADMIN_SECRET || '';
+      const hdr = req?.headers?.['x-admin-secret'];
+      if (!secret || hdr !== secret) return { ok: false, reason: 'admin_forbidden' };
+      if (this.db.isStub) return { ok: true, stub: true, items: [] } as any;
+      const rows = await this.db.runInTx(async (q) => {
+        const { rows } = await q<any>(`select id, code, name, description, currency, amount_cents, is_active, metadata, created_at, updated_at from overage_items order by is_active desc, code asc`);
+        return rows;
+      });
+      return { ok: true, items: rows };
+    } catch (e: any) {
+      throw new HttpException(e?.message || 'overage_items_list_failed', HttpStatus.BAD_REQUEST);
+    }
+  }
+
   @Post('cancel')
   async cancel(@Body() body: { immediate?: boolean }) {
     try {

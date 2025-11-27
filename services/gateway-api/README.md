@@ -178,6 +178,43 @@ Status legend
 - Unique index: attempt double consume linking the same `overage_purchase_id`; expect DB error or endpoint `reason` indicating duplicate prevented.
 - Webhook idempotency: resend `checkout.session.completed` for same `session_id`; expect handler to skip.
 
+## Checklist — Current Hardening Pass
+- Admin endpoints moved and guarded:
+  - Paths: `subscriptions/admin/overage/*` (`purchases`, `consumptions`, `mark-paid`, `mark-refunded`, `adjust-credits`).
+  - Guard: header `x-admin-secret` matches `ADMIN_PRICING_SYNC_SECRET` (fallback `ADMIN_SECRET`).
+- Session overage consolidation:
+  - `POST /sessions/start` creates one-off Stripe Checkout when no entitlements/credits and returns `payment.url`.
+  - Session-bound purchases record `original_session_id`; webhook transitions to `paid` then auto-consume → `consumed`.
+- Credits behavior:
+  - Units-based purchases (`credited`) increment pooled credits; credit consumptions do not carry `overage_purchase_id`.
+  - Refund of credited purchases reverses only unconsumed units; consumed credits remain unchanged.
+- Admin consumptions listing fix:
+  - Query joins `entitlement_consumptions` to `user_subscriptions` and filters by `us.user_id = auth.uid()` (entitlement_consumptions has no `user_id`).
+- DB constraints:
+  - Unique index `uniq_consumptions_overage_purchase` on `entitlement_consumptions(overage_purchase_id) WHERE overage_purchase_id IS NOT NULL` prevents duplicate purchase-linked consumptions.
+
+## Quick Test Flow (Staging)
+- Verify admin guard:
+  - `GET /subscriptions/admin/overage/purchases` without header → `admin_forbidden`.
+  - With `x-admin-secret:$ADMIN_PRICING_SYNC_SECRET` → `ok:true`.
+- Force overage:
+  - Zero credits: `POST /subscriptions/admin/overage/adjust-credits { code:'chat_unit', delta:-1000 }` (requires redeployed route).
+  - `POST /sessions/start { type:'chat' }` → expect `payment.url` and new `checkout_created` bound to `sessionId`.
+- Units checkout:
+  - `POST /subscriptions/overage/checkout { code:'chat_unit', quantity:2 }` → complete payment, webhook marks `paid`, credits increment.
+- Consumptions linkage:
+  - `GET /subscriptions/admin/overage/consumptions` shows `credit` entries with `overage_purchase_id:null` and `overage` entries with `overage_purchase_id` set for session-bound purchases.
+- Duplicate prevention:
+  - Call `POST /subscriptions/overage/consume` twice with same `purchase_id` → second attempt blocked by unique index.
+- Idempotency:
+  - Resend identical `checkout.session.completed` → handler skips (recorded in `stripe_subscription_events`).
+
+## Notes & Gotchas
+- Concurrency: guard `sessions/start` against simultaneous credit draws; ensure atomic credit decrement and entitlement reserve.
+- Secrets: use lowercase `x-admin-secret`; rotate `ADMIN_PRICING_SYNC_SECRET` periodically.
+- Currency: ensure `overage_items.currency` matches Stripe Checkout currency to avoid reporting inconsistencies.
+- Deploy alignment: if an admin route (e.g., `adjust-credits`) returns `admin_forbidden` or 404, redeploy Gateway to pick up latest controller changes.
+
 ## Work Plan — One by One
 - Replace stub `POST /subscriptions/checkout` with real Stripe path or deprecate; standardize on `stripe/checkout`.
 - Sessions overage: implement one-off checkout creation + return URL when `pending_payment` would occur.
