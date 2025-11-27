@@ -5,6 +5,7 @@ import { DbModule } from './db/db.module';
 import { SubscriptionsModule } from './subscriptions/subscriptions.module';
 import { SessionsModule } from './sessions/sessions.module';
 import { CentersModule } from './centers/centers.module';
+import { PaymentsModule } from './payments/payments.module';
 import { AuthModule } from './auth/auth.module';
 import { BillingModule } from './billing/billing.module';
 import { MetaModule } from './meta/meta.module';
@@ -30,6 +31,7 @@ import { MessagesModule } from './messages/messages.module';
     SubscriptionsModule,
     SessionsModule,
     CentersModule,
+    PaymentsModule,
     VectorModule,
     KbModule,
   SearchModule,

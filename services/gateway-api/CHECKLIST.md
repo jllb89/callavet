@@ -174,12 +174,27 @@ Verification
 - [x] GET /centers/near → responses: ListCenters
 - [ ] (spec-only) Implement detail/admin CRUD + vet-center assign/unassign if needed
 
+Routing Notes (Frontend)
+- Base URL: use `GATEWAY_BASE` (fallback `SERVER_URL`).
+- Auth: Not required; `/centers/near` is public.
+- Query params: `lat` and `lng` required, `radiusKm` optional (default 10).
+- Response: `{ data: [ { id, name, address, phone, website, is_partner } ] }`.
+- Geo behavior: Uses approximate Haversine if `geo_location`="lat,lng" in DB; otherwise falls back to recent centers.
+- Pagination: Not implemented; server caps to 50–100 items.
+- Debug: Set `DEV_DB_DEBUG=1` to log `{ mode, count, sample }`.
+
 ## Payments & Invoices (read-only)
-- [ ] GET /payments → responses: ListPayments
-- [ ] GET /payments/{paymentId} → responses: Payment
-- [ ] GET /invoices → responses: ListInvoices
-- [ ] GET /invoices/{invoiceId} → responses: Invoice
+- [x] GET /payments → responses: ListPayments
+- [x] GET /payments/{paymentId} → responses: Payment
+- [x] GET /invoices → responses: ListInvoices
+- [x] GET /invoices/{invoiceId} → responses: Invoice
 - [ ] Defer: POST /payments/one-off/checkout (use subscriptions overage checkout)
+
+Routing Notes (Frontend)
+- Base URL: `GATEWAY_BASE`.
+- Auth: Bearer required; RLS scopes to current user; admin can view all.
+- Payments: `GET /payments` → `{ data: [...] }` ordered by `created_at desc` (cap 100); `GET /payments/{id}` → single row or 404.
+- Invoices: `GET /invoices` → `{ data: [...] }` ordered by `issued_at desc` (cap 100); `GET /invoices/{id}` → single row or 404.
 
 ## Notifications
 - [ ] POST /notifications/test → responses: Ok
