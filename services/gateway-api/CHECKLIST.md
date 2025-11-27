@@ -121,15 +121,31 @@ Routing Notes (Frontend)
 - Soft delete: `DELETE /messages/{id}` sets `deleted_at`, replaces content with `[deleted]`. Deleted messages excluded from lists/transcripts by default.
 - Admin override: `includeDeleted=true` only honored for admins (based on DB `is_admin()`); otherwise deleted rows are excluded.
 
+Verification
+- Group smoke `env/scripts/smoke-messages.sh`: PASS (12/12) including filters, redact, soft delete, transcripts.
+
 ## KB & Search
-- [ ] GET /kb → responses: ListKB
-- [ ] POST /kb → responses: KBItem
-- [ ] GET /kb/{id} → responses: KBItem
-- [ ] POST /vector/search → responses: inline { results[] }
-- [ ] GET /vector/search → responses: inline { results[] }
-- [ ] GET /vector/debug → responses: inline { pets, pets_with_emb, sample[] }
-- [ ] GET /vector/pets → responses: inline { items[] }
-- [ ] GET /search → responses: inline { items[], took_ms, lexical }
+- [x] GET /kb → responses: ListKB
+- [x] POST /kb → responses: KBItem
+- [x] GET /kb/{id} → responses: KBItem
+- [x] POST /vector/search → responses: inline { results[] }
+- [x] GET /vector/search → responses: inline { results[] }
+- [x] GET /vector/debug → responses: inline { pets, pets_with_emb, sample[] }
+- [x] GET /vector/pets → responses: inline { items[] }
+- [x] GET /search → responses: inline { items[], took_ms, lexical }
+
+Routing Notes (Frontend)
+- Base URL: `GATEWAY_BASE` (fallback `SERVER_URL`).
+- Auth: Bearer required for KB create/get and all vector/search endpoints. KB list may be public; treat 200 unauth as OK when enabled.
+- KB list: `GET /kb?species=cat,dog&tags=colic` returns `{ items: [...] }` ordered by `published_at|updated_at` desc.
+- KB create: `POST /kb` body `{ title, content, species[], tags[], language }`; returns draft row.
+- KB get: `GET /kb/{id|slug}` returns full article; `404` if not visible.
+- Lexical search: `GET /search?type=kb&q=...&limit=10` returns `{ items[], took_ms, lexical: true }` — items may be empty.
+- Vector search: `GET/POST /vector/search` requires `target` and embedding; returns `{ results[] }` with `id, score, snippet`.
+- Vector utilities: `GET /vector/debug`, `GET /vector/pets?limit=50` for observability/testing.
+
+Verification
+- Group smoke `env/scripts/smoke-kb-search.sh`: PASS after adjusting unauth check; covers KB list/create/get, lexical search, vector GET/POST.
 
 ## Pets
 - [ ] GET /pets → responses: ListPets
