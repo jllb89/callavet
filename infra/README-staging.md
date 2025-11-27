@@ -68,6 +68,12 @@ staging.call-a-vet.app {
 }
 ```
 
+## Debug Logging (Centers)
+- The gateway supports optional DB debug logging controlled by `DEV_DB_DEBUG`.
+- To enable (default on in compose): `export DEV_DB_DEBUG=1` before `docker compose up -d`.
+- To disable: `export DEV_DB_DEBUG=0` (or remove the var) and redeploy.
+- Logs include `mode` (geo vs fallback), `count`, and a sample `{ id, name }` for `/centers/near`.
+
 ## Roll forward/back
 - Redeploy latest: set `TAG=staging` and `docker compose up -d`
 - Pin to a commit: set `TAG=staging-<sha>` and `docker compose up -d`

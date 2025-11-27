@@ -13,6 +13,7 @@ services:
       - DATABASE_URL=${DATABASE_URL}
       - SUPABASE_JWT_SECRET=${SUPABASE_JWT_SECRET}
       - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+      - DEV_DB_DEBUG=${DEV_DB_DEBUG:-1}
   chat:
     image: ghcr.io/${REGISTRY_OWNER}/cav-chat:${TAG:-staging}
     restart: unless-stopped

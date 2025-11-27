@@ -12,6 +12,7 @@ export class CentersController {
     const radius = Number(radiusStr ?? '50');
     // If coordinates provided, attempt simple radius filter using stored geo_location as "lat,lng" (text)
     let rows: any[] = [];
+    let mode = 'none';
     if (!Number.isNaN(lat) && !Number.isNaN(lng) && radius > 0) {
       const sql = `
         with centers as (
@@ -48,6 +49,7 @@ export class CentersController {
       `;
       const res = await this.db.query(sql, [lat, lng, radius]);
       rows = res.rows;
+      mode = 'geo';
     }
     // Fallback: return top centers without geo filter
     if (!rows.length) {
@@ -55,6 +57,18 @@ export class CentersController {
         'select id, name, address, phone, website, is_partner from vet_care_centers order by created_at desc limit 50'
       );
       rows = res.rows;
+      mode = mode === 'geo' ? 'geo_fallback' : 'fallback';
+    }
+    if (process.env.DEV_DB_DEBUG === '1') {
+      // eslint-disable-next-line no-console
+      console.log('[centers/near]', {
+        lat,
+        lng,
+        radiusKm: radius,
+        mode,
+        count: rows.length,
+        sample: rows[0] ? { id: rows[0].id, name: rows[0].name } : null
+      });
     }
     return { data: rows };
   }
