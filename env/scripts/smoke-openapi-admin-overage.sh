@@ -1,4 +1,4 @@
-#!/usr/bin/env zsh
+#!/usr/bin/env bash
 set -euo pipefail
 
 # Auto-source .env.staging if present
@@ -23,11 +23,11 @@ fi
 ADMIN_HEADER="x-admin-secret:${ADMIN_PRICING_SYNC_SECRET}"
 
 section() {
-  print "\n== $1 ==";
+  printf "\n== %s ==\n" "$1"
 }
 
 die() {
-  print "ERROR: $1" >&2
+  printf "ERROR: %s\n" "$1" >&2
   exit 1
 }
 
@@ -43,7 +43,7 @@ if ! grep -q "/subscriptions/admin/overage/items" "$OPENAPI_FILE"; then die "Mis
 if ! grep -q "SessionStartResponse" "$OPENAPI_FILE"; then die "Missing SessionStartResponse schema"; fi
 if ! grep -q "checkout_session_id" "$OPENAPI_FILE"; then die "Missing payment.checkout_session_id in schema"; fi
 if ! grep -q "x-admin-secret" "$OPENAPI_FILE"; then die "Missing adminSecret security scheme"; fi
-print "OpenAPI checks: OK"
+printf "OpenAPI checks: OK\n"
 
 # 2) Admin overage items: list -> upsert -> list confirm
 section "Admin Overages: Items CRUD"
@@ -54,33 +54,33 @@ ITEM_CURR=${ITEM_CURR:-"usd"}
 ITEM_AMT=${ITEM_AMT:-500}
 ITEM_ACTIVE=${ITEM_ACTIVE:-true}
 
-print "Listing items (pre)"
+printf "Listing items (pre)\n"
 PRE_LIST_JSON=$(curl -sS -H "$AUTH_HEADER" -H "$ADMIN_HEADER" "$SERVER_URL/subscriptions/admin/overage/items" || true)
 PRE_COUNT=$(echo "$PRE_LIST_JSON" | jqsafe '.items | length')
-print "Items before: ${PRE_COUNT}"
+printf "Items before: %s\n" "${PRE_COUNT}"
 
-print "Upserting item ${ITEM_CODE}"
+printf "Upserting item %s\n" "${ITEM_CODE}"
 UPSERT_BODY=$(jq -n --arg code "$ITEM_CODE" --arg name "$ITEM_NAME" --arg desc "$ITEM_DESC" --arg curr "$ITEM_CURR" --argjson amt $ITEM_AMT --argjson active $ITEM_ACTIVE '{code: $code, name: $name, description: $desc, currency: $curr, amount_cents: $amt, is_active: $active}')
 UPSERT_JSON=$(curl -sS -X POST -H "$AUTH_HEADER" -H "$ADMIN_HEADER" -H "Content-Type: application/json" \
   -d "$UPSERT_BODY" "$SERVER_URL/subscriptions/admin/overage/items")
 UPSERT_OK=$(echo "$UPSERT_JSON" | jqsafe '.ok')
 [[ "$UPSERT_OK" == "true" ]] || die "Item upsert failed: $UPSERT_JSON"
-print "Upsert OK"
+printf "Upsert OK\n"
 
-print "Listing items (post)"
+printf "Listing items (post)\n"
 POST_LIST_JSON=$(curl -sS -H "$AUTH_HEADER" -H "$ADMIN_HEADER" "$SERVER_URL/subscriptions/admin/overage/items")
 FOUND=$(echo "$POST_LIST_JSON" | jq -r --arg code "$ITEM_CODE" '.items | map(select(.code == $code)) | length')
 [[ "$FOUND" != "0" ]] || die "Upserted item not found in list"
-print "Item present after upsert: OK"
+printf "Item present after upsert: OK\n"
 
 # 3) Admin consumptions & purchases basic visibility
 section "Admin Overages: Purchases & Consumptions listing"
 PURCHASES_JSON=$(curl -sS -H "$AUTH_HEADER" -H "$ADMIN_HEADER" "$SERVER_URL/subscriptions/admin/overage/purchases")
 P_COUNT=$(echo "$PURCHASES_JSON" | jqsafe '.purchases | length')
-print "Purchases count: ${P_COUNT:-0}"
+printf "Purchases count: %s\n" "${P_COUNT:-0}"
 CONSUMPTIONS_JSON=$(curl -sS -H "$AUTH_HEADER" -H "$ADMIN_HEADER" "$SERVER_URL/subscriptions/admin/overage/consumptions")
 C_COUNT=$(echo "$CONSUMPTIONS_JSON" | jqsafe '.consumptions | length')
-print "Consumptions count: ${C_COUNT:-0}"
+printf "Consumptions count: %s\n" "${C_COUNT:-0}"
 
 # 4) Sessions start: verify payment fields appear when overage is needed
 section "Sessions: Start overage and validate payment fields"
@@ -94,9 +94,9 @@ if [[ "$OVERAGE" == "true" ]]; then
   PAY_CS=$(echo "$START_JSON" | jqsafe '.payment.checkout_session_id')
   [[ -n "$PAY_URL" ]] || die "Missing payment.url on overage sessions/start"
   [[ -n "$PAY_CS" ]] || die "Missing payment.checkout_session_id on overage sessions/start"
-  print "Overage flow present; payment fields OK"
+  printf "Overage flow present; payment fields OK\n"
 else
-  print "No overage triggered; credits likely available. Skipping payment checks."
+  printf "No overage triggered; credits likely available. Skipping payment checks.\n"
 fi
 
-print "\nAll checks completed"
+printf "\nAll checks completed\n"

@@ -76,201 +76,274 @@ Status legend
 - `POST /subscriptions/admin/overage/adjust-credits` — Admin
   - Grants/revokes credits by `delta` (+/-) for an item.
   - Requires header `x-admin-secret` matching `ADMIN_PRICING_SYNC_SECRET` env var (fallback: `ADMIN_SECRET`).
- - `GET /subscriptions/admin/overage/items` — Admin
-   - Lists catalog items.
- - `POST /subscriptions/admin/overage/items` — Admin
-   - Upsert item: `code`, `name`, `description`, `currency`, `amount_cents`, `is_active`, `metadata`.
+  
+## Part 1 — API Groups: Routes + Current Status
 
-## Plans (Public)
+Legend
+- verified: implemented and tested against staging/dev stack
+- pending: implemented but needs specific validation/spec alignment
+- todo: not implemented
 
-- `GET /plans`
-  - Lists active subscription plans with pricing and entitlements.
-- `GET /plans/:code`
-  - Returns plan details by code.
+Health/Meta/Docs
+- `GET /health` — verified
+  - Basic health probe.
+- `GET /version` — verified
+  - Returns service version.
+- `GET /time` — verified
+  - Server time.
+- `GET /openapi.yaml` — verified
+  - Spec includes admin paths + session payment fields.
+- `GET /docs` — verified
+  - Static docs page.
+- `GET /openapi-chat-ws.yaml` — pending
+  - Chat WS spec present; needs review against implementation.
+- `GET /openapi-webhooks.yaml` — pending
+  - Webhooks spec present; needs review against handler payloads.
+- `GET /docs/chat` — verified
+- `GET /docs/webhooks` — verified
+Internal Billing
+- `GET /internal/billing/health` — verified
+  - Internal billing health endpoint.
 
-## Entitlements
+System DB
+- `GET /_db/status` — verified
+  - DB connectivity + stub status snapshot.
 
-- `POST /entitlements/reserve`
-  - Reserves entitlement (`fn_reserve_chat|video`).
-- `POST /entitlements/commit`
-  - Commits a consumption.
-- `POST /entitlements/release`
-  - Releases a consumption.
+Internal Stripe
+- `POST /internal/stripe/event` — pending
+  - Idempotent (replay ok=true). Missing distinct `reason:"ignored_duplicate"` on replay.
+- `POST /internal/stripe/ingest` — pending
+  - Normalize Stripe event into DB (internal). Spec present; needs implementation/status check.
 
-## Sessions
+Subscriptions (User)
+- `POST /subscriptions/stripe/checkout` — pending
+  - Creates Stripe Checkout for plans. Needs spec validation and full E2E test.
+- `POST /subscriptions/checkout` — pending
+  - Legacy/alias path in spec; confirm implementation or deprecate.
+- `GET /subscriptions/debug-auth-tx` — verified
+  - Shows `auth.uid()` in transaction.
+- `GET /subscriptions/debug-auth` — verified
+  - Decoded claims + `auth.uid()`.
+- `GET /subscriptions/db-status` — verified
+  - DB connectivity.
+- `GET /subscriptions/debug-active` — verified
+  - Active subscription diagnostic.
+- `POST /subscriptions/portal` — pending
+  - Portal URL placeholder; frontend integration needed.
+- `POST /subscriptions/overage/checkout` — pending
+  - One-off Checkout for overage items; needs real Stripe E2E.
+- `POST /subscriptions/overage/consume` — pending
+  - Manual consume preferring purchase; idempotent via linkage. Needs duplicate-prevention assertion.
+- `GET /subscriptions/overage/items` — verified
+  - Active catalog items list.
+- `GET /subscriptions/overage/credits` — verified
+  - Remaining credits per item.
+- `POST /subscriptions/cancel` — pending
+  - Immediate or period-end cancel; needs spec validation.
+- `POST /subscriptions/resume` — pending
+  - Resume scheduled cancel; needs spec validation.
+- `POST /subscriptions/change-plan` — pending
+  - Change plan code/update usage; needs spec validation.
+- `POST /subscriptions/reserve-chat` — pending
+  - Calls `fn_reserve_chat`; needs targeted test.
+- `POST /subscriptions/reserve-video` — pending
+  - Calls `fn_reserve_video`; needs targeted test.
+- `POST /subscriptions/commit` — pending
+  - Finalize pending consumption; needs targeted test.
+- `POST /subscriptions/release` — pending
+  - Release pending consumption; needs targeted test.
+- `GET /subscriptions/usage` — pending
+  - Full usage snapshot; needs spec alignment.
+- `GET /subscriptions/my` — pending
+  - User subscriptions list; needs spec alignment.
+- `GET /subscriptions/usage/current` — pending
+  - Minimal current usage; needs spec alignment.
 
-- `GET /sessions`
-  - Lists sessions for the authenticated user or vet.
-- `GET /sessions/:sessionId`
-  - Returns session details with ownership validation.
-- `PATCH /sessions/:sessionId`
-  - Updates status; sets `ended_at` when terminal (completed/canceled).
-- `POST /sessions/start` — Real
-  - Creates a session, reserves entitlement via `fn_reserve_*`.
-  - Auto-credit draw when exhausted: decrement credits and insert `consumption` `source='credit'`.
-  - On overage with no credits: initiates one-off Stripe Checkout bound to `original_session_id` and returns `payment.url` for completion (consolidated; no stub).
-  - Response includes `payment.checkout_session_id` and `payment.url` when overage is required.
-- `POST /sessions/end`
-  - Marks session ended; commits `consumptionId` if provided.
+Subscriptions (Admin Overages)
+- `GET /subscriptions/admin/overage/items` — verified
+  - Guarded list; requires `x-admin-secret`.
+- `POST /subscriptions/admin/overage/items` — verified
+  - Guarded upsert; requires `x-admin-secret`.
+- `POST /subscriptions/admin/overage/adjust-credits` — verified
+  - Guarded; unified secret; tested.
+- `GET /subscriptions/admin/overage/purchases` — verified
+  - Guarded purchases list.
+- `GET /subscriptions/admin/overage/consumptions` — verified
+  - Guarded consumptions list.
+- `POST /subscriptions/admin/overage/mark-paid` — pending
+  - Guarded; needs test for units vs session-bound paths.
+- `POST /subscriptions/admin/overage/mark-refunded` — pending
+  - Guarded; needs refund reversal tests.
 
-## Admin Pricing
+Plans
+- `GET /plans` — pending
+  - Plans list; needs spec/fields validation.
+- `GET /plans/:code` — pending
+  - Plan detail; needs spec/fields validation.
 
-- `POST /admin/pricing/sync`
-  - Admin-only endpoint guarded by `x-admin-secret` using `ADMIN_PRICING_SYNC_SECRET`.
+Entitlements
+- `POST /entitlements/reserve` — pending
+  - Reserve entitlement; needs test.
+- `POST /entitlements/commit` — pending
+  - Commit entitlement; needs test.
+- `POST /entitlements/release` — pending
+  - Release entitlement; needs test.
 
-## Internal Stripe Webhooks
+Admin Pricing
+- `POST /admin/pricing/sync` — verified
+  - Guarded pricing sync.
 
-- `POST /internal/stripe/event` — Real
-  - Secret-guarded ingestion. Records idempotency in `stripe_subscription_events` and dispatches handlers.
+Sessions
+- `GET /sessions` — pending
+  - Sessions list; needs spec alignment.
+- `GET /sessions/:sessionId` — pending
+  - Session detail; needs spec alignment.
+- `PATCH /sessions/:sessionId` — pending
+  - Update session; needs spec alignment.
+- `POST /sessions/start` — verified
+  - If credits exhausted → `overage:true` with `payment.url` + `checkout_session_id`; concurrency PASS with 1 credit.
+- `POST /sessions/end` — pending
+  - Ends session; commits when `consumptionId` provided; needs validation.
+Messages
+- `GET /messages` — pending
+  - List messages across sessions; controller present.
+- `GET /messages/transcripts` — pending
+  - List available transcripts; controller present.
+- `GET /messages/:id` — pending
+  - Message detail; controller present.
 
-### Handled Events
+Centers
+- `GET /centers/near` — pending
+  - Nearby centers; needs spec alignment.
+  - No other centers endpoints found in controllers.
 
-- `customer.subscription.created|updated|deleted`
-  - Upserts `user_subscriptions` with status mapping, period start/end, cancel flags.
-  - Resolves plan via `subscription_plan_prices` (fallback legacy columns).
-- `invoice.payment_succeeded|invoice.payment_failed`
-  - Updates `user_subscriptions.status` to `active|past_due`.
-- `checkout.session.completed`
-  - Marks `overage_purchases` `paid`.
-  - Session-bound: auto-consume and set `consumed`.
-  - Units-based: increment credits and set `credited`.
-- `payment_intent.succeeded`
-  - Same side-effects as above for purchases keyed by `stripe_payment_intent_id`.
-- `payment_intent.payment_failed`
-  - Marks `overage_purchases` `failed`.
-- `charge.refunded|charge.refund.updated`
-  - Marks `overage_purchases` `refunded`.
-  - Reverses credits if previously `credited`; optional compensating credit for consumed based on policy.
+Vector
+- `POST /vector/search` — pending
+  - Vector search; needs spec alignment.
+- `GET /vector/search` — pending
+  - Vector search (GET); needs spec alignment.
+- `POST /vector/upsert` — pending
+  - Upsert vectors; needs spec alignment.
+- `GET /vector/debug` — pending
+  - Debug info; needs spec alignment.
+- `GET /vector/pets` — pending
+  - Pets embeddings; needs spec alignment.
 
-### Customer Linkage
+KB
+- `GET /kb` — pending
+  - Knowledge base list; needs spec alignment.
+- `GET /kb/:id` — pending
+  - KB item; needs spec alignment.
+- `POST /kb` — pending
+  - Create KB item; needs spec alignment.
+- `PATCH /kb/:id/publish` — pending
+  - Publish KB item; needs spec alignment.
 
-- Persists `stripe_customers(user_id, stripe_customer_id)` when `customer` is available.
+Search
+- `GET /search` — verified
+  - Lexical KB search; controller present.
+Payments & Invoices
+- `GET /payments` — todo
+  - Spec-only; no payments controller.
+- `GET /payments/:paymentId` — todo
+  - Spec-only; no payments controller.
+- `POST /payments/one-off/checkout` — todo
+  - Spec-only; no payments controller.
+- `GET /invoices` — todo
+  - Spec-only; no invoices controller.
+- `GET /invoices/:invoiceId` — todo
+  - Spec-only; no invoices controller.
 
-### Idempotency
+Ratings & Feedback
+- `POST /sessions/:sessionId/ratings` — todo
+  - Spec-only; no ratings controller.
+- `GET /vets/:vetId/ratings` — todo
+  - Spec-only; no ratings controller.
+- `GET /sessions/:sessionId/ratings` — todo
+  - Spec-only; no ratings controller.
 
-- `stripe_subscription_events` stores `(event_id, type, stripe_subscription_id)` and handlers skip re-delivery.
+Notifications
+- `POST /notifications/test` — todo
+  - Spec-only; no notifications controller.
+- `POST /notifications/receipt` — todo
+  - Spec-only; no notifications controller.
 
-## Data Model
+Files & Storage
+- `POST /files/signed-url` — todo
+  - Spec-only; no files controller.
+- `GET /files/download-url` — todo
+  - Spec-only; no files controller.
 
-- Tables: `overage_items`, `overage_purchases`, `overage_credits`, `user_subscriptions`, `subscription_plans`, `subscription_plan_prices`, `subscription_usage`, `entitlement_consumptions`, `stripe_subscription_events`, `stripe_customers`.
-- FK: `entitlement_consumptions.overage_purchase_id` (provenance of overage-linked consumptions).
-- Sources: `entitlement_consumptions.source ∈ {'subscription','credit','overage'}`.
-- Functions: `fn_reserve_chat|video`, `fn_commit_consumption`, `fn_release_consumption`, `fn_current_usage`.
-- Unique Indexes:
-  - Single consumption per `overage_purchase_id` (enforced by `uniq_consumptions_overage_purchase`).
-  - Pending guard for one `(session_id, consumption_type, source)` non-finalized record.
+Admin Ops
+- `GET /admin/users` — todo
+  - Spec-only; no admin users controller.
+- `GET /admin/users/:userId` — todo
+  - Spec-only; no admin users controller.
+- `GET /admin/subscriptions` — todo
+  - Spec-only; no admin subscriptions controller.
+- `POST /admin/credits/grant` — todo
+  - Spec-only; no admin credits controller.
+- `POST /admin/refunds` — todo
+  - Spec-only; no admin refunds controller.
+- `POST /admin/vets/:vetId/approve` — todo
+  - Spec-only; no admin vet approval controller.
+- `POST /admin/plans` — todo
+  - Spec-only; no admin plans controller.
+- `POST /admin/coupons` — todo
+  - Spec-only; no admin coupons controller.
+- `GET /admin/analytics/usage` — todo
+  - Spec-only; no admin analytics controller.
+Pets
+- `GET /pets` — verified
+  - Present in runtime controller.
+- `GET /pets/:petId` — verified
+  - Present in runtime controller.
+- `POST /pets` — todo
+  - Spec-only; not in controllers.
+- `PATCH /pets/:petId` — todo
+  - Spec-only; not in controllers.
+- `DELETE /pets/:petId` — todo
+  - Spec-only; not in controllers.
+- `POST /pets/:petId/files/signed-url` — todo
+  - Spec-only; not in controllers.
 
-## Current Status — Verified
+Me
+- `GET /me` — verified
+  - Present in runtime controller.
+- `PATCH /me` — verified
+  - Present in runtime controller.
+- `GET /me/security/sessions` — verified
+  - Present in runtime controller.
+- `POST /me/security/logout-all` — verified
+  - Present in runtime controller.
+- `POST /me/security/logout-all-supabase` — verified
+  - Present in runtime controller.
+- `GET /me/billing-profile` — verified
+  - Present in runtime controller.
+- `PUT /me/billing-profile` — verified
+  - Present in runtime controller.
+- `POST /me/billing/payment-method/attach` — verified
+  - Present in runtime controller.
+- `DELETE /me/billing/payment-method/:pmId` — verified
+  - Present in runtime controller.
 
-- Overage credits auto-draw in `sessions/start` (chat): decrements credits and avoids overage prompt.
-- Session end flow: commits when `consumptionId` provided; returns `ended: true`.
-- Overage checkout → payment → session-bound auto-consume or credit fallback.
-- Idempotency: webhook re-delivery is ignored via `stripe_subscription_events`.
+## Part 2 — Yet To Be Tested (Functions + Routes)
+- Webhook duplicate reason — `POST /internal/stripe/event`: validate response returns `reason:"ignored_duplicate"` on replay.
+- Real Stripe E2E — `POST /subscriptions/overage/checkout` + webhook: run real Checkout, assert purchases→consumed/refunded transitions.
+- Reporting/rate-limiting — aggregate endpoints to be verified across `subscriptions/*` and admin listings.
+- Observability tags — ensure route logs/metrics on `sessions/*`, `subscriptions/*`, `internal/stripe/event`.
+  - Include `centers/*`, `payments/*`, `admin/*` where applicable.
 
-## Missing / To Validate
+## Part 3 — Yet To Be Done (Functions + Routes)
+- Webhook replay reason: implement `ignored_duplicate` in handler — `POST /internal/stripe/event`.
+- Reporting endpoints: add aggregates (periodic summaries) — likely under `/subscriptions/admin/overage/report*` (TBD).
+- Rate limiting + alerts: apply limits to hot paths (`/sessions/start`, `/subscriptions/overage/*`) and wire observability alerts.
 
-- Failure/refund paths: exercise with Stripe CLI and confirm transitions and credit reversals/compensation.
-- Idempotent re-delivery: resend identical events and confirm no double consume/credit.
-- Recurring membership smoke: end-to-end plan checkout → webhook → `user_subscriptions` upsert consistency.
-- Admin/Ops UI: items CRUD (enable/disable), lists for purchases/consumptions/credits, bind overage to current session.
-- Reporting: lightweight usage/overage summaries and exports.
-- Concurrency tests: simultaneous `sessions/start` requests consuming credits.
-- Runbooks: manual consume workflow, refund expectations, credit adjustment policies, Stripe event mapping.
+## Smoke Tests (How to Run)
+```zsh
+set -a && source ./.env.staging && set +a
+export AUTH_HEADER="Authorization: Bearer $SB_ACCESS_TOKEN"
 
-## What To Test Next
-- Admin guard: call admin endpoints with and without `x-admin-secret`; expect `admin_forbidden` when missing/mismatch. Set `ADMIN_PRICING_SYNC_SECRET` (or `ADMIN_SECRET`).
-- Session overage: start session without entitlements/credits; verify response includes `payment.url` and a `checkout_created` purchase bound to `original_session_id`.
-- Unique index: attempt double consume linking the same `overage_purchase_id`; expect DB error or endpoint `reason` indicating duplicate prevented.
-- Webhook idempotency: resend `checkout.session.completed` for same `session_id`; expect handler to skip.
-
-## Checklist — Current Hardening Pass
-- Admin endpoints moved and guarded:
-  - Paths: `subscriptions/admin/overage/*` (`purchases`, `consumptions`, `mark-paid`, `mark-refunded`, `adjust-credits`).
-  - Guard: header `x-admin-secret` matches `ADMIN_PRICING_SYNC_SECRET` (fallback `ADMIN_SECRET`).
-- Session overage consolidation:
-  - `POST /sessions/start` creates one-off Stripe Checkout when no entitlements/credits and returns `payment.url`.
-  - Session-bound purchases record `original_session_id`; webhook transitions to `paid` then auto-consume → `consumed`.
-- Credits behavior:
-  - Units-based purchases (`credited`) increment pooled credits; credit consumptions do not carry `overage_purchase_id`.
-  - Refund of credited purchases reverses only unconsumed units; consumed credits remain unchanged.
-- Admin consumptions listing fix:
-  - Query joins `entitlement_consumptions` to `user_subscriptions` and filters by `us.user_id = auth.uid()` (entitlement_consumptions has no `user_id`).
-- DB constraints:
-  - Unique index `uniq_consumptions_overage_purchase` on `entitlement_consumptions(overage_purchase_id) WHERE overage_purchase_id IS NOT NULL` prevents duplicate purchase-linked consumptions.
-
-## Quick Test Flow (Staging)
-- Verify admin guard:
-  - `GET /subscriptions/admin/overage/purchases` without header → `admin_forbidden`.
-  - With `x-admin-secret:$ADMIN_PRICING_SYNC_SECRET` → `ok:true`.
-- Force overage:
-  - Zero credits: `POST /subscriptions/admin/overage/adjust-credits { code:'chat_unit', delta:-1000 }` (requires redeployed route).
-  - `POST /sessions/start { type:'chat' }` → expect `payment.url` and new `checkout_created` bound to `sessionId`.
-- Units checkout:
-  - `POST /subscriptions/overage/checkout { code:'chat_unit', quantity:2 }` → complete payment, webhook marks `paid`, credits increment.
-- Consumptions linkage:
-  - `GET /subscriptions/admin/overage/consumptions` shows `credit` entries with `overage_purchase_id:null` and `overage` entries with `overage_purchase_id` set for session-bound purchases.
-- Duplicate prevention:
-  - Call `POST /subscriptions/overage/consume` twice with same `purchase_id` → second attempt blocked by unique index.
-- Idempotency:
-  - Resend identical `checkout.session.completed` → handler skips (recorded in `stripe_subscription_events`).
-
-## Notes & Gotchas
-- Concurrency: guard `sessions/start` against simultaneous credit draws; ensure atomic credit decrement and entitlement reserve.
-- Secrets: use lowercase `x-admin-secret`; rotate `ADMIN_PRICING_SYNC_SECRET` periodically.
-- Currency: ensure `overage_items.currency` matches Stripe Checkout currency to avoid reporting inconsistencies.
-- Deploy alignment: if an admin route (e.g., `adjust-credits`) returns `admin_forbidden` or 404, redeploy Gateway to pick up latest controller changes.
-
-## Work Plan — One by One
-- Replace stub `POST /subscriptions/checkout` with real Stripe path or deprecate; standardize on `stripe/checkout`.
-- Sessions overage: implement one-off checkout creation + return URL when `pending_payment` would occur.
-- Guard admin endpoints: move `mark-paid`, `mark-refunded`, `adjust-credits` under `admin/overage/*` with secret/role.
-- Item CRUD: `POST /admin/overage/items` (create/update/deactivate), plus list endpoints.
-- Add unique index: prevent double consume on same `overage_purchase_id`.
-- Add user invoices/billing history endpoint.
-- OpenAPI: reflect all current/added endpoints with clear status and error enums.
-- Observability: health endpoints for search/AI/queue; rate limits on hot paths.
-
-## OpenAPI Spec Updates — Proposed
-
-- Add `sessions` endpoints and payloads:
-  - `POST /sessions/start` request/response including `credit` block and `overage` stub structure.
-    - Document `payment.url` and `payment.checkout_session_id` fields.
-  - `POST /sessions/end` request accepts `sessionId` and optional `consumptionId`.
-  - `GET /sessions`, `GET /sessions/{sessionId}`, `PATCH /sessions/{sessionId}`.
-- Subscriptions lifecycle:
-  - `POST /subscriptions/stripe/checkout` with `plan_code`, `success_url`, `cancel_url`.
-  - `POST /subscriptions/cancel|resume|change-plan` with clear schemas and error reasons.
-  - `GET /subscriptions/usage`, `GET /subscriptions/usage/current`, `GET /subscriptions/my`.
-- Overage flows:
-  - `POST /subscriptions/overage/checkout` with `code`, `quantity`, optional `original_session_id`.
-  - `POST /subscriptions/overage/consume` request/response with `mode='purchase'|'credit'`.
-  - `GET /subscriptions/overage/items`, `GET /subscriptions/overage/credits`.
-- Admin pricing:
-  - `POST /admin/pricing/sync` guarded by `x-admin-secret`.
-- Internal Stripe:
-  - `POST /internal/stripe/event` secret-guarded; minimal envelope `{id,type,data}`.
-- Common error reasons & enums:
-  - Standardize `reason` strings (e.g., `no_active_subscription`, `plan_not_found`, `no_purchase_or_credit_available`, `already_has_active_subscription`).
-
-## Try It — Quick Curl
-
-```sh
-# Plans
-curl -sS "$SERVER_URL/plans" | jq
-
-# Start chat session with auto-credit draw
-curl -sS -X POST -H "$AUTH_HEADER" -H 'Content-Type: application/json' \
-  "$SERVER_URL/sessions/start" -d '{"type":"chat"}' | jq
-
-# Overage checkout for chat unit (bind to session)
-curl -sS -X POST -H "$AUTH_HEADER" -H 'Content-Type: application/json' \
-  "$SERVER_URL/subscriptions/overage/checkout" -d '{"code":"chat_unit","original_session_id":"<SESSION_ID>"}' | jq
-
-# Webhooks (internal)
-curl -sS -X POST -H "x-internal-secret:$INTERNAL_STRIPE_EVENT_SECRET" -H 'Content-Type: application/json' \
-  "$SERVER_URL/internal/stripe/event" -d '{"id":"evt_...","type":"checkout.session.completed","data":{...}}' | jq
+bash env/scripts/smoke-openapi-admin-overage.sh
+zsh env/scripts/smoke-webhook-concurrency.sh
 ```
-
----
-
-If you want, I can now update the OpenAPI files under `docs/openapi/` to reflect these endpoints and payloads, starting with `openapi.yaml` and adding `sessions` + `subscriptions/overage` contracts.

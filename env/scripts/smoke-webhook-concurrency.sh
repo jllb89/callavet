@@ -1,4 +1,4 @@
-#!/usr/bin/env zsh
+#!/usr/bin/env bash
 set -euo pipefail
 
 # Auto-source .env.staging
@@ -23,8 +23,8 @@ fi
 ADMIN_HEADER="x-admin-secret:${ADMIN_PRICING_SYNC_SECRET}"
 INTERNAL_HEADER="x-internal-secret:${INTERNAL_STRIPE_EVENT_SECRET}"
 
-section() { print "\n== $1 =="; }
-die() { print "ERROR: $1" >&2; exit 1 }
+section() { printf "\n== %s ==\n" "$1"; }
+die() { printf "ERROR: %s\n" "$1" >&2; exit 1; }
 jqsafe() { jq -r "$1" 2>/dev/null || echo "" }
 
 # 1) Idempotency: replay same webhook event
@@ -36,8 +36,8 @@ FIRST=$(curl -sS -X POST -H "$INTERNAL_HEADER" -H 'Content-Type: application/jso
   "$SERVER_URL/internal/stripe/event" -d "$EVT_JSON")
 SECOND=$(curl -sS -X POST -H "$INTERNAL_HEADER" -H 'Content-Type: application/json' \
   "$SERVER_URL/internal/stripe/event" -d "$EVT_JSON")
-print "First delivery ok=$(echo "$FIRST" | jqsafe '.ok') reason=$(echo "$FIRST" | jqsafe '.reason')"
-print "Second delivery ok=$(echo "$SECOND" | jqsafe '.ok') reason=$(echo "$SECOND" | jqsafe '.reason')"
+printf "First delivery ok=%s reason=%s\n" "$(echo "$FIRST" | jqsafe '.ok')" "$(echo "$FIRST" | jqsafe '.reason')"
+printf "Second delivery ok=%s reason=%s\n" "$(echo "$SECOND" | jqsafe '.ok')" "$(echo "$SECOND" | jqsafe '.reason')"
 
 # 2) Failure/refund: ensure no consumption on failure and credits reversed on refund
 section "Webhook Failure & Refund paths"
@@ -45,19 +45,19 @@ section "Webhook Failure & Refund paths"
 EVT_FAIL=$(jq -n '{id:"evt_sim_fail_001",type:"payment_intent.payment_failed",data:{object:{id:"pi_test_fail"}}}')
 FAIL_RES=$(curl -sS -X POST -H "$INTERNAL_HEADER" -H 'Content-Type: application/json' \
   "$SERVER_URL/internal/stripe/event" -d "$EVT_FAIL")
-print "Failure handled ok=$(echo "$FAIL_RES" | jqsafe '.ok') reason=$(echo "$FAIL_RES" | jqsafe '.reason')"
+printf "Failure handled ok=%s reason=%s\n" "$(echo "$FAIL_RES" | jqsafe '.ok')" "$(echo "$FAIL_RES" | jqsafe '.reason')"
 # Refund
 EVT_REF=$(jq -n '{id:"evt_sim_refund_001",type:"charge.refunded",data:{object:{payment_intent:"pi_test_paid"}}}')
 REF_RES=$(curl -sS -X POST -H "$INTERNAL_HEADER" -H 'Content-Type: application/json' \
   "$SERVER_URL/internal/stripe/event" -d "$EVT_REF")
-print "Refund handled ok=$(echo "$REF_RES" | jqsafe '.ok') reason=$(echo "$REF_RES" | jqsafe '.reason')"
+printf "Refund handled ok=%s reason=%s\n" "$(echo "$REF_RES" | jqsafe '.ok')" "$(echo "$REF_RES" | jqsafe '.reason')"
 
 # Post-event assertions: purchases status and credits remaining
 section "Post-webhook assertions: purchases & credits"
 PURCHASES_JSON=$(curl -sS -H "$AUTH_HEADER" -H "$ADMIN_HEADER" "$SERVER_URL/subscriptions/admin/overage/purchases")
-print "Latest purchase statuses:"
+printf "Latest purchase statuses:\n"
 echo "$PURCHASES_JSON" | jq -r '.purchases | sort_by(.updated_at) | reverse | .[0:5] | .[] | "\(.id) status=\(.status) code=\(.code) qty=\(.quantity)"'
-print "Credits snapshot:"
+printf "Credits snapshot:\n"
 curl -sS -H "$AUTH_HEADER" "$SERVER_URL/subscriptions/overage/credits" | jq -r '.credits | .[] | "code=\(.code) remaining=\(.remaining_units)"'
 
 # 3) Concurrency: race sessions/start to draw last credit
@@ -89,13 +89,13 @@ C1=$(echo "$S1" | jqsafe '.credit.used')
 C2=$(echo "$S2" | jqsafe '.credit.used')
 O1=$(echo "$S1" | jqsafe '.overage')
 O2=$(echo "$S2" | jqsafe '.overage')
-print "Start#1 credit.used=$C1 overage=$O1"
-print "Start#2 credit.used=$C2 overage=$O2"
+printf "Start#1 credit.used=%s overage=%s\n" "$C1" "$O1"
+printf "Start#2 credit.used=%s overage=%s\n" "$C2" "$O2"
 
 if [[ "$C1" == "true" && "$O2" == "true" ]] || [[ "$C2" == "true" && "$O1" == "true" ]]; then
-  print "Concurrency result: PASS (one credit draw, one overage)"
+  printf "Concurrency result: PASS (one credit draw, one overage)\n"
 else
-  print "Concurrency result: FAIL (no credit draw detected)"
+  printf "Concurrency result: FAIL (no credit draw detected)\n"
 fi
 
-print "\nAll webhook and concurrency checks completed"
+printf "\nAll webhook and concurrency checks completed\n"
