@@ -15,6 +15,21 @@ BEGIN
   END IF;
 END$$;
 
+-- Consultation notes: allow INSERT by pet owner as well
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'consultation_notes' AND policyname = 'consultation_notes_insert_owner'
+  ) THEN
+    CREATE POLICY consultation_notes_insert_owner ON consultation_notes
+      FOR INSERT
+      WITH CHECK (
+        EXISTS (SELECT 1 FROM pets p WHERE p.id = consultation_notes.pet_id AND p.user_id = auth.uid())
+        OR is_admin()
+      );
+  END IF;
+END$$;
+
 -- Care plans: allow INSERT by owner (user linked via pet) or admin
 DO $$
 BEGIN

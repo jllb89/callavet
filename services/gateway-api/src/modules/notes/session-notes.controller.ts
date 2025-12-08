@@ -41,7 +41,16 @@ export class SessionNotesController {
     const row = await this.db.runInTx(async (q) => {
       const { rows } = await q(
         `insert into consultation_notes (id, session_id, vet_id, pet_id, summary_text, plan_summary, embedding, created_at)
-         values (gen_random_uuid(), $1, auth.uid(), $2, $3, $4, NULL, now())
+         values (
+           gen_random_uuid(),
+           $1,
+           (select id from vets where id = auth.uid()),
+           $2,
+           $3,
+           $4,
+           NULL,
+           now()
+         )
          returning id, session_id, vet_id, pet_id, summary_text, plan_summary, created_at`,
         [sessionId, pet_id || null, summary_text || null, plan_summary || null]
       );
