@@ -17,6 +17,7 @@ import { SearchModule } from './search/search.module';
 import { MeModule } from './me/me.module';
 import { PetsModule } from './pets/pets.module';
 import { MessagesModule } from './messages/messages.module';
+import { NotesModule } from './notes/notes.module';
 
 @Module({
   imports: [
@@ -38,6 +39,7 @@ import { MessagesModule } from './messages/messages.module';
   MeModule,
   PetsModule,
   MessagesModule,
+  NotesModule,
   ],
 })
 export class AppModule {}

@@ -230,13 +230,13 @@ Routing Notes (Frontend)
 - [ ] POST /video/rooms/{roomId}/end → responses: Ok
 
 ## Notes & Care Plans
-- [ ] GET /sessions/{sessionId}/notes → responses: Notes
-- [ ] POST /sessions/{sessionId}/notes → responses: Notes
-- [ ] GET /pets/{petId}/care-plans → responses: ListCarePlans
-- [ ] POST /pets/{petId}/care-plans → responses: CarePlan (201)
-- [ ] GET /care-plans/{planId}/items → responses: ListCarePlanItems
+- [x] GET /sessions/{sessionId}/notes → responses: Notes
+- [x] POST /sessions/{sessionId}/notes → responses: Notes
+- [x] GET /pets/{petId}/care-plans → responses: ListCarePlans
+- [x] POST /pets/{petId}/care-plans → responses: CarePlan (201)
+- [x] GET /care-plans/{planId}/items → responses: ListCarePlanItems
 - [ ] POST /care-plans/{planId}/items → responses: CarePlanItem (201)
-- [ ] PATCH /care-plans/items/{itemId} → responses: CarePlanItem
+- [x] PATCH /care-plans/items/{itemId} → responses: CarePlanItem
 
 ## Image Cases
 - [ ] GET /pets/{petId}/image-cases → responses: ListImageCases
