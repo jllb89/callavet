@@ -20,6 +20,12 @@ services:
         value: /app/public/openapi-webhooks.yaml
       - key: DATABASE_URL
         sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        sync: false
       - key: SUPABASE_JWT_SECRET
         sync: false
       - key: STRIPE_SECRET_KEY

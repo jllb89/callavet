@@ -3,6 +3,19 @@
 This document inventories all implemented endpoints, internal flows, data models, Stripe webhook handling, and idempotency. It also lists missing items and proposed spec updates to keep contracts aligned.
 
 ## API Groups
+## Environment Variables — Storage
+- `SUPABASE_URL`: Supabase Project URL (Project Settings → API → Project URL)
+- `SUPABASE_SERVICE_ROLE_KEY`: Supabase service_role key (server-only; never expose to clients)
+- `SUPABASE_STORAGE_BUCKET`: Storage bucket name (e.g., `files`)
+
+Set these in your deployment (Render) under the gateway service. `render.yaml` declares the keys; fill the values in the dashboard.
+
+### Files Flow
+- Upload: `POST /files/upload` with body `{ path, content(base64), contentType?, petId?, sessionId?, labels?, findings?, diagnosis_label? }`
+  - Uploads to Supabase Storage and, if `petId` is provided, inserts an `image_cases` row referencing `path`.
+- Download: `GET /files/download-url?path=...` returns a signed URL (private bucket).
+- Recommended path convention: `pets/{PET_ID}/cases/{filename}`.
+
 
 - `subscriptions`: plans, lifecycle, overage, usage, entitlements
 - `sessions`: chat/video session lifecycle, entitlement consumption
