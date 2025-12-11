@@ -45,6 +45,10 @@ export class AuthGuard implements CanActivate {
           // swallow decoding errors
         }
       }
+      // Default role to 'authenticated' if absent (needed for Supabase policies)
+      if (claims && !('role' in claims)) {
+        (claims as any).role = 'authenticated';
+      }
       if (process.env.DEV_AUTH_DEBUG === '1') {
         // eslint-disable-next-line no-console
         console.log('[auth.guard] decoded claims sub=', (claims as any)?.sub, 'email=', (claims as any)?.email);
@@ -57,7 +61,7 @@ export class AuthGuard implements CanActivate {
       // Basic UUID v4-ish pattern (accepts lowercase hex)
       const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
       if (uuidRe.test(val)) {
-        claims = { sub: val };
+        claims = { sub: val, role: 'authenticated' } as any;
       } else {
         // leave claims undefined if header is malformed
       }
