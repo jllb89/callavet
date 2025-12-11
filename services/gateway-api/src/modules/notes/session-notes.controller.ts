@@ -16,12 +16,12 @@ export class SessionNotesController {
            from consultation_notes
           where session_id = $1
             and (
-              vet_id = auth.uid()
-              or exists (select 1 from pets p where p.id = consultation_notes.pet_id and p.user_id = auth.uid())
+              vet_id = $2
+              or exists (select 1 from pets p where p.id = consultation_notes.pet_id and p.user_id = $2)
               or is_admin()
             )
           order by created_at desc`,
-        [sessionId]
+        [sessionId, this.rc.claims?.sub || null]
       );
       if (process.env.DEV_DB_DEBUG === '1') {
         // eslint-disable-next-line no-console
