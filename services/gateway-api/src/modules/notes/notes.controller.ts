@@ -18,12 +18,12 @@ export class NotesController {
            from care_plans
           where pet_id = $1
             and (
-              exists (select 1 from pets p where p.id = care_plans.pet_id and p.user_id = auth.uid())
+              exists (select 1 from pets p where p.id = care_plans.pet_id and p.user_id = $2)
               or is_admin()
             )
           order by created_at desc
-          limit $2`,
-        [petId, limit]
+          limit $3`,
+        [petId, this.rc.claims?.sub || null, limit]
       );
       if (process.env.DEV_DB_DEBUG === '1') {
         // eslint-disable-next-line no-console
@@ -69,13 +69,13 @@ export class NotesController {
               exists (
                 select 1 from care_plans cp
                 join pets p on p.id = cp.pet_id
-                where cp.id = care_plan_items.care_plan_id and p.user_id = auth.uid()
+                where cp.id = care_plan_items.care_plan_id and p.user_id = $2
               )
               or is_admin()
             )
           order by id
-          limit $2`,
-        [planId, limit]
+          limit $3`,
+        [planId, this.rc.claims?.sub || null, limit]
       );
       return rows;
     });
