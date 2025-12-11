@@ -206,8 +206,14 @@ Routing Notes (Frontend)
 - [ ] (optional) POST /notifications/receipt → responses: Ok
 
 ## Files (generic)
-- [ ] POST /files/signed-url → responses: SignedUrl
-- [ ] GET /files/download-url → responses: SignedUrl
+- [x] POST /files/upload → server-side upload to Supabase Storage
+	- Body: `{ path, content(base64|dataURL), contentType?, petId?, sessionId?, labels?, findings?, diagnosis_label? }`
+	- Behavior: uploads to bucket `SUPABASE_STORAGE_BUCKET`; if `petId` is provided, inserts `image_cases` with `image_url=path`.
+	- Validation: require image MIME/extension alignment for common formats (png, jpeg/jpg, webp, gif, bmp, tiff, svg).
+- [x] GET /files/download-url → responses: SignedUrl
+	- Query: `path`
+	- Returns: `{ url, expiresIn }` (1h signed URL)
+	- Notes: Uses Supabase service role; safe for backend issuance.
 
 ## Admin Ops
 - [ ] GET /admin/users → responses: ListUsers
@@ -245,14 +251,26 @@ Routing Notes (Backend)
 - Read paths bind user id from decoded claims (`sub`) instead of relying on `auth.uid()` to avoid staging claims mapping drift.
 - Access: Owners can read notes for their pets; assigned session vets can read all notes for that session; admins can read all.
 
+Storage Env & Routing
+- Supabase Storage bucket should be private; use signed URLs for reads.
+- Required gateway env vars: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_STORAGE_BUCKET`.
+- Server issues signed download URLs; no CORS needed until enabling direct browser uploads.
+
 Verification
 - Use `PET_ID` that belongs to the bearer; attach it to `SESSION_ID` before posting notes.
 - Group smoke `env/scripts/smoke-session-notes.sh` and `env/scripts/smoke-care-plan-items.sh` cover POST+GET flows. Ensure `GATEWAY_BASE` and `TOKEN` are set.
 
 ## Image Cases
-- [ ] GET /pets/{petId}/image-cases → responses: ListImageCases
-- [ ] POST /pets/{petId}/image-cases → responses: ImageCase (201)
-- [ ] GET /image-cases/{id} → responses: ImageCase
+- [x] GET /pets/{petId}/image-cases → responses: ListImageCases
+- [x] POST /pets/{petId}/image-cases → responses: ImageCase (201)
+- [x] GET /image-cases/{id} → responses: ImageCase
+Routing
+- `GET /pets/{petId}/image-cases` → `{ data: ImageCase[] }`
+- `POST /pets/{petId}/image-cases` → body `ImageCaseCreate`, returns `ImageCase`
+- `GET /image-cases/{id}` → returns `ImageCase`
+Storage linkage
+- `image_url` stores Storage path (e.g., `pets/{PET_ID}/cases/{filename}.png`)
+- Signed download via `GET /files/download-url?path=...`
 
 ## Appointments
 - [ ] GET /appointments → responses: ListAppointments

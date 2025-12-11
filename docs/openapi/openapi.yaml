@@ -1840,13 +1840,37 @@ paths:
       requestBody: { $ref: "#/components/requestBodies/NotifyTest" }
       responses: { "200": { $ref: "#/components/responses/Ok" } }
 
-  /files/signed-url:
+  /files/upload:
     post:
       tags: [Files]
-      summary: Generic signed upload URL
+      summary: Server-side upload to storage
       security: [{ bearerAuth: [] }]
-      requestBody: { $ref: "#/components/requestBodies/SignedUrl" }
-      responses: { "200": { $ref: "#/components/responses/SignedUrl" } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                path: { type: string }
+                content: { type: string, description: base64 or data URL }
+                contentType: { type: string }
+                petId: { type: string, format: uuid }
+                sessionId: { type: string, format: uuid }
+                labels: { type: array, items: { type: string } }
+                findings: { type: string }
+                diagnosis_label: { type: string }
+              required: [path, content]
+      responses:
+        "200":
+          description: Upload result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  path: { type: string }
+                  contentType: { type: string }
 
   /files/download-url:
     get:
