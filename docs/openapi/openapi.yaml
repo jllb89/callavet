@@ -1386,7 +1386,13 @@ paths:
   /sessions/{sessionId}/notes:
     get:
       tags: [Notes & Care Plans]
-      summary: Get vet notes for a session
+      summary: Get consultation notes for a session
+      description: |
+        Returns `{ data: [...] }` of notes.
+        Access:
+        - Owners: notes where the session's pet belongs to the user.
+        - Vets: notes they authored, and all notes for sessions where they are the assigned vet.
+        - Admins: all notes.
       security: [{ bearerAuth: [] }]
       parameters: [ { $ref: "#/components/parameters/sessionId" } ]
       responses: { "200": { $ref: "#/components/responses/ListNotes" } }

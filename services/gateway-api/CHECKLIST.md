@@ -230,7 +230,7 @@ Routing Notes (Frontend)
 - [ ] POST /video/rooms/{roomId}/end → responses: Ok
 
 ## Notes & Care Plans
-- [x] GET /sessions/{sessionId}/notes → responses: Notes
+- [x] GET /sessions/{sessionId}/notes → responses: ListNotes
 - [x] POST /sessions/{sessionId}/notes → responses: Notes
 - [x] GET /pets/{petId}/care-plans → responses: ListCarePlans
 - [x] POST /pets/{petId}/care-plans → responses: CarePlan (201)
@@ -242,10 +242,12 @@ Routing Notes (Backend)
 - Session notes routes live in `SessionNotesController` under `@Controller('sessions')`. Duplicate session routes were removed from `NotesController` to avoid vet_id FK.
 - POST notes sets `vet_id` only when current user is a vet; otherwise it remains `NULL`. `pet_id` is derived from the session when not provided.
 - RLS: INSERT policies exist for owners/vets on `consultation_notes`; owners on `care_plans`; update on `care_plan_items` for owners/admin.
-- If lists return empty on staging, ensure `DbService.runInTx` sets `request.jwt.claims.sub` so `auth.uid()` resolves during SELECT.
+- Read paths bind user id from decoded claims (`sub`) instead of relying on `auth.uid()` to avoid staging claims mapping drift.
+- Access: Owners can read notes for their pets; assigned session vets can read all notes for that session; admins can read all.
 
 Verification
-- Group smoke `env/scripts/smoke-care-plans.sh` exercises notes & care plans. Ensure `GATEWAY_BASE` and either `SB_ACCESS_TOKEN` or `x-user-id` are set.
+- Use `PET_ID` that belongs to the bearer; attach it to `SESSION_ID` before posting notes.
+- Group smoke `env/scripts/smoke-session-notes.sh` and `env/scripts/smoke-care-plan-items.sh` cover POST+GET flows. Ensure `GATEWAY_BASE` and `TOKEN` are set.
 
 ## Image Cases
 - [ ] GET /pets/{petId}/image-cases → responses: ListImageCases

@@ -16,7 +16,13 @@ export class SessionNotesController {
            from consultation_notes
           where session_id = $1
             and (
+              -- Authoring vet can read their notes
               vet_id = $2
+              -- Assigned session vet can read all notes for the session
+              or exists (
+                select 1 from chat_sessions s
+                where s.id = consultation_notes.session_id and s.vet_id = $2
+              )
               or exists (select 1 from pets p where p.id = consultation_notes.pet_id and p.user_id = $2)
               or is_admin()
             )
