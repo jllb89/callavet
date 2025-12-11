@@ -82,6 +82,31 @@ export class NotesController {
     return { data: items };
   }
 
+  @Post('care-plans/:planId/items')
+  async createCarePlanItem(
+    @Param('planId') planId: string,
+    @Body() body: { type: 'consult'|'vaccine'|'product'; description: string; price_cents?: number }
+  ) {
+    const { type, description } = body || ({} as any);
+    const price = body?.price_cents ?? null;
+    const row = await this.db.runInTx(async (q) => {
+      const { rows } = await q(
+        `insert into care_plan_items (id, care_plan_id, type, description, price_cents, fulfilled)
+         select gen_random_uuid(), $1, $2, $3, $4, false
+          where exists (
+            select 1 from care_plans cp
+            join pets p on p.id = cp.pet_id
+            where cp.id = $1 and p.user_id = auth.uid()
+          )
+         returning id, care_plan_id, type, description, price_cents, fulfilled`,
+        [planId, type, description, price]
+      );
+      return rows[0];
+    });
+    if (!row) return { ok: false, reason: 'not_owner_or_not_found' } as any;
+    return row;
+  }
+
   @Patch('care-plans/items/:itemId')
   async patchCarePlanItem(
     @Param('itemId') itemId: string,

@@ -238,6 +238,15 @@ Routing Notes (Frontend)
 - [ ] POST /care-plans/{planId}/items → responses: CarePlanItem (201)
 - [x] PATCH /care-plans/items/{itemId} → responses: CarePlanItem
 
+Routing Notes (Backend)
+- Session notes routes live in `SessionNotesController` under `@Controller('sessions')`. Duplicate session routes were removed from `NotesController` to avoid vet_id FK.
+- POST notes sets `vet_id` only when current user is a vet; otherwise it remains `NULL`. `pet_id` is derived from the session when not provided.
+- RLS: INSERT policies exist for owners/vets on `consultation_notes`; owners on `care_plans`; update on `care_plan_items` for owners/admin.
+- If lists return empty on staging, ensure `DbService.runInTx` sets `request.jwt.claims.sub` so `auth.uid()` resolves during SELECT.
+
+Verification
+- Group smoke `env/scripts/smoke-care-plans.sh` exercises notes & care plans. Ensure `GATEWAY_BASE` and either `SB_ACCESS_TOKEN` or `x-user-id` are set.
+
 ## Image Cases
 - [ ] GET /pets/{petId}/image-cases → responses: ListImageCases
 - [ ] POST /pets/{petId}/image-cases → responses: ImageCase (201)

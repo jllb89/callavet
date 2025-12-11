@@ -39,6 +39,17 @@ tags:
   - name: AI (internal)
 
 components:
+  parameters:
+    sessionId:
+      in: path
+      name: sessionId
+      required: true
+      schema: { type: string, format: uuid }
+    petId:
+      in: path
+      name: petId
+      required: true
+      schema: { type: string, format: uuid }
   schemas:
     ApiOk:
       type: object
@@ -1378,7 +1389,7 @@ paths:
       summary: Get vet notes for a session
       security: [{ bearerAuth: [] }]
       parameters: [ { $ref: "#/components/parameters/sessionId" } ]
-      responses: { "200": { $ref: "#/components/responses/Notes" } }
+      responses: { "200": { $ref: "#/components/responses/ListNotes" } }
     post:
       tags: [Notes & Care Plans]
       summary: Upsert vet notes (SOAP/summary)
@@ -2333,6 +2344,9 @@ components:
     Notes:
       description: Vet notes
       content: { application/json: { schema: { $ref: "#/components/schemas/Notes" } } }
+    ListNotes:
+      description: Vet notes list
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Notes" } } } } } }
     ListCarePlans:
       description: Care plans
       content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/CarePlan" } } } } } }
@@ -2550,10 +2564,13 @@ components:
     Notes:
       type: object
       properties:
+        id: { type: string, format: uuid }
         session_id: { type: string, format: uuid }
-        vet_id: { type: string, format: uuid }
+        pet_id: { type: string, format: uuid }
+        vet_id: { type: string, format: uuid, nullable: true }
         summary_text: { type: string }
         plan_summary: { type: string }
+        created_at: { type: string, format: date-time }
     CarePlan:
       type: object
       properties:
