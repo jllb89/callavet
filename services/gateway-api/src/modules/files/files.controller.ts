@@ -1,16 +1,23 @@
 import { Controller, Get, Post, Query, UseGuards, Body, BadRequestException } from '@nestjs/common';
 import { AuthGuard } from '../auth/auth.guard';
-import { createClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { DbService } from '../db/db.service';
 
 @UseGuards(AuthGuard)
 @Controller('files')
 export class FilesController {
   constructor(private readonly db: DbService) {}
-  private supabase = createClient(
-    process.env.SUPABASE_URL as string,
-    process.env.SUPABASE_SERVICE_ROLE_KEY as string
-  );
+  private supabase?: SupabaseClient;
+  private getClient(): SupabaseClient {
+    if (this.supabase) return this.supabase;
+    const url = process.env.SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!url || !key) {
+      throw new BadRequestException('Supabase env missing: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY');
+    }
+    this.supabase = createClient(url, key);
+    return this.supabase;
+  }
 
   private bucket() {
     const name = process.env.SUPABASE_STORAGE_BUCKET;
@@ -42,7 +49,8 @@ export class FilesController {
       throw new BadRequestException('content must be base64');
     }
 
-    const { error } = await this.supabase.storage.from(bucket).upload(body.path, buffer, {
+    const supa = this.getClient();
+    const { error } = await supa.storage.from(bucket).upload(body.path, buffer, {
       contentType,
       upsert: true,
     });
@@ -76,7 +84,8 @@ export class FilesController {
   async downloadUrl(@Query('path') path?: string) {
     if (!path) throw new BadRequestException('path is required');
     const bucket = this.bucket();
-    const { data, error } = await this.supabase.storage.from(bucket).createSignedUrl(path, 3600);
+    const supa = this.getClient();
+    const { data, error } = await supa.storage.from(bucket).createSignedUrl(path, 3600);
     if (error) {
       throw new BadRequestException(`sign failed: ${error.message}`);
     }
