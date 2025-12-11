@@ -18,6 +18,8 @@ import { MeModule } from './me/me.module';
 import { PetsModule } from './pets/pets.module';
 import { MessagesModule } from './messages/messages.module';
 import { NotesModule } from './notes/notes.module';
+import { FilesModule } from './files/files.module';
+import { ImageCasesModule } from './image-cases/image-cases.module';
 
 @Module({
   imports: [
@@ -40,6 +42,8 @@ import { NotesModule } from './notes/notes.module';
   PetsModule,
   MessagesModule,
   NotesModule,
+  FilesModule,
+  ImageCasesModule,
   ],
 })
 export class AppModule {}

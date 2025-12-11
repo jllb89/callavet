@@ -153,12 +153,19 @@ Rationale: Start with core runtime already present (1–6) to lock in foundation
   - `env/scripts/smoke-video.sh` — script
   - Validations: room create returns token; end locks room
 
-## 15) Notes & Care Plans
-- Controllers: none — implement
-- Endpoints: `GET/POST /sessions/:sessionId/notes`, `GET/POST /pets/:petId/care-plans`, `GET/POST /care-plans/:planId/items`, `PATCH /care-plans/items/:itemId` — implement
-- Test script
-  - `env/scripts/smoke-notes-careplans.sh` — script
-  - Validations: session notes round-trip; care plan create/list/items lifecycle
+## 15) Notes & Care Plans (verified)
+- Controllers: `SessionNotesController` (sessions), `NotesController` (care plans/items) — verified
+- Endpoints: `GET /sessions/:sessionId/notes` (ListNotes), `POST /sessions/:sessionId/notes` (Notes), `GET/POST /pets/:petId/care-plans`, `GET/POST /care-plans/:planId/items`, `PATCH /care-plans/items/:itemId` — verified
+- Access rules:
+  - Owners: only notes/care plans for their pets
+  - Vets: notes they authored and all notes for sessions where they are the assigned vet
+  - Admins: full access
+- Read-paths: bind user id via decoded claims (`sub`) to avoid environment `auth.uid()` drift
+- Test scripts
+  - `env/scripts/smoke-session-notes.sh` — POST + GET
+  - `env/scripts/smoke-session-notes-vet.sh` — vet visibility check
+  - `env/scripts/smoke-care-plan-items.sh` — create/list/fulfill
+  - Validations: owner and vet-session flows return non-empty lists when `PET_ID` belongs to bearer and session is attached
 
 ## 16) Image Cases
 - Controllers: none — implement
