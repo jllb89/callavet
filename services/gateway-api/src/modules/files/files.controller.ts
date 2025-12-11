@@ -34,6 +34,23 @@ export class FilesController {
     }
     const bucket = this.bucket();
     const contentType = body.contentType || 'application/octet-stream';
+    // Basic validation for images: require proper mime and file extension alignment
+    const allowed = new Map<string, string[]>([
+      ['image/jpeg', ['.jpg', '.jpeg']],
+      ['image/png', ['.png']],
+      ['image/webp', ['.webp']],
+      ['image/gif', ['.gif']],
+      ['image/bmp', ['.bmp']],
+      ['image/tiff', ['.tif', '.tiff']],
+      ['image/svg+xml', ['.svg']],
+    ]);
+    const lowerPath = body.path.toLowerCase();
+    if (allowed.has(contentType)) {
+      const exts = allowed.get(contentType)!;
+      if (!exts.some(ext => lowerPath.endsWith(ext))) {
+        throw new BadRequestException(`path extension must match contentType (${contentType})`);
+      }
+    }
 
     // Expect base64 string
     let b64 = body.content;
@@ -76,7 +93,7 @@ export class FilesController {
         ]
       );
     }
-    return { ok: true, path: body.path };
+    return { ok: true, path: body.path, contentType };
   }
 
   // Signed download URL for private buckets
