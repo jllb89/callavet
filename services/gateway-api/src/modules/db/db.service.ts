@@ -173,13 +173,13 @@ export class DbService {
       const claims = this.rc.claims;
       if (claims) {
         await client.query(`select set_config('request.jwt.claims', $1, true)`, [JSON.stringify(claims)]);
-        // Supabase helper functions like auth.uid() rely on individual claim keys (request.jwt.claim.sub)
-        // Populate sub (and commonly email) explicitly so auth.uid() resolves correctly.
+        // Supabase helper functions like auth.uid() rely on request.jwt.claims.sub
+        // Populate sub (and commonly email) explicitly under the 'claims' namespace.
         if ((claims as any).sub) {
-          await client.query(`select set_config('request.jwt.claim.sub', $1, true)`, [(claims as any).sub]);
+          await client.query(`select set_config('request.jwt.claims.sub', $1, true)`, [(claims as any).sub]);
         }
         if ((claims as any).email) {
-          await client.query(`select set_config('request.jwt.claim.email', $1, true)`, [(claims as any).email]);
+          await client.query(`select set_config('request.jwt.claims.email', $1, true)`, [(claims as any).email]);
         }
       }
       const q = async <R = any>(sql: string, args?: any[]) => (client.query as any)(sql, args) as Promise<{ rows: R[] }>;
