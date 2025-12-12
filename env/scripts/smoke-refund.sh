@@ -50,7 +50,7 @@ PI_RESP=$(curl -sS https://api.stripe.com/v1/payment_intents \
   -u "$STRIPE_SECRET_KEY:" \
   -d amount="$PI_AMOUNT_CENTS" \
   -d currency="$CURRENCY" \
-  -d payment_method_types[]="card" \
+  -d "payment_method_types[]=card" \
   -d payment_method="pm_card_visa" \
   -d confirm=true \
   -d description="smoke-refund")

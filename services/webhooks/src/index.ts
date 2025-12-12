@@ -65,6 +65,25 @@ app.post("/stripe/webhook", bodyParser.raw({ type: "application/json" }), (req, 
       forwardToGateway(event).catch((e)=>console.error('[stripe-webhook] forward failed', e?.message));
       break;
     }
+    case 'payment_intent.succeeded': {
+      const pi = event.data.object as Stripe.PaymentIntent;
+      console.log('[stripe-webhook] payment_intent.succeeded', pi.id, pi.amount, pi.currency);
+      forwardToGateway(event).catch((e)=>console.error('[stripe-webhook] forward failed', e?.message));
+      break;
+    }
+    case 'payment_intent.payment_failed': {
+      const pi = event.data.object as Stripe.PaymentIntent;
+      console.log('[stripe-webhook] payment_intent.payment_failed', pi.id);
+      forwardToGateway(event).catch((e)=>console.error('[stripe-webhook] forward failed', e?.message));
+      break;
+    }
+    case 'charge.refunded':
+    case 'charge.refund.updated': {
+      const ch = event.data.object as Stripe.Charge;
+      console.log('[stripe-webhook] charge refund event', event.type, ch.id, ch.payment_intent);
+      forwardToGateway(event).catch((e)=>console.error('[stripe-webhook] forward failed', e?.message));
+      break;
+    }
     case 'invoice.payment_succeeded': {
       const invoice = event.data.object as Stripe.Invoice;
       console.log('[stripe-webhook] invoice.payment_succeeded', invoice.id);
