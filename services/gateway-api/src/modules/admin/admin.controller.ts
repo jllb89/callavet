@@ -84,12 +84,49 @@ export class AdminController {
   @Post('refunds')
   async refunds(
     @Headers('x-admin-secret') secret: string,
-    @Body() body: { paymentId: string; amount?: number; reason?: string }
+    @Body() body: { paymentId: string; amount?: number; reason?: string; requestId?: string }
   ) {
     assertAdmin(secret);
     if (!body?.paymentId) throw new BadRequestException('paymentId required');
-    // TODO: call Stripe refunds API and update DB
-    return { ok: true, paymentId: body.paymentId, amount: body.amount ?? null, reason: body.reason ?? null, stub: true };
+    const sk = process.env.STRIPE_SECRET_KEY || '';
+    const pid = (body.paymentId || '').trim();
+    const amt = typeof body.amount === 'number' ? Math.trunc(body.amount) : undefined;
+    const reason = (body.reason || '').trim();
+    // Dev fallback: allow stubbed response if no Stripe key or obvious test id
+    if (!sk || pid.startsWith('test_') || pid === 'test_payment_id') {
+      return { ok: true, stub: true, paymentId: pid, amount: amt ?? null, reason: reason || null };
+    }
+    try {
+      // Lazy require to avoid import at module load
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const Stripe = require('stripe');
+      const stripe = new Stripe(sk, { apiVersion: '2024-06-20' });
+      const params: any = { payment_intent: pid };
+      if (typeof amt === 'number' && Number.isFinite(amt) && amt > 0) params.amount = amt;
+      // Map human reason to Stripe enum if provided
+      if (reason) {
+        const map: Record<string, string> = {
+          'requested_by_customer': 'requested_by_customer',
+          'duplicate': 'duplicate',
+          'fraudulent': 'fraudulent'
+        };
+        const r = map[reason] || undefined;
+        if (r) params.reason = r;
+      }
+      const headers: any = {};
+      if (body.requestId) headers['Idempotency-Key'] = `admin-refund:${body.requestId}`;
+      const refund = await stripe.refunds.create(params, { idempotencyKey: headers['Idempotency-Key'] });
+      return {
+        ok: true,
+        refund_id: refund.id,
+        status: refund.status,
+        amount: refund.amount,
+        currency: refund.currency,
+        payment_intent: refund.payment_intent,
+      };
+    } catch (e: any) {
+      throw new BadRequestException(e?.message || 'stripe_refund_failed');
+    }
   }
 
   @Post('vets/:vetId/approve')
