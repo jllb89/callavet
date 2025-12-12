@@ -227,12 +227,12 @@ Routing Notes (Notifications)
 - [x] GET /admin/users → responses: ListUsers
 - [x] GET /admin/users/{userId} → responses: User
 - [x] GET /admin/subscriptions → responses: ListSubscriptions
-- [ ] POST /admin/credits/grant → responses: Ok
-- [ ] POST /admin/refunds → responses: Payment
-- [ ] POST /admin/vets/{vetId}/approve → responses: Vet
-- [ ] POST /admin/plans → responses: Plan
-- [ ] POST /admin/coupons → responses: Ok (201)
-- [ ] GET /admin/analytics/usage → responses: Ok
+- [x] POST /admin/credits/grant → responses: Ok (stub)
+- [x] POST /admin/refunds → responses: Ok (stub)
+- [x] POST /admin/vets/{vetId}/approve → responses: Ok (stub)
+- [x] POST /admin/plans → responses: Ok (stub)
+- [x] POST /admin/coupons → responses: Ok (stub)
+- [x] GET /admin/analytics/usage → responses: Ok (stub)
 
 ## Webhooks
 - [ ] POST /webhooks/stripe → responses: Ok

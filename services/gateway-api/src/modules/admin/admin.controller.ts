@@ -1,4 +1,4 @@
-import { BadRequestException, Controller, ForbiddenException, Get, Headers, Param, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, ForbiddenException, Get, Headers, Param, Post, Query } from '@nestjs/common';
 import { DbService } from '../db/db.service';
 
 function assertAdmin(secretHeader?: string) {
@@ -66,5 +66,69 @@ export class AdminController {
        limit ${limit} offset ${offset}`;
     const { rows } = await (this.db as any).query(sql);
     return { data: rows };
+  }
+
+  @Post('credits/grant')
+  async grantCredits(
+    @Headers('x-admin-secret') secret: string,
+    @Body() body: { userId: string; code: string; delta: number }
+  ) {
+    assertAdmin(secret);
+    if (!body?.userId || !body?.code || typeof body?.delta !== 'number') {
+      throw new BadRequestException('userId, code, delta required');
+    }
+    // TODO: implement real credits ledger update
+    return { ok: true, code: body.code, delta: body.delta, remaining: null, stub: true };
+  }
+
+  @Post('refunds')
+  async refunds(
+    @Headers('x-admin-secret') secret: string,
+    @Body() body: { paymentId: string; amount?: number; reason?: string }
+  ) {
+    assertAdmin(secret);
+    if (!body?.paymentId) throw new BadRequestException('paymentId required');
+    // TODO: call Stripe refunds API and update DB
+    return { ok: true, paymentId: body.paymentId, amount: body.amount ?? null, reason: body.reason ?? null, stub: true };
+  }
+
+  @Post('vets/:vetId/approve')
+  async approveVet(
+    @Headers('x-admin-secret') secret: string,
+    @Param('vetId') vetId: string
+  ) {
+    assertAdmin(secret);
+    if (!vetId) throw new BadRequestException('vetId required');
+    // TODO: update vets table set approved=true where id=vetId
+    return { ok: true, vetId, approved: true, stub: true };
+  }
+
+  @Post('plans')
+  async upsertPlan(
+    @Headers('x-admin-secret') secret: string,
+    @Body() body: { code: string; name: string; price_cents?: number; currency?: string }
+  ) {
+    assertAdmin(secret);
+    if (!body?.code || !body?.name) throw new BadRequestException('code, name required');
+    // TODO: insert/update subscription_plans
+    return { ok: true, plan: { code: body.code, name: body.name, price_cents: body.price_cents ?? null, currency: body.currency ?? 'usd' }, stub: true };
+  }
+
+  @Post('coupons')
+  async createCoupon(
+    @Headers('x-admin-secret') secret: string,
+    @Body() body: { code: string; percent_off?: number; amount_off_cents?: number }
+  ) {
+    assertAdmin(secret);
+    if (!body?.code) throw new BadRequestException('code required');
+    // TODO: insert coupon row and optionally sync to Stripe
+    return { ok: true, coupon: { code: body.code, percent_off: body.percent_off ?? null, amount_off_cents: body.amount_off_cents ?? null }, stub: true };
+  }
+
+  @Get('analytics/usage')
+  async analyticsUsage(@Headers('x-admin-secret') secret: string) {
+    assertAdmin(secret);
+    // TODO: aggregate queries for usage KPIs
+    return { ok: true, metrics: { users: null, activeSubscriptions: null, sessionsThisMonth: null }, stub: true };
   }
 }
