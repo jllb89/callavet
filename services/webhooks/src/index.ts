@@ -109,4 +109,31 @@ app.post("/stripe/webhook", bodyParser.raw({ type: "application/json" }), (req, 
   return res.json({ ok: true, received: true });
 });
 
+// Test-forward endpoint: bypass Stripe signature, forward a synthetic event
+// Guarded by TEST_FORWARD_SECRET env.
+app.post("/stripe/webhook/test-forward", express.json(), async (req, res) => {
+  const testSecret = process.env.TEST_FORWARD_SECRET || "";
+  const hdr = (req.headers["x-test-forward-secret"] || "") as string;
+  if (!testSecret || hdr !== testSecret) {
+    return res.status(403).json({ ok: false, reason: "forbidden" });
+  }
+  const gatewayUrl = process.env.GATEWAY_INTERNAL_URL;
+  const internalSecret = process.env.INTERNAL_STRIPE_EVENT_SECRET;
+  if (!gatewayUrl || !internalSecret) {
+    return res.status(500).json({ ok: false, reason: "missing_gateway_or_secret" });
+  }
+  const payload = req.body && req.body.id && req.body.type && req.body.data ? req.body : { id: `evt_test_${Date.now()}`, type: "charge.refunded", data: { payment_intent: "pi_test_manual" } };
+  try {
+    const r = await fetch(gatewayUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-internal-secret": internalSecret },
+      body: JSON.stringify(payload),
+    });
+    const text = await r.text();
+    return res.status(r.status).send(text);
+  } catch (e: any) {
+    return res.status(500).json({ ok: false, reason: e?.message || "forward_failed" });
+  }
+});
+
 app.listen(4200, '0.0.0.0', ()=>console.log("Webhooks :4200"));
