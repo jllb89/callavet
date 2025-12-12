@@ -30,6 +30,12 @@ services:
         sync: false
       - key: STRIPE_SECRET_KEY
         sync: false
+      - key: SENDGRID_API_KEY
+        sync: false
+      - key: SENDGRID_FROM
+        sync: false
+      - key: SENDGRID_REPLY_TO
+        sync: false
 
   - type: web
     name: cav-webhooks-staging

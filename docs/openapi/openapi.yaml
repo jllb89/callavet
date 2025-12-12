@@ -1840,6 +1840,42 @@ paths:
       requestBody: { $ref: "#/components/requestBodies/NotifyTest" }
       responses: { "200": { $ref: "#/components/responses/Ok" } }
 
+  /notifications/send:
+    post:
+      tags: [Notifications]
+      summary: Send an email via SendGrid
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                to: { type: string, format: email }
+                subject: { type: string, description: Required if no templateId }
+                text: { type: string }
+                html: { type: string }
+                replyTo: { type: string, format: email }
+                templateId: { type: string }
+                dynamicTemplateData: { type: object, additionalProperties: true }
+                categories: { type: array, items: { type: string } }
+                asmGroupId: { type: integer }
+                sandbox: { type: boolean, description: Enable SendGrid sandbox mode }
+              required: [to]
+      responses:
+        "200":
+          description: Result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  id: { type: string, nullable: true }
+                  statusCode: { type: integer }
+                  sandbox: { type: boolean }
+
   /files/upload:
     post:
       tags: [Files]

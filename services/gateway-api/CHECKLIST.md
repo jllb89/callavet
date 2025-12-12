@@ -203,7 +203,13 @@ Routing Notes (Frontend)
 
 ## Notifications
 - [x] POST /notifications/test → responses: Ok
+- [x] POST /notifications/send → responses: inline { ok, id, statusCode, sandbox }
 - [ ] (optional) POST /notifications/receipt → responses: Ok
+
+Routing Notes (Notifications)
+- Uses SendGrid Web API via server: env `SENDGRID_API_KEY`, `SENDGRID_FROM`, optional `SENDGRID_REPLY_TO`.
+- Request body supports either templates (`templateId` + `dynamicTemplateData`) or ad-hoc (`subject`, `text|html`).
+- Optional `sandbox: true` to avoid real sends (SendGrid sandbox mode); smoke uses this.
 
 ## Files (generic)
 - [x] POST /files/upload → server-side upload to Supabase Storage
