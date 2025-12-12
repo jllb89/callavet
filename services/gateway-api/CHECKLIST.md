@@ -210,6 +210,8 @@ Routing Notes (Notifications)
 - Uses SendGrid Web API via server: env `SENDGRID_API_KEY`, `SENDGRID_FROM`, optional `SENDGRID_REPLY_TO`.
 - Request body supports either templates (`templateId` + `dynamicTemplateData`) or ad-hoc (`subject`, `text|html`).
 - Optional `sandbox: true` to avoid real sends (SendGrid sandbox mode); smoke uses this.
+- Verified real send (12/12): response returns `{ ok: true, id, statusCode: 202, sandbox: false }` and email delivered.
+- Smokes: `env/scripts/smoke-notifications-send.sh` supports `REAL_SEND=true` and `SENDGRID_TEST_TO` to toggle and set recipient.
 
 ## Files (generic)
 - [x] POST /files/upload → server-side upload to Supabase Storage
