@@ -202,7 +202,7 @@ Routing Notes (Frontend)
 - Verification: smoke `env/scripts/smoke-payments.sh` PASS after seeding (list returns 2 payments & 2 invoices; detail tested when present).
 
 ## Notifications
-- [ ] POST /notifications/test → responses: Ok
+- [x] POST /notifications/test → responses: Ok
 - [ ] (optional) POST /notifications/receipt → responses: Ok
 
 ## Files (generic)
@@ -216,9 +216,9 @@ Routing Notes (Frontend)
 	- Notes: Uses Supabase service role; safe for backend issuance.
 
 ## Admin Ops
-- [ ] GET /admin/users → responses: ListUsers
-- [ ] GET /admin/users/{userId} → responses: User
-- [ ] GET /admin/subscriptions → responses: ListSubscriptions
+- [x] GET /admin/users → responses: ListUsers
+- [x] GET /admin/users/{userId} → responses: User
+- [x] GET /admin/subscriptions → responses: ListSubscriptions
 - [ ] POST /admin/credits/grant → responses: Ok
 - [ ] POST /admin/refunds → responses: Payment
 - [ ] POST /admin/vets/{vetId}/approve → responses: Vet
