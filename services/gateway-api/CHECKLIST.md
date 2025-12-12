@@ -228,16 +228,17 @@ Routing Notes (Notifications)
 - [x] GET /admin/users/{userId} → responses: User
 - [x] GET /admin/subscriptions → responses: ListSubscriptions
 - [x] POST /admin/credits/grant → responses: Ok (stub)
-- [x] POST /admin/refunds → responses: Ok (stub)
+- [x] POST /admin/refunds → responses: Ok (Stripe refund: { ok, refund_id, status, amount, currency, payment_intent })
 - [x] POST /admin/vets/{vetId}/approve → responses: Ok (stub)
 - [x] POST /admin/plans → responses: Ok (stub)
 - [x] POST /admin/coupons → responses: Ok (stub)
 - [x] GET /admin/analytics/usage → responses: Ok (stub)
 
 ## Webhooks
-- [ ] POST /webhooks/stripe → responses: Ok
-- [ ] Internal: POST /internal/stripe/event → responses: Ok (ensure reason: ignored_duplicate on replay)
-- [ ] Internal: POST /internal/stripe/ingest → responses: Ok
+- [x] POST /webhooks/stripe → responses: Ok (handled by `services/webhooks`, forwards selected events)
+- [x] Internal: POST /internal/stripe/event → responses: Ok (idempotent; duplicate replay returns `{ skipped: true, reason: 'duplicate' }`)
+- [ ] Internal: POST /internal/stripe/ingest → responses: Ok (defer)
+- [x] Internal: GET /internal/billing/health → responses: Ok (counters, recent events)
 
 ## Video
 - [ ] POST /video/rooms → responses: VideoRoom

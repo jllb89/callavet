@@ -1957,7 +1957,7 @@ paths:
       summary: Create Stripe refund
       security: [{ bearerAuth: [] }]
       requestBody: { $ref: "#/components/requestBodies/Refund" }
-      responses: { "200": { $ref: "#/components/responses/Payment" } }
+      responses: { "200": { $ref: "#/components/responses/RefundResult" } }
 
   /admin/vets/{vetId}/approve:
     post:
@@ -2308,10 +2308,11 @@ components:
           schema:
             type: object
             properties:
-              payment_id: { type: string, format: uuid }
-              reason: { type: string }
-              amount_cents: { type: integer }
-            required: [payment_id]
+              paymentId: { type: string }
+              reason: { type: string, enum: [requested_by_customer, duplicate, fraudulent], nullable: true }
+              amount: { type: integer, description: "Amount to refund in cents" }
+              requestId: { type: string, description: "Idempotency token for admin refund" }
+            required: [paymentId]
 
   responses:
     Ok:
@@ -2371,6 +2372,19 @@ components:
     Payment:
       description: Payment
       content: { application/json: { schema: { $ref: "#/components/schemas/Payment" } } }
+    RefundResult:
+      description: Stripe refund result
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              ok: { type: boolean }
+              refund_id: { type: string }
+              status: { type: string }
+              amount: { type: integer }
+              currency: { type: string }
+              payment_intent: { type: string }
     ListInvoices:
       description: Invoices
       content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Invoice" } } } } } }
