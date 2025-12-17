@@ -24,3 +24,67 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Custom animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Advanced nav roller with masking and clone character */
+.roller-mask {
+  position: relative;
+  display: inline-grid; /* stack char + clone */
+  height: 1em;
+  line-height: 1;
+  overflow: hidden; /* mask */
+}
+/*
+Note: intentionally no per-character margin adjustment to preserve
+consistent shape; overlay roller only appears on desktop hover.
+*/
+
+/* Layer swap: keep normal text by default; show roller on desktop hover */
+.link-normal { opacity: 1; transition: opacity 200ms ease; transition-delay: 420ms; }
+.link-roller { opacity: 0; pointer-events: none; transition: opacity 200ms ease; transition-delay: 420ms; will-change: opacity; }
+@media (min-width: 640px) {
+  .group:hover .link-roller { opacity: 1; transition-delay: 0ms; }
+  .group:hover .link-normal { opacity: 0; transition-delay: 60ms; }
+}
+.roller-char,
+.roller-clone {
+  display: block;
+  grid-area: 1 / 1; /* overlap in the same cell */
+  transform: translateY(0%);
+  transition: transform 420ms ease, opacity 220ms ease;
+  will-change: transform, opacity;
+}
+.roller-clone {
+  position: relative;
+  transform: translateY(110%);
+  opacity: 0;
+}
+.group:hover .roller-char {
+  transform: translateY(-110%);
+  opacity: 0;
+}
+.group:hover .roller-clone {
+  transform: translateY(0%);
+  opacity: 1;
+}
+
+/* Baseline underline placed under the original link position */
+.nav-underline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -2px;
+  height: 2px;
+  background-color: currentColor;
+  transform-origin: left;
+  transform: scaleX(0);
+  transition: transform 500ms cubic-bezier(.2,.8,.2,1);
+}
+.group:hover .nav-underline {
+  transform: scaleX(1);
+}
