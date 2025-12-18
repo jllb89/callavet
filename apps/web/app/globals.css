@@ -25,10 +25,77 @@ body {
   font-family: Arial, Helvetica, sans-serif;
 }
 
+/* Scroll-driven variables */
+:root {
+  --hero-opacity: 1;
+  --hero-bg-scale: 1;
+  --how-opacity: 0;
+  --how-scale: 1;
+}
+
 /* Custom animations */
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(12px); }
   to { opacity: 1; transform: translateY(0); }
+}
+/* Continuous left-to-right marquee */
+@keyframes marqueeLTR {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+.marquee {
+  position: fixed;
+  left: 0;
+  right: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.marquee--30 { top: 23vh; transform: translateY(-50%); }
+.marquee--60 { top: 76vh; transform: translateY(-50%); }
+.marquee-track {
+  display: inline-flex;
+  gap: 6vw;
+  white-space: nowrap;
+  will-change: transform;
+  animation: marqueeLTR 800s linear infinite;
+}
+.marquee-item { display: inline-block; }
+.marquee-track--rtl { animation-name: marqueeLTR; animation-direction: reverse; animation-delay: -1200s; }
+@keyframes riseIn {
+  from { transform: translateY(12px); }
+  to { transform: translateY(0); }
+}
+
+/* Hero scroll effects */
+.hero-content {
+  opacity: var(--hero-opacity);
+  will-change: opacity;
+}
+.hero-bg {
+  transform: scale(var(--hero-bg-scale));
+  transform-origin: 50% 50%;
+  will-change: transform;
+}
+
+/* Section intro reveal */
+#features-intro {
+  opacity: 0;
+  transition: opacity 600ms ease;
+}
+#features-intro.show {
+  opacity: 1;
+}
+
+/* "¿Cómo funciona?" centered fade-in */
+.how-title {
+  opacity: var(--how-opacity);
+  transition: opacity 600ms ease;
+}
+.how-center {
+  transform: translate(-50%, -50%) scale(var(--how-scale));
+  transform-origin: 50% 50%;
+  will-change: transform;
 }
 
 /* Advanced nav roller with masking and clone character */

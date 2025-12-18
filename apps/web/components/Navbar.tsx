@@ -41,14 +41,18 @@ function AnimatedLink({ href, text }: NavLinkProps) {
 
 export default function Navbar() {
   return (
-    <div className="absolute left-[24px] right-[24px] sm:left-[100px] sm:right-[100px] top-[24px] sm:top-[60px] flex items-center justify-between opacity-0 animate-[fadeIn_1400ms_ease-out_1200ms_forwards]">
+    <div className="fixed z-20 left-[24px] right-[24px] top-[24px] sm:left-[100px] sm:right-[100px] sm:top-[60px] flex items-center justify-between opacity-0 animate-[fadeIn_900ms_ease-out_200ms_forwards]">
       <a href="/" className="text-white text-xl sm:text-2xl">Call a Vet</a>
-      <nav className="hidden sm:flex items-center gap-8 text-white">
+      <div className="flex items-center">
+        {/* Mobile-only login button */}
+        <a href="#login" className="sm:hidden rounded-[33.5px] bg-white text-black px-5 py-2 text-sm hover:bg-[#dddddd] transition-colors duration-200">Iniciar sesión</a>
+        <nav className="hidden sm:flex items-center gap-8 text-white">
         <AnimatedLink href="#how" text="Cómo funciona" />
         <AnimatedLink href="#care" text="Planes de cuidado" />
         <AnimatedLink href="#faq" text="FAQ" />
-        <a href="#login" className="ml-2 rounded-[33.5px] bg-white text-black px-6 py-3 text-base">Iniciar sesión</a>
-      </nav>
+          <a href="#login" className="ml-2 rounded-[33.5px] bg-white text-black px-6 py-3 text-base hover:bg-[#dddddd] transition-colors duration-200">Iniciar sesión</a>
+        </nav>
+      </div>
     </div>
   );
 }

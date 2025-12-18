@@ -1,21 +1,33 @@
 import Image from "next/image";
 import Navbar from "../components/Navbar";
+import ScrollEffects from "../components/ScrollEffects";
 
 export default function Home() {
   return (
-    <div className="min-h-screen bg-white text-zinc-900 dark:bg-black dark:text-zinc-50">
+    <div className="min-h-screen bg-white text-zinc-900">
       {/* Header/Hero (Figma-based) */}
-      <header className="relative w-full min-h-[800px] sm:min-h-screen">
-        {/* Background image */}
-        <Image src="/bg-1.jpg" alt="Background" fill priority className="object-cover" />
-        {/* Overlay gradient for readability */}
-        <div className="absolute inset-0 bg-black/30" />
+      <header id="hero" className="relative w-full min-h-[800px] sm:min-h-screen">
+        {/* Back background (static, attached, width-based) */}
+        <img
+          src="/bg-2.png"
+          alt="Background back"
+          className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-screen h-auto object-contain object-center z-0 pointer-events-none"
+          aria-hidden
+        />
+        {/* Front background (shrinks from center with scroll) */}
+        <div className="hero-bg fixed inset-0 z-10 pointer-events-none">
+          <div className="relative w-full h-full">
+            <Image src="/bg-1.jpg" alt="Background front" fill priority className="object-cover object-center" />
+          </div>
+        </div>
+        {/* Overlay gradient for readability across both */}
+        <div className="fixed inset-0 z-20 bg-black/30 pointer-events-none" />
 
         {/* Top nav */}
         <Navbar />
 
         {/* Hero content near bottom */}
-        <div className="absolute left-0 right-0 bottom-[5vh] sm:bottom-[12vh] flex flex-col items-center px-6 opacity-0 animate-[fadeIn_1100ms_ease-out_100ms_forwards]">
+        <div className="hero-content fixed left-0 right-0 bottom-[5vh] sm:bottom-[12vh] z-30 flex flex-col items-center px-6 animate-[riseIn_900ms_ease-out_120ms_forwards]">
           <h1 className="text-white text-4xl sm:text-5xl font-normal mb-2">Call a Vet</h1>
           <p className="text-white text-xl sm:text-2xl text-center max-w-3xl mb-8 font-light">
             Atención veterinaria especializada en minutos para tu caballo.
@@ -24,15 +36,50 @@ export default function Home() {
             Describe el caso, nuestro asistente inteligente te guía con preguntas y te conectamos con un veterinario verificado.
           </p>
           <div className="flex items-center justify-center gap-3">
-            <a href="#assist" className="rounded-[33.5px] bg-white text-black px-8 py-3 text-base">Obtener asistencia ahora</a>
-            <a href="#plans" className="rounded-[33.5px] bg-black text-white px-8 py-3 text-base">Ver planes</a>
+            <a href="#assist" className="rounded-[33.5px] bg-white text-black px-8 py-3 text-base hover:bg-[#dddddd] transition-colors duration-200">Obtener asistencia ahora</a>
+            <a href="#plans" className="rounded-[33.5px] bg-black text-white px-8 py-3 text-base hover:bg-[#dddddd] transition-colors duration-200">Ver planes</a>
           </div>
         </div>
       </header>
+      {/* Scroll effects driver */}
+      <ScrollEffects />
+
+      {/* How section */}
+      <section id="how" className="h-screen">
+          <h2 className="how-title fixed top-1/2 left-1/2 how-center z-40 text-white text-4xl sm:text-4xl font-light">¿Cómo funciona?</h2>
+          {/* Marquee under bg-1 and hero, over bg-2 */}
+          <div className="marquee marquee--30 z-[5]" aria-hidden>
+            <div className="marquee-track text-white font-light text-[8vw]">
+              <span className="marquee-item">Sin filas. Soporte 24/7. Cancela cuando quieras. Atención personalizada para tu caballo.</span>
+              <span className="marquee-item">Sin filas. Soporte 24/7. Cancela cuando quieras. Atención personalizada para tu caballo.</span>
+              <span className="marquee-item">Sin filas. Soporte 24/7. Cancela cuando quieras. Atención personalizada para tu caballo.</span>
+              <span className="marquee-item">Sin filas. Soporte 24/7. Cancela cuando quieras. Atención personalizada para tu caballo.</span>
+              <span className="marquee-item">Sin filas. Soporte 24/7. Cancela cuando quieras. Atención personalizada para tu caballo.</span>
+              <span className="marquee-item">Sin filas. Soporte 24/7. Cancela cuando quieras. Atención personalizada para tu caballo.</span>
+              <span className="marquee-item">Sin filas. Soporte 24/7. Cancela cuando quieras. Atención personalizada para tu caballo.</span>
+              <span className="marquee-item">Sin filas. Soporte 24/7. Cancela cuando quieras. Atención personalizada para tu caballo.</span>
+              <span className="marquee-item">Sin filas. Soporte 24/7. Cancela cuando quieras. Atención personalizada para tu caballo.</span>
+            </div>
+          </div>
+          {/* Second marquee at 60vh, reverse direction */}
+          <div className="marquee marquee--60 z-[5]" aria-hidden>
+            <div className="marquee-track marquee-track--rtl text-white font-light text-[8vw]">
+              <span className="marquee-item">Sin filas. Soporte 24/7. Cancela cuando quieras. Atención personalizada para tu caballo.</span>
+              <span className="marquee-item">Sin filas. Soporte 24/7. Cancela cuando quieras. Atención personalizada para tu caballo.</span>
+              <span className="marquee-item">Sin filas. Soporte 24/7. Cancela cuando quieras. Atención personalizada para tu caballo.</span>
+              <span className="marquee-item">Sin filas. Soporte 24/7. Cancela cuando quieras. Atención personalizada para tu caballo.</span>
+              <span className="marquee-item">Sin filas. Soporte 24/7. Cancela cuando quieras. Atención personalizada para tu caballo.</span>
+              <span className="marquee-item">Sin filas. Soporte 24/7. Cancela cuando quieras. Atención personalizada para tu caballo.</span>
+              <span className="marquee-item">Sin filas. Soporte 24/7. Cancela cuando quieras. Atención personalizada para tu caballo.</span>
+              <span className="marquee-item">Sin filas. Soporte 24/7. Cancela cuando quieras. Atención personalizada para tu caballo.</span>
+              <span className="marquee-item">Sin filas. Soporte 24/7. Cancela cuando quieras. Atención personalizada para tu caballo.</span>
+            </div>
+          </div>
+      </section>
 
       {/* Features (placeholder) */}
       <section id="features" className="mx-auto max-w-6xl px-6 sm:px-10 py-24">
-        <h2 className="text-3xl font-semibold mb-8">Why Call a Vet</h2>
+        <h2 id="features-intro" className="text-3xl font-semibold mb-8">Why Call a Vet</h2>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <Feature title="Instant Booking" desc="Real-time availability and one-click reservations." />
           <Feature title="Specialty Matching" desc="Match by vet specialty for the right expertise." />

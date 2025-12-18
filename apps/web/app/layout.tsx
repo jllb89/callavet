@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
 import "./globals.css";
+import LenisProvider from "../components/LenisProvider";
 
 export const metadata: Metadata = {
   title: "Create Next App",
@@ -26,7 +27,7 @@ export default function RootLayout({
   return (
     <html lang="es" className={abcDiatype.variable}>
       <body className={abcDiatype.className}>
-        {children}
+        <LenisProvider>{children}</LenisProvider>
       </body>
     </html>
   );
