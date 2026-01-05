@@ -6,11 +6,10 @@ import Lenis from "@studio-freight/lenis";
 export default function LenisProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const lenis = new Lenis({
-      duration: 1.2,
-      easing: (t: number) => 1 - Math.pow(1 - t, 2),
+      duration: 4, // slower overall
+      easing: (t: number) => 1 - Math.pow(1 - t, 2.2), // slightly softer ease
       smoothWheel: true,
-      smoothTouch: false,
-      lerp: 0.1,
+      lerp: 0.04, // gentler interpolation
     });
 
     // Expose lenis instance for scroll-driven effects

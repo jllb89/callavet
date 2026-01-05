@@ -11,17 +11,17 @@ export default function Home() {
         <img
           src="/bg-2.png"
           alt="Background back"
-          className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-screen h-auto object-contain object-center z-0 pointer-events-none"
+          className="hero-bg-back fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-screen h-auto object-contain object-center z-0 pointer-events-none"
           aria-hidden
         />
-        {/* Front background (shrinks from center with scroll) */}
-        <div className="hero-bg fixed inset-0 z-10 pointer-events-none">
+        {/* Front background (sticky, scales via CSS vars) */}
+        <div className="hero-bg sticky top-0 h-screen z-10 pointer-events-none">
           <div className="relative w-full h-full">
             <Image src="/bg-1.jpg" alt="Background front" fill priority className="object-cover object-center" />
           </div>
         </div>
         {/* Overlay gradient for readability across both */}
-        <div className="fixed inset-0 z-20 bg-black/30 pointer-events-none" />
+        <div className="hero-overlay fixed inset-0 z-20 bg-black/30 pointer-events-none" />
 
         {/* Top nav */}
         <Navbar />
@@ -47,6 +47,9 @@ export default function Home() {
       {/* How section */}
       <section id="how" className="h-screen">
           <h2 className="how-title fixed top-1/2 left-1/2 how-center z-40 text-white text-4xl sm:text-4xl font-light">¿Cómo funciona?</h2>
+          <h2 className="how-title-secondary fixed top-1/2 left-1/2 how-center z-40 text-black text-4xl sm:text-4xl font-light" aria-hidden>
+            Sin filas. Soporte 24/7. Cancela cuando quieras. Atención personalizada para tu caballo.
+          </h2>
           {/* Marquee under bg-1 and hero, over bg-2 */}
           <div className="marquee marquee--30 z-[5]" aria-hidden>
             <div className="marquee-track text-white font-light text-[8vw]">
@@ -75,6 +78,71 @@ export default function Home() {
               <span className="marquee-item">Sin filas. Soporte 24/7. Cancela cuando quieras. Atención personalizada para tu caballo.</span>
             </div>
           </div>
+      </section>
+
+      {/* Features */}
+      <section id="features" className="mx-auto max-w-7xl px-6 sm:px-10 py-24">
+        <div className="feature-grid">
+          <div className="feature-stick feature-stick-1">
+            <Feature title="Cuéntanos el caso" desc="Escribe lo que pasa. Nuestro asistente hace 2–3 preguntas clave para entender mejor." />
+          </div>
+          <div className="feature-stick feature-stick-2">
+            <Feature title="Conéctate con un vet" desc="Te sugerimos chat o video según el caso. Pagas y entras a la consulta." />
+          </div>
+          <div className="feature-stick feature-stick-3">
+            <Feature title="Recibe un plan personalizado" desc="Al terminar, te compartimos un plan de cuidado propuesto con próximos pasos." />
+          </div>
+        </div>
+      </section>
+
+      {/* Pricing (placeholder) */}
+      <section id="pricing" className="mx-auto max-w-6xl px-6 sm:px-10 py-24">
+        <h2 className="text-3xl font-semibold mb-8">Simple Pricing</h2>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <Card title="Free" price="$0" desc="Browse KB, prep for consults." cta="Get Started" />
+          <Card title="Chat" price="$19" desc="Single chat consult." cta="Book Chat" />
+          <Card title="Video" price="$39" desc="Video consult with a vet." cta="Book Video" />
+        </div>
+      </section>
+
+      {/* Features (placeholder) */}
+      <section id="features" className="mx-auto max-w-6xl px-6 sm:px-10 py-24">
+        <h2 id="features-intro" className="text-3xl font-semibold mb-8">Why Call a Vet</h2>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <Feature title="Instant Booking" desc="Real-time availability and one-click reservations." />
+          <Feature title="Specialty Matching" desc="Match by vet specialty for the right expertise." />
+          <Feature title="Secure Records" desc="Session notes and care plans securely stored." />
+        </div>
+      </section>
+
+      {/* Pricing (placeholder) */}
+      <section id="pricing" className="mx-auto max-w-6xl px-6 sm:px-10 py-24">
+        <h2 className="text-3xl font-semibold mb-8">Simple Pricing</h2>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <Card title="Free" price="$0" desc="Browse KB, prep for consults." cta="Get Started" />
+          <Card title="Chat" price="$19" desc="Single chat consult." cta="Book Chat" />
+          <Card title="Video" price="$39" desc="Video consult with a vet." cta="Book Video" />
+        </div>
+      </section>
+
+      {/* Features (placeholder) */}
+      <section id="features" className="mx-auto max-w-6xl px-6 sm:px-10 py-24">
+        <h2 id="features-intro" className="text-3xl font-semibold mb-8">Why Call a Vet</h2>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <Feature title="Instant Booking" desc="Real-time availability and one-click reservations." />
+          <Feature title="Specialty Matching" desc="Match by vet specialty for the right expertise." />
+          <Feature title="Secure Records" desc="Session notes and care plans securely stored." />
+        </div>
+      </section>
+
+      {/* Pricing (placeholder) */}
+      <section id="pricing" className="mx-auto max-w-6xl px-6 sm:px-10 py-24">
+        <h2 className="text-3xl font-semibold mb-8">Simple Pricing</h2>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <Card title="Free" price="$0" desc="Browse KB, prep for consults." cta="Get Started" />
+          <Card title="Chat" price="$19" desc="Single chat consult." cta="Book Chat" />
+          <Card title="Video" price="$39" desc="Video consult with a vet." cta="Book Video" />
+        </div>
       </section>
 
       {/* Features (placeholder) */}
@@ -112,9 +180,9 @@ export default function Home() {
 
 function Feature({ title, desc }: { title: string; desc: string }) {
   return (
-    <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 p-5">
-      <div className="text-lg font-medium mb-2">{title}</div>
-      <p className="text-sm text-zinc-600 dark:text-zinc-300">{desc}</p>
+    <div className="p-1">
+      <div className="text-xl font-light text-black mb-2">{title}</div>
+      <p className="text-md font-light text-black/80">{desc}</p>
     </div>
   );
 }
