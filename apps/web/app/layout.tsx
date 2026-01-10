@@ -11,8 +11,10 @@ export const metadata: Metadata = {
 const abcDiatype = localFont({
   src: [
     { path: "../public/ABC Diatype Thin.ttf", weight: "200", style: "normal" },
-    { path: "../public/ABC Diatype Light.ttf", weight: "300", style: "normal" },
-    { path: "../public/ABC Diatype.ttf", weight: "400", style: "normal" },
+    { path: "../public/ABCLight.woff2", weight: "300", style: "normal" },
+    { path: "../public/ABCLight.woff", weight: "300", style: "normal" },
+    { path: "../public/ABCRegular.woff2", weight: "400", style: "normal" },
+    { path: "../public/ABCRegular.woff", weight: "400", style: "normal" },
     { path: "../public/ABC Diatype Medium.ttf", weight: "500", style: "normal" },
   ],
   variable: "--font-abc-diatype",
