@@ -1,28 +1,87 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* Dark palette defaults */
+  --bg: #101010;
+  --bg-alt: #0c0c0c;
+  --card: #111111;
+  --surface: #131313;
+  --border: rgba(255, 255, 255, 0.12);
+  --muted: rgba(255, 255, 255, 0.7);
+  --muted-strong: rgba(255, 255, 255, 0.9);
+  --text: #ffffff;
+  --accent: #ffffff;
+  --accent-foreground: #0f0f0f;
+  --overlay-strong: rgba(16, 16, 16, 0.75);
+  --overlay-soft: rgba(16, 16, 16, 0.55);
+  --avatar-placeholder: #2f2f2f;
+  --hero-grad-from: rgba(16, 16, 16, 0);
+  --hero-grad-via: rgba(16, 16, 16, 0.5);
+  --hero-grad-to: #101010;
+  --hero-overlay-height: 100%;
+  --nav-scrim: rgba(0, 0, 0, 0.25);
+  --nav-scrim-border: rgba(255, 255, 255, 0);
+  --benefits-bg: rgba(0, 0, 0, 0.3);
+  --benefits-title-inactive: rgba(255, 255, 255, 0.054);
+  --benefits-title-hover: rgba(255, 255, 255, 0.55);
+  color-scheme: dark;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ffffff;
-  }
+.theme-light {
+  --bg: #ffffff;
+  --bg-alt: #f6f6f6;
+  --card: #f8f8f8;
+  --surface: #f3f4f6;
+  --border: rgba(0, 0, 0, 0.12);
+  --muted: #4b5563;
+  --muted-strong: #111111;
+  --text: #0b0b0b;
+  --accent: #0b0b0b;
+  --accent-foreground: #ffffff;
+  --overlay-strong: rgba(255, 255, 255, 0.82);
+  --overlay-soft: rgba(255, 255, 255, 0.6);
+  --avatar-placeholder: #d1d5db;
+  --hero-grad-from: rgba(255, 255, 255, 0);
+  --hero-grad-via: rgba(255, 255, 255, 0.4);
+  --hero-grad-to: #ffffff;
+  --hero-overlay-height: 650px;
+  --nav-scrim: rgba(0, 0, 0, 0.5);
+  --nav-scrim-border: rgba(0, 0, 0, 0.08);
+  --benefits-bg: rgb(242, 242, 242);
+  --benefits-title-inactive: rgba(0, 0, 0, 0.12);
+  --benefits-title-hover: rgba(0, 0, 0, 0.7);
+  color-scheme: light;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
+  background: var(--bg);
+  color: var(--text);
   font-family: var(--font-abc-diatype);
+}
+
+/* Login button base */
+.btn-login {
+  background: #ffffff;
+  color: #000000;
+  transition: background-color 150ms ease, color 150ms ease;
+}
+.btn-login:hover { background: rgba(255, 255, 255, 0.9); }
+
+/* Theme icon swaps */
+.icon-light { display: none; }
+.theme-light .icon-light { display: inline-block; }
+.theme-light .icon-dark { display: none; }
+
+/* Benefits image overlays */
+.benefits-overlay-dark {
+  background: linear-gradient(90deg, rgba(11,11,11,0) 0%, rgba(11, 11, 11, 0.547) 45%, rgb(11, 11, 11) 100%);
+  display: block;
+}
+.benefits-overlay-light { display: none; }
+.theme-light .benefits-overlay-dark { display: none; }
+.theme-light .benefits-overlay-light {
+  display: block;
+  background: linear-gradient(90deg, rgba(242, 242, 242, 0) 0%, rgba(242, 242, 242, 0.135) 45%, rgb(242, 242, 242) 100%);
 }
 
 /* ABC Diatype helpers */

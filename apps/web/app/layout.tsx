@@ -27,7 +27,14 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="es" className={abcDiatype.variable}>
+    <html lang="es" className={abcDiatype.variable} suppressHydrationWarning>
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(() => {try {const s = localStorage.getItem('theme'); const preferred = s === 'light' ? 'light' : 'dark'; const el = document.documentElement; if (preferred === 'light') el.classList.add('theme-light'); else el.classList.remove('theme-light');} catch (e) {}})();`,
+          }}
+        />
+      </head>
       <body className={abcDiatype.className}>
         <LenisProvider>{children}</LenisProvider>
       </body>
