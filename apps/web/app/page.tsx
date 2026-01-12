@@ -1,6 +1,7 @@
 import Image from "next/image";
 import Navbar from "../components/Navbar";
 import BenefitsSection from "../components/BenefitsSection";
+import SavingsCalculator from "../components/SavingsCalculator";
 
 export default function Home() {
   return (
@@ -212,214 +213,238 @@ export default function Home() {
         </div>
 
         <section className="w-full px-6 py-28">
-        <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-6">
-          <div className="grid grid-cols-1 gap-10 md:grid-cols-5 items-stretch">
-            <div className="md:col-span-2 flex items-center">
-              <h2 className="text-[color:var(--text)] text-xl sm:text-4xl font-light font-abc">Un solo evento puede pagar todo el mes.</h2>
-            </div>
+          <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-6">
+            <div className="grid grid-cols-1 gap-10 md:grid-cols-5 items-stretch">
+              <div className="md:col-span-2 flex items-center">
+                <h2 className="text-[color:var(--text)] text-xl sm:text-4xl font-light font-abc">Un solo evento puede pagar todo el mes.</h2>
+              </div>
 
 
-            <div className="flex items-start gap-4 text-[color:var(--text)] font-abc h-full">
-              <div className="w-px self-stretch bg-[color:var(--border)]" />
-              <div className="flex flex-col gap-3">
-                <div className="text-4xl font-light leading-8 mb-6">
-                  <span className="block">$20,000</span>
+              <div className="flex items-start gap-4 text-[color:var(--text)] font-abc h-full">
+                <div className="w-px self-stretch bg-[color:var(--border)]" />
+                <div className="flex flex-col gap-3">
+                  <div className="text-4xl font-light leading-8 mb-6">
+                    <span className="block">$20,000</span>
 
+                  </div>
+                  <p className="text-sm font-light leading-6 text-[color:var(--text)]">
+                    Más de $20,000 pesos de ahorro al mes - ahorro mensual real.
+                  </p>
                 </div>
-                <p className="text-sm font-light leading-6 text-[color:var(--text)]">
-                  Más de $20,000 pesos de ahorro al mes - ahorro mensual real.
-                </p>
+              </div>
+
+              <div className="flex items-start gap-4 text-[color:var(--text)] font-abc h-full">
+                <div className="w-px self-stretch bg-[color:var(--border)]" />
+                <div className="flex flex-col gap-3">
+                  <div className="text-4xl font-light leading-8 mb-6">
+                    <span className="block">15 Horas</span>
+                  </div>
+                  <p className="text-sm font-light leading-6 text-[color:var(--text)]">
+                    Hasta 15 horas al mes recuperadas - tiempo operativo recuperado.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-start gap-4 text-[color:var(--text)] font-abc h-full">
+                <div className="w-px self-stretch bg-[color:var(--border)]" />
+                <div className="flex flex-col gap-3">
+                  <div className="text-4xl font-light leading-8 mb-6">
+                    <span className="block">5 Minutos</span>
+
+                  </div>
+                  <p className="text-sm font-light leading-6 text-[color:var(--text)]">
+                    Respuesta en menos de 5 minutos - atención sin tiempos largos de espera.
+                  </p>
+                </div>
               </div>
             </div>
 
-            <div className="flex items-start gap-4 text-[color:var(--text)] font-abc h-full">
-              <div className="w-px self-stretch bg-[color:var(--border)]" />
-              <div className="flex flex-col gap-3">
-                <div className="text-4xl font-light leading-8 mb-6">
-                  <span className="block">15 Horas</span>
+            <div className="grid grid-cols-1 gap-10 md:grid-cols-5 items-stretch mt-10">
+              <div className="hidden md:block md:col-span-3" />
+
+              <div className="flex items-start gap-4 text-[color:var(--text)] font-abc h-full">
+                <div className="w-px self-stretch bg-[color:var(--border)]" />
+                <div className="flex flex-col gap-3">
+                  <div className="text-4xl font-light leading-8 mb-6">
+                    <span className="block">70%</span>
+                  </div>
+                  <p className="text-sm font-light leading-6 text-[color:var(--text)]">
+                    70% de los casos se resuelven sin visita física - menos urgencias mal atendidas.
+                  </p>
                 </div>
-                <p className="text-sm font-light leading-6 text-[color:var(--text)]">
-                  Hasta 15 horas al mes recuperadas - tiempo operativo recuperado.
-                </p>
+              </div>
+
+              <div className="flex items-start gap-4 text-[color:var(--text)] font-abc h-full">
+                <div className="w-px self-stretch bg-[color:var(--border)]" />
+                <div className="flex flex-col gap-3">
+                  <div className="text-4xl font-light leading-8 mb-6">
+                    <span className="block">45x</span>
+                  </div>
+                  <p className="text-sm font-light leading-6 text-[color:var(--text)]">
+                    Hasta 45x de retorno sobre el costo del plan - retorno inmediato.
+                  </p>
+                </div>
               </div>
             </div>
+          </div>
+        </section>
 
-            <div className="flex items-start gap-4 text-[color:var(--text)] font-abc h-full">
-              <div className="w-px self-stretch bg-[color:var(--border)]" />
-              <div className="flex flex-col gap-3">
-                <div className="text-4xl font-light leading-8 mb-6">
-                  <span className="block">5 Minutos</span>
-
-                </div>
-                <p className="text-sm font-light leading-6 text-[color:var(--text)]">
-                  Respuesta en menos de 5 minutos - atención sin tiempos largos de espera.
+        <section className="w-full px-6 py-2">
+          <div className="mx-auto w-full max-w-[1600px] rounded-2xl p-6 sm:p-8 md:p-10">
+            <div className="grid w-full gap-6 lg:grid-cols-5 items-start">
+              <div className="lg:col-span-2 flex flex-col gap-2 text-[color:var(--text)] font-abc">
+                <h2 className="text-3xl sm:text-4xl font-light">Nuestros planes están diseñados para que ahorres desde la primera consulta.</h2>
+                <p className="text-base sm:text-lg font-light text-[color:var(--text)]">
+                  Ajusta tus variables y compara el ahorro mensual estimado antes de contratar.
+                  Utiliza nuestro simulador y compruébalo:
                 </p>
               </div>
             </div>
           </div>
+        </section>
 
-          <div className="grid grid-cols-1 gap-10 md:grid-cols-5 items-stretch mt-10">
-            <div className="hidden md:block md:col-span-3" />
+        <section id="calculadora" className="w-full px-6 py-2"></section>
 
-            <div className="flex items-start gap-4 text-[color:var(--text)] font-abc h-full">
-              <div className="w-px self-stretch bg-[color:var(--border)]" />
-              <div className="flex flex-col gap-3">
-                <div className="text-4xl font-light leading-8 mb-6">
-                  <span className="block">70%</span>
-                </div>
-                <p className="text-sm font-light leading-6 text-[color:var(--text)]">
-                  70% de los casos se resuelven sin visita física - menos urgencias mal atendidas.
-                </p>
-              </div>
-            </div>
-
-            <div className="flex items-start gap-4 text-[color:var(--text)] font-abc h-full">
-              <div className="w-px self-stretch bg-[color:var(--border)]" />
-              <div className="flex flex-col gap-3">
-                <div className="text-4xl font-light leading-8 mb-6">
-                  <span className="block">45x</span>
-                </div>
-                <p className="text-sm font-light leading-6 text-[color:var(--text)]">
-                  Hasta 45x de retorno sobre el costo del plan - retorno inmediato.
-                </p>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-            <section id="calculadora" className="w-full px-6 py-20">
-        <div className="mx-auto w-full max-w-[1600px] rounded-2xl border border-[color:var(--border)] bg-[color:var(--benefits-bg)] p-6 sm:p-8 md:p-10">
-          <div className="grid gap-10 xl:grid-cols-2 items-start">
-            <div className="flex flex-col gap-8 text-[color:var(--text)] font-abc">
-              <div>
-                <div className="text-3xl sm:text-4xl font-light">Entradas</div>
-                <div className="text-lg sm:text-xl font-light mt-2">Ajusta tu operación (costos locales, estacionalidad).</div>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="flex flex-col gap-2">
-                  <div className="text-xl font-medium">5</div>
-                  <div className="h-px w-full bg-[color:var(--border)]" />
-                  <div className="text-sm font-light">Número de caballos</div>
+{/*         <section id="calculadora" className="w-full px-6 py-20">
+          <div className="mx-auto w-full max-w-[1600px] rounded-2xl border border-[color:var(--border)] bg-[color:var(--benefits-bg)] p-6 sm:p-8 md:p-10">
+            <div className="grid w-full gap-10 lg:grid-cols-5 items-start">
+              <div className="lg:col-span-2 flex flex-col gap-8 text-[color:var(--text)] font-abc">
+                <div>
+                  <div className="text-3xl sm:text-4xl font-light">Entradas</div>
+                  <div className="text-lg sm:text-xl font-light mt-2">Ajusta tu operación (costos locales, estacionalidad).</div>
                 </div>
 
-                <div className="flex flex-col gap-2">
-                  <div className="text-xl font-medium">1</div>
-                  <div className="h-px w-full bg-[color:var(--border)]" />
-                  <div className="text-sm font-light">Eventos aproximados por caballo</div>
-                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="flex flex-col gap-2">
+                    <div className="text-xl font-regular">5</div>
+                    <div className="h-px w-full bg-[color:var(--border)]" />
+                    <div className="text-sm font-light">Número de caballos</div>
+                  </div>
 
-                <div className="flex flex-col gap-2">
-                  <div className="text-xl font-medium">60%</div>
-                  <div className="h-px w-full bg-[color:var(--border)]" />
-                  <div className="text-sm font-light">Nuestra tasa aproximada de resolución digital</div>
-                </div>
+                  <div className="flex flex-col gap-2">
+                    <div className="text-xl font-regular">1</div>
+                    <div className="h-px w-full bg-[color:var(--border)]" />
+                    <div className="text-sm font-light">Eventos aproximados por caballo</div>
+                  </div>
 
-                <div className="flex flex-col gap-2">
-                  <div className="text-xl font-medium">60%</div>
-                  <div className="h-px w-full bg-[color:var(--border)]" />
-                  <div className="text-sm font-light">Costo visita en sitio (MXN)</div>
-                </div>
+                  <div className="flex flex-col gap-2">
+                    <div className="text-xl font-regular">60%</div>
+                    <div className="h-px w-full bg-[color:var(--border)]" />
+                    <div className="text-sm font-light">Nuestra tasa aproximada de resolución digital</div>
+                  </div>
 
-                <div className="flex flex-col gap-2">
-                  <div className="text-xl font-medium">$3,000</div>
-                  <div className="h-px w-full bg-[color:var(--border)]" />
-                  <div className="text-sm font-light">Costo de traslado por visita de tu veterinario (MXN)</div>
-                </div>
+                  <div className="flex flex-col gap-2">
+                    <div className="text-xl font-regular">60%</div>
+                    <div className="h-px w-full bg-[color:var(--border)]" />
+                    <div className="text-sm font-light">Costo visita en sitio (MXN)</div>
+                  </div>
 
-                <div className="flex flex-col gap-2">
-                  <div className="text-xl font-medium">$3,000</div>
-                  <div className="h-px w-full bg-[color:var(--border)]" />
-                  <div className="text-sm font-light">Horas ahorradas por evento</div>
-                </div>
+                  <div className="flex flex-col gap-2">
+                    <div className="text-xl font-regular">$3,000</div>
+                    <div className="h-px w-full bg-[color:var(--border)]" />
+                    <div className="text-sm font-light">Costo de traslado por visita de tu veterinario (MXN)</div>
+                  </div>
 
-                <div className="flex flex-col gap-2">
-                  <div className="text-xl font-medium">$3,000</div>
-                  <div className="h-px w-full bg-[color:var(--border)]" />
-                  <div className="text-sm font-light">Costo por hora de inactividad (MXN)</div>
-                </div>
+                  <div className="flex flex-col gap-2">
+                    <div className="text-xl font-regular">$3,000</div>
+                    <div className="h-px w-full bg-[color:var(--border)]" />
+                    <div className="text-sm font-light">Horas ahorradas por evento</div>
+                  </div>
 
-                <div className="flex flex-col gap-2">
-                  <div className="text-xl font-medium">$3,000 - Plan Cuadra</div>
-                  <div className="h-px w-full bg-[color:var(--border)]" />
-                  <div className="text-sm font-light">Costo membresía</div>
-                </div>
-              </div>
-            </div>
+                  <div className="flex flex-col gap-2">
+                    <div className="text-xl font-regular">$3,000</div>
+                    <div className="h-px w-full bg-[color:var(--border)]" />
+                    <div className="text-sm font-light">Costo por hora de inactividad (MXN)</div>
+                  </div>
 
-            <div className="flex flex-col gap-8 text-[color:var(--text)] font-abc">
-              <div>
-                <div className="text-3xl sm:text-4xl font-light">Resultados</div>
-                <div className="text-lg sm:text-xl font-light mt-2">Estimaciones mensuales.</div>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="flex flex-col gap-2">
-                  <div className="text-4xl font-light">5</div>
-                  <div className="h-px w-full bg-[color:var(--border)]" />
-                  <div className="text-sm font-normal">Eventos totales por mes</div>
-                </div>
-
-                <div className="flex flex-col gap-2">
-                  <div className="text-4xl font-light [text-shadow:_0px_0px_20px_rgb(0_255_4_/_0.50)]">$30,000</div>
-                  <div className="h-px w-full bg-[color:var(--border)]" />
-                  <div className="text-sm font-normal">Ahorro total</div>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <div className="h-1.5 w-1.5 rounded-full bg-green-500 shadow-[0px_0px_4px_1px_rgba(0,255,30,0.25)]" />
-                  <div className="flex flex-col">
-                    <div className="text-4xl font-light [text-shadow:_0px_0px_20px_rgb(0_255_4_/_0.50)]">60%</div>
-                    <div className="text-sm font-normal">Ahorro por tiempo</div>
+                  <div className="flex flex-col gap-2">
+                    <div className="text-xl font-regular">$3,000 - Plan Cuadra</div>
+                    <div className="h-px w-full bg-[color:var(--border)]" />
+                    <div className="text-sm font-light">Costo membresía</div>
                   </div>
                 </div>
+              </div>
 
-                <div className="flex items-center gap-2">
-                  <div className="h-1.5 w-1.5 rounded-full bg-green-500 shadow-[0px_0px_4px_1px_rgba(0,255,30,0.25)]" />
-                  <div className="flex flex-col">
+              <div className="lg:col-span-3 flex flex-col gap-8 text-[color:var(--text)] font-abc">
+                <div>
+                  <div className="text-3xl sm:text-4xl font-light">Resultados</div>
+                  <div className="text-lg sm:text-xl font-light mt-2">Estimaciones mensuales.</div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+                  <div className="flex flex-col gap-2">
+                    <div className="text-4xl font-light">5</div>
+                    <div className="h-px w-full bg-[color:var(--border)]" />
+                    <div className="text-sm font-normal">Eventos totales por mes (casos que atenderías).</div>
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <div className="text-4xl font-light [text-shadow:_0px_0px_20px_rgb(0_255_4_/_0.50)]">$30,000</div>
+                    <div className="h-px w-full bg-[color:var(--border)]" />
+                    <div className="text-sm font-normal">Ahorro total estimado en efectivo.</div>
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <div className="text-4xl font-light [text-shadow:_0px_0px_20px_rgb(0_255_4_/_0.50)]">60%</div>
+                    <div className="h-px w-full bg-[color:var(--border)]" />
+                    <div className="flex items-center gap-2 text-sm font-normal">
+                      <span className="h-1.5 w-1.5 rounded-full bg-green-500 shadow-[0px_0px_4px_1px_rgba(0,255,30,0.25)]" />
+                      <span>Ahorro por tiempo (casos resueltos sin desplazarte).</span>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col gap-2">
                     <div className="text-4xl font-light [text-shadow:_0px_0px_20px_rgb(0_255_4_/_0.50)]">10</div>
-                    <div className="text-sm font-normal">Payback (días)</div>
+                    <div className="h-px w-full bg-[color:var(--border)]" />
+                    <div className="flex items-center gap-2 text-sm font-normal">
+                      <span className="h-1.5 w-1.5 rounded-full bg-green-500 shadow-[0px_0px_4px_1px_rgba(0,255,30,0.25)]" />
+                      <span>Payback (días para recuperar la membresía).</span>
+                    </div>
                   </div>
-                </div>
 
-                <div className="flex items-center gap-2">
-                  <div className="h-1.5 w-1.5 rounded-full bg-green-500 shadow-[0px_0px_4px_1px_rgba(0,255,30,0.25)]" />
-                  <div className="flex flex-col">
+                  <div className="flex flex-col gap-2">
                     <div className="text-4xl font-light [text-shadow:_0px_0px_20px_rgb(0_255_4_/_0.50)]">3</div>
-                    <div className="text-sm font-normal">Visitas evitadas / mes</div>
+                    <div className="h-px w-full bg-[color:var(--border)]" />
+                    <div className="flex items-center gap-2 text-sm font-normal">
+                      <span className="h-1.5 w-1.5 rounded-full bg-green-500 shadow-[0px_0px_4px_1px_rgba(0,255,30,0.25)]" />
+                      <span>Visitas evitadas / mes (traslados no requeridos).</span>
+                    </div>
                   </div>
-                </div>
 
-                <div className="flex items-center gap-2">
-                  <div className="h-1.5 w-1.5 rounded-full bg-green-500 shadow-[0px_0px_4px_1px_rgba(0,255,30,0.25)]" />
-                  <div className="flex flex-col">
+                  <div className="flex flex-col gap-2">
                     <div className="text-4xl font-light [text-shadow:_0px_0px_20px_rgb(0_255_4_/_0.50)]">60%</div>
-                    <div className="text-sm font-normal">Ahorro por visitas</div>
+                    <div className="h-px w-full bg-[color:var(--border)]" />
+                    <div className="flex items-center gap-2 text-sm font-normal">
+                      <span className="h-1.5 w-1.5 rounded-full bg-green-500 shadow-[0px_0px_4px_1px_rgba(0,255,30,0.25)]" />
+                      <span>Ahorro por visitas (porcentaje de casos resueltos remoto).</span>
+                    </div>
                   </div>
-                </div>
 
-                <div className="flex items-center gap-2">
-                  <div className="h-1.5 w-1.5 rounded-full bg-green-500 shadow-[0px_0px_4px_1px_rgba(0,255,30,0.25)]" />
-                  <div className="flex flex-col">
+                  <div className="flex flex-col gap-2">
                     <div className="text-4xl font-light [text-shadow:_0px_0px_20px_rgb(0_255_4_/_0.50)]">$20,000</div>
-                    <div className="text-sm font-normal">ROI mensual</div>
+                    <div className="h-px w-full bg-[color:var(--border)]" />
+                    <div className="flex items-center gap-2 text-sm font-normal">
+                      <span className="h-1.5 w-1.5 rounded-full bg-green-500 shadow-[0px_0px_4px_1px_rgba(0,255,30,0.25)]" />
+                      <span>ROI mensual (retorno vs. costo del plan).</span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-center">
+                    <a
+                      href="#plans"
+                      className="inline-flex items-center justify-center rounded-[33.5px] bg-[color:var(--text)] px-8 py-4 text-sm font-medium text-[color:var(--bg)] transition-colors hover:bg-[color:var(--text)]/90"
+                    >
+                      Contratar plan
+                    </a>
                   </div>
                 </div>
-              </div>
-
-              <div>
-                <a
-                  href="#plans"
-                  className="inline-flex items-center justify-center rounded-[33.5px] bg-[color:var(--text)] px-8 py-4 text-sm font-medium text-[color:var(--bg)] transition-colors hover:bg-[color:var(--text)]/90"
-                >
-                  Contratar plan
-                </a>
               </div>
             </div>
           </div>
-        </div>
-      </section>
+        </section> */}
+
+        <SavingsCalculator />
+
 
         <section id="ahorro" className="mx-auto w-full max-w-6xl px-6">
           <h2 className="text-3xl font-semibold mb-6">Ahorro</h2>
