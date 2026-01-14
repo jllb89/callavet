@@ -29,18 +29,18 @@
 
 .theme-light {
   --bg: #ffffff;
-  --bg-alt: #f6f6f6;
-  --card: #f8f8f8;
-  --surface: #f3f4f6;
+  --bg-alt: #f7f7f7;
+  --card: #fafafa;
+  --surface: #f5f5f5;
   --border: rgba(0, 0, 0, 0.12);
-  --muted: #4b5563;
+  --muted: rgba(0, 0, 0, 0.68);
   --muted-strong: #111111;
   --text: #0b0b0b;
   --accent: #0b0b0b;
   --accent-foreground: #ffffff;
   --overlay-strong: rgba(255, 255, 255, 0.82);
   --overlay-soft: rgba(255, 255, 255, 0.6);
-  --avatar-placeholder: #d1d5db;
+  --avatar-placeholder: #d3d3d3;
   --hero-grad-from: rgba(255, 255, 255, 0);
   --hero-grad-via: rgba(255, 255, 255, 0.4);
   --hero-grad-to: #ffffff;
@@ -87,6 +87,16 @@ body {
 /* ABC Diatype helpers */
 .font-abc {
   font-family: var(--font-abc-diatype);
+}
+
+/* Savings calculator result cards */
+.result-card {
+  background: #1f1f1f;
+  color: #ffffff;
+}
+.theme-light .result-card {
+  background: #515151;
+  color: #ffffff;
 }
 
 /* Scroll-driven variables */

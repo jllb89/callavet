@@ -1,9 +1,56 @@
+"use client";
+
 import Image from "next/image";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Navbar from "../components/Navbar";
 import BenefitsSection from "../components/BenefitsSection";
 import SavingsCalculator from "../components/SavingsCalculator";
 
 export default function Home() {
+  const [billingCycle, setBillingCycle] = useState<"monthly" | "annual">("monthly");
+  const [isFading, setIsFading] = useState(false);
+  const monthlyRef = useRef<HTMLButtonElement>(null);
+  const annualRef = useRef<HTMLButtonElement>(null);
+  const [thumbStyle, setThumbStyle] = useState<{ width: number; left: number }>({ width: 0, left: 0 });
+
+  const priceTable = useMemo(
+    () => ({
+      starter: { monthly: "$999 al mes", annual: "$899 al mes (facturación anual)" },
+      plus: { monthly: "$1,899 al mes", annual: "$1,699 al mes (facturación anual)" },
+      cuadra5: { monthly: "$2,499 al mes", annual: "$2,299 al mes (facturación anual)" },
+      cuadra15: { monthly: "$3,499 al mes", annual: "$3,099 al mes (facturación anual)" },
+      proEntrenador: { monthly: "$2,499 al mes", annual: "$2,299 al mes (facturación anual)" },
+      ranchoTrabajo: { monthly: "$4,999 al mes", annual: "$4,499 al mes (facturación anual)" },
+    }),
+    []
+  );
+
+  const getPrice = (plan: keyof typeof priceTable) => priceTable[plan][billingCycle];
+
+  const handleBillingChange = (cycle: "monthly" | "annual") => {
+    if (cycle === billingCycle || isFading) return;
+    setIsFading(true);
+    setTimeout(() => {
+      setBillingCycle(cycle);
+      setIsFading(false);
+    }, 160);
+  };
+
+  useEffect(() => {
+    const computeThumb = () => {
+      const monthlyWidth = monthlyRef.current?.offsetWidth ?? 0;
+      const annualWidth = annualRef.current?.offsetWidth ?? 0;
+      const padding = 4;
+      const activeWidth = billingCycle === "monthly" ? monthlyWidth : annualWidth;
+      const left = billingCycle === "monthly" ? padding : padding + monthlyWidth;
+      setThumbStyle({ width: activeWidth, left });
+    };
+
+    computeThumb();
+    window.addEventListener("resize", computeThumb);
+    return () => window.removeEventListener("resize", computeThumb);
+  }, [billingCycle]);
+
   return (
     <div className="min-h-screen bg-[color:var(--bg)] text-[color:var(--text)]">
       <header className="relative h-[1117px] w-screen overflow-hidden">
@@ -193,7 +240,7 @@ export default function Home() {
         </section>
 
 
-        <div className="w-full py-10 text-center text-[color:var(--text)] text-2xl font-light leading-8 font-abc">
+        <div className="w-full py-6 text-center text-[color:var(--text)] text-2xl font-light leading-8 font-abc">
           Atención ética: plataforma impulsada por inteligencia artificial<br />
           que siempre deriva a atención humana.
         </div>
@@ -293,7 +340,7 @@ export default function Home() {
           <div className="mx-auto w-full max-w-[1600px] rounded-2xl p-6 sm:p-8 md:p-10">
             <div className="grid w-full gap-6 lg:grid-cols-5 items-start">
               <div className="lg:col-span-2 flex flex-col gap-2 text-[color:var(--text)] font-abc">
-                <h2 className="text-3xl sm:text-4xl font-light">Nuestros planes están diseñados para que ahorres desde la primera consulta.</h2>
+                <h2 className="text-3xl sm:text-4xl font-light">Call a Vet está diseñado para que ahorres desde la primera consulta.</h2>
                 <p className="text-base sm:text-lg font-light text-[color:var(--text)]">
                   Ajusta tus variables y compara el ahorro mensual estimado antes de contratar.
                   Utiliza nuestro simulador y compruébalo:
@@ -303,158 +350,251 @@ export default function Home() {
           </div>
         </section>
 
-        <section id="calculadora" className="w-full px-6 py-2"></section>
 
-{/*         <section id="calculadora" className="w-full px-6 py-20">
-          <div className="mx-auto w-full max-w-[1600px] rounded-2xl border border-[color:var(--border)] bg-[color:var(--benefits-bg)] p-6 sm:p-8 md:p-10">
-            <div className="grid w-full gap-10 lg:grid-cols-5 items-start">
-              <div className="lg:col-span-2 flex flex-col gap-8 text-[color:var(--text)] font-abc">
-                <div>
-                  <div className="text-3xl sm:text-4xl font-light">Entradas</div>
-                  <div className="text-lg sm:text-xl font-light mt-2">Ajusta tu operación (costos locales, estacionalidad).</div>
+        <SavingsCalculator />
+
+        <div className={`transition-opacity duration-1000 ease-out ${isFading ? "opacity-0" : "opacity-100"}`}>
+          <section id="nuestro-equipo" className="w-full px-6 py-2">
+            <div className="mx-auto w-full max-w-[1600px] rounded-2xl p-6 sm:p-8 md:p-10">
+              <div className="grid w-full gap-6 lg:grid-cols-5 items-start">
+                <div className="md:col-span-2 flex flex-col items-start gap-3">
+                  <h2 className="text-[color:var(--text)] text-3xl sm:text-3xl font-light font-abc">
+                    Nuestros planes:
+                    Atención veterinaria pensada como un servicio, no como una emergencia.
+                  </h2>
+                  <p className="text-base sm:text-lg font-light text-[color:var(--text)]">
+                    Desde un solo caballo hasta operaciones completas, sin contratos ni sorpresas.
+                  </p>
+                  <div className="mt-4 flex flex-col gap-2">
+                    <div className="relative inline-flex items-center rounded-full border border-[color:var(--border)] bg-[color:var(--card)] p-1 text-sm font-light w-fit shadow-sm overflow-hidden">
+                      <span
+                        className="absolute top-1 bottom-1 rounded-full bg-[color:var(--text)] transition-all duration-250 ease-out"
+                        style={{ width: `${thumbStyle.width}px`, left: `${thumbStyle.left}px` }}
+                        aria-hidden
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleBillingChange("monthly")}
+                        ref={monthlyRef}
+                        className={`relative z-10 px-5 py-2 rounded-full transition-colors duration-900 ${billingCycle === "monthly" ? "text-[color:var(--bg)]" : "text-[color:var(--text)]"}`}
+                        aria-pressed={billingCycle === "monthly"}
+                      >
+                        Mensual
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleBillingChange("annual")}
+                        ref={annualRef}
+                        className={`relative z-10 px-5 py-2 rounded-full transition-colors duration-900 ${billingCycle === "annual" ? "text-[color:var(--bg)]" : "text-[color:var(--text)]"}`}
+                        aria-pressed={billingCycle === "annual"}
+                      >
+                        Anual
+                      </button>
+                    </div>
+                    <p className="text-sm text-transparent bg-clip-text bg-gradient-to-r from-sky-400 to-emerald-400 drop-shadow-[0_0_10px_rgba(56,189,248,0.45)] drop-shadow-[0_0_14px_rgba(52,211,153,0.35)]">
+                      Elige anual y ahorra hasta $6,000 MXN al año vs. mensual.
+                    </p>
+                  </div>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <div className="flex flex-col gap-2">
-                    <div className="text-xl font-regular">5</div>
-                    <div className="h-px w-full bg-[color:var(--border)]" />
-                    <div className="text-sm font-light">Número de caballos</div>
-                  </div>
 
-                  <div className="flex flex-col gap-2">
-                    <div className="text-xl font-regular">1</div>
-                    <div className="h-px w-full bg-[color:var(--border)]" />
-                    <div className="text-sm font-light">Eventos aproximados por caballo</div>
-                  </div>
-
-                  <div className="flex flex-col gap-2">
-                    <div className="text-xl font-regular">60%</div>
-                    <div className="h-px w-full bg-[color:var(--border)]" />
-                    <div className="text-sm font-light">Nuestra tasa aproximada de resolución digital</div>
-                  </div>
-
-                  <div className="flex flex-col gap-2">
-                    <div className="text-xl font-regular">60%</div>
-                    <div className="h-px w-full bg-[color:var(--border)]" />
-                    <div className="text-sm font-light">Costo visita en sitio (MXN)</div>
-                  </div>
-
-                  <div className="flex flex-col gap-2">
-                    <div className="text-xl font-regular">$3,000</div>
-                    <div className="h-px w-full bg-[color:var(--border)]" />
-                    <div className="text-sm font-light">Costo de traslado por visita de tu veterinario (MXN)</div>
-                  </div>
-
-                  <div className="flex flex-col gap-2">
-                    <div className="text-xl font-regular">$3,000</div>
-                    <div className="h-px w-full bg-[color:var(--border)]" />
-                    <div className="text-sm font-light">Horas ahorradas por evento</div>
-                  </div>
-
-                  <div className="flex flex-col gap-2">
-                    <div className="text-xl font-regular">$3,000</div>
-                    <div className="h-px w-full bg-[color:var(--border)]" />
-                    <div className="text-sm font-light">Costo por hora de inactividad (MXN)</div>
-                  </div>
-
-                  <div className="flex flex-col gap-2">
-                    <div className="text-xl font-regular">$3,000 - Plan Cuadra</div>
-                    <div className="h-px w-full bg-[color:var(--border)]" />
-                    <div className="text-sm font-light">Costo membresía</div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="lg:col-span-3 flex flex-col gap-8 text-[color:var(--text)] font-abc">
-                <div>
-                  <div className="text-3xl sm:text-4xl font-light">Resultados</div>
-                  <div className="text-lg sm:text-xl font-light mt-2">Estimaciones mensuales.</div>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-                  <div className="flex flex-col gap-2">
-                    <div className="text-4xl font-light">5</div>
-                    <div className="h-px w-full bg-[color:var(--border)]" />
-                    <div className="text-sm font-normal">Eventos totales por mes (casos que atenderías).</div>
-                  </div>
-
-                  <div className="flex flex-col gap-2">
-                    <div className="text-4xl font-light [text-shadow:_0px_0px_20px_rgb(0_255_4_/_0.50)]">$30,000</div>
-                    <div className="h-px w-full bg-[color:var(--border)]" />
-                    <div className="text-sm font-normal">Ahorro total estimado en efectivo.</div>
-                  </div>
-
-                  <div className="flex flex-col gap-2">
-                    <div className="text-4xl font-light [text-shadow:_0px_0px_20px_rgb(0_255_4_/_0.50)]">60%</div>
-                    <div className="h-px w-full bg-[color:var(--border)]" />
-                    <div className="flex items-center gap-2 text-sm font-normal">
-                      <span className="h-1.5 w-1.5 rounded-full bg-green-500 shadow-[0px_0px_4px_1px_rgba(0,255,30,0.25)]" />
-                      <span>Ahorro por tiempo (casos resueltos sin desplazarte).</span>
+                <div className="flex items-start gap-4 text-[color:var(--text)] font-abc h-full">
+                  <div className="w-px self-stretch bg-[color:var(--border)]" />
+                  <div className="flex flex-col gap-2 h-full max-w-xs md:max-w-sm">
+                    <div className="flex flex-col gap-2 min-h-[136px]">
+                      <h3 className="text-5xl font-light leading-7 text-[color:var(--text)]">Starter</h3>
+                      <p className="text-2xl font-light leading-6 text-[color:var(--muted)] mt-auto">{getPrice("starter")}</p>
                     </div>
-                  </div>
 
-                  <div className="flex flex-col gap-2">
-                    <div className="text-4xl font-light [text-shadow:_0px_0px_20px_rgb(0_255_4_/_0.50)]">10</div>
-                    <div className="h-px w-full bg-[color:var(--border)]" />
-                    <div className="flex items-center gap-2 text-sm font-normal">
-                      <span className="h-1.5 w-1.5 rounded-full bg-green-500 shadow-[0px_0px_4px_1px_rgba(0,255,30,0.25)]" />
-                      <span>Payback (días para recuperar la membresía).</span>
+                    <div className="flex flex-col gap-1 text-[color:var(--text)] flex-1">
+                      <span className="text-md font-light leading-6 py-4 text-[color:var(--text)]">Ideal para dueños individuales que quieren orientación rápida sin pagar visitas innecesarias.</span>
+
+                      <span className="text-sm font-regular leading-6 py-4 text-[color:var(--text)]">Incluye:</span>
+                      <span className="text-sm font-light leading-6 text-[color:var(--muted)]">1 videollamada veterinaria al mes.<br />2 chats veterinarios al mes.<br />Pre-diagnóstico y direccionamiento con especialistas por medio de IA.<br />Historial clínico digital del caballo.<br />Planes de cuidado propuestos (gratis).</span>
+
+                      <span className="text-sm font-medium leading-6 py-4 text-[color:var(--text)]">Por qué conviene:</span>
+                      <span className="text-sm font-light leading-6 text-[color:var(--muted)]">Una sola consulta digital puede evitar una visita física innecesaria que cuesta más que todo el plan.</span>
+
+                      <span className="text-sm font-medium leading-6 py-4 text-[color:var(--text)]">Resultado:</span>
+                      <span className="text-sm font-light leading-6 text-[color:var(--muted)]">Tranquilidad, respuesta inmediata y ahorro desde el primer mes.</span>
                     </div>
-                  </div>
 
-                  <div className="flex flex-col gap-2">
-                    <div className="text-4xl font-light [text-shadow:_0px_0px_20px_rgb(0_255_4_/_0.50)]">3</div>
-                    <div className="h-px w-full bg-[color:var(--border)]" />
-                    <div className="flex items-center gap-2 text-sm font-normal">
-                      <span className="h-1.5 w-1.5 rounded-full bg-green-500 shadow-[0px_0px_4px_1px_rgba(0,255,30,0.25)]" />
-                      <span>Visitas evitadas / mes (traslados no requeridos).</span>
-                    </div>
-                  </div>
-
-                  <div className="flex flex-col gap-2">
-                    <div className="text-4xl font-light [text-shadow:_0px_0px_20px_rgb(0_255_4_/_0.50)]">60%</div>
-                    <div className="h-px w-full bg-[color:var(--border)]" />
-                    <div className="flex items-center gap-2 text-sm font-normal">
-                      <span className="h-1.5 w-1.5 rounded-full bg-green-500 shadow-[0px_0px_4px_1px_rgba(0,255,30,0.25)]" />
-                      <span>Ahorro por visitas (porcentaje de casos resueltos remoto).</span>
-                    </div>
-                  </div>
-
-                  <div className="flex flex-col gap-2">
-                    <div className="text-4xl font-light [text-shadow:_0px_0px_20px_rgb(0_255_4_/_0.50)]">$20,000</div>
-                    <div className="h-px w-full bg-[color:var(--border)]" />
-                    <div className="flex items-center gap-2 text-sm font-normal">
-                      <span className="h-1.5 w-1.5 rounded-full bg-green-500 shadow-[0px_0px_4px_1px_rgba(0,255,30,0.25)]" />
-                      <span>ROI mensual (retorno vs. costo del plan).</span>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center justify-center">
-                    <a
-                      href="#plans"
-                      className="inline-flex items-center justify-center rounded-[33.5px] bg-[color:var(--text)] px-8 py-4 text-sm font-medium text-[color:var(--bg)] transition-colors hover:bg-[color:var(--text)]/90"
+                    <button
+                      className="mt-6 inline-flex items-center justify-center rounded-full bg-[color:var(--text)] px-6 py-3 text-sm font-light text-[color:var(--bg)] hover:bg-[color:var(--text)]/90 transition-colors"
+                      type="button"
                     >
-                      Contratar plan
-                    </a>
+                      Contratar Starter por {getPrice("starter")}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex items-start gap-4 text-[color:var(--text)] font-abc h-full">
+                  <div className="w-px self-stretch bg-[color:var(--border)]" />
+                  <div className="flex flex-col gap-2 h-full max-w-xs md:max-w-sm">
+                    <div className="flex flex-col gap-2 min-h-[136px]">
+                      <h3 className="text-5xl font-light leading-7 text-[color:var(--text)]">Plus</h3>
+                      <p className="text-2xl font-light leading-6 text-[color:var(--muted)] mt-auto">{getPrice("plus")}</p>
+                    </div>
+
+                    <div className="flex flex-col gap-1 text-[color:var(--text)] flex-1">
+                      <span className="text-md font-light leading-6 py-4 text-[color:var(--text)]">Ideal para dueños individuales que quieren orientación rápida sin pagar visitas innecesarias.</span>
+
+                      <span className="text-sm font-regular leading-6 py-4 text-[color:var(--text)]">Incluye:</span>
+                      <span className="text-sm font-light leading-6 text-[color:var(--muted)]">2 videollamadas veterinarias al mes.<br />3 chats veterinarios al mes.<br />Pre-diagnóstico y direccionamiento con especialistas por medio de IA.<br />Historial clínico digital del caballo.<br />Planes de cuidado propuestos personalizados.<br />Prioridad de atención media</span>
+
+                      <span className="text-sm font-medium leading-6 py-4 text-[color:var(--text)]">Por qué conviene:</span>
+                      <span className="text-sm font-light leading-6 text-[color:var(--muted)]">Combina prevención + seguimiento continuo por menos de lo que cuesta una sola urgencia tradicional.</span>
+
+                      <span className="text-sm font-medium leading-6 py-4 text-[color:var(--text)]">Resultado:</span>
+                      <span className="text-sm font-light leading-6 text-[color:var(--muted)]">Menos improvisación, mejores decisiones y control total de la salud del caballo.</span>
+                    </div>
+
+                    <button
+                      className="mt-6 inline-flex items-center justify-center rounded-full bg-[color:var(--text)] px-6 py-3 text-sm font-light text-[color:var(--bg)] hover:bg-[color:var(--text)]/90 transition-colors"
+                      type="button"
+                    >
+                      Contratar Plus por {getPrice("plus")}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex items-start gap-4 text-[color:var(--text)] font-abc h-full">
+                  <div className="w-px self-stretch bg-[color:var(--border)]" />
+                  <div className="flex flex-col gap-2 h-full max-w-xs md:max-w-sm">
+                    <div className="flex flex-col gap-2 min-h-[136px]">
+                      <h3 className="text-5xl font-light leading-7 text-[color:var(--text)]">Cuadra 5</h3>
+                      <p className="text-2xl font-light leading-6 text-[color:var(--muted)] mt-auto">{getPrice("cuadra5")}</p>
+                    </div>
+
+                    <div className="flex flex-col gap-1 text-[color:var(--text)] flex-1">
+                      <span className="text-md font-light leading-6 py-4 text-[color:var(--text)]">Ideal para dueños individuales que quieren orientación rápida sin pagar visitas innecesarias.</span>
+
+                      <span className="text-sm font-regular leading-6 py-4 text-[color:var(--text)]">Incluye:</span>
+                      <span className="text-sm font-light leading-6 text-[color:var(--muted)]">Gestión de hasta 5 caballos en un solo plan.<br />6 chats veterinarios compartidos.<br />2 videollamadas veterinarias al mes.<br />Pre-diagnóstico y direccionamiento con especialistas por medio de IA.<br />Historial clínico individual por caballo.<br />Planes de cuidado propuestos por IA.<br />Atención prioritaria</span>
+
+                      <span className="text-sm font-medium leading-6 py-4 text-[color:var(--text)]">Impacto Real:</span>
+                      <span className="text-sm font-light leading-6 text-[color:var(--muted)]">Reduce visitas físicas, optimiza tiempos y centraliza toda la información médica de la cuadra.</span>
+
+                      <span className="text-sm font-medium leading-6 py-4 text-[color:var(--text)]">Resultado:</span>
+                      <span className="text-sm font-light leading-6 text-[color:var(--muted)]">Ahorros mensuales reales frente a atención tradicional fragmentada.</span>
+                    </div>
+
+                    <button
+                      className="mt-6 inline-flex items-center justify-center rounded-full bg-[color:var(--text)] px-6 py-3 text-sm font-light text-[color:var(--bg)] hover:bg-[color:var(--text)]/90 transition-colors"
+                      type="button"
+                    >
+                      Contratar Cuadra 5 por {getPrice("cuadra5")}
+                    </button>
                   </div>
                 </div>
               </div>
             </div>
-          </div>
-        </section> */}
+          </section>
 
-        <SavingsCalculator />
+          <section id="nuestro-equipo" className="w-full px-6">
+            <div className="mx-auto w-full max-w-[1600px] rounded-2xl p-6 sm:p-8 md:p-10">
+              <div className="grid w-full gap-6 lg:grid-cols-5 items-start">
+                <div className="md:col-span-2 flex flex-col items-start gap-3">
+                </div>
 
+                <div className="flex items-start gap-4 text-[color:var(--text)] font-abc h-full">
+                  <div className="w-px self-stretch bg-[color:var(--border)]" />
+                  <div className="flex flex-col gap-2 h-full max-w-xs md:max-w-sm">
+                    <div className="flex flex-col gap-2 min-h-[136px]">
+                      <h3 className="text-5xl font-light leading-7 text-[color:var(--text)]">Cuadra 15</h3>
+                      <p className="text-2xl font-light leading-6 text-[color:var(--muted)] mt-auto">{getPrice("cuadra15")}</p>
+                    </div>
 
-        <section id="ahorro" className="mx-auto w-full max-w-6xl px-6">
-          <h2 className="text-3xl font-semibold mb-6">Ahorro</h2>
-          <p className="text-lg text-[color:var(--muted)]">Próximamente: comparativos de ahorro.</p>
-        </section>
+                    <div className="flex flex-col gap-1 text-[color:var(--text)] flex-1">
+                      <span className="text-md font-light leading-6 py-4 text-[color:var(--text)]">Ideal para dueños individuales que quieren orientación rápida sin pagar visitas innecesarias.</span>
 
-        <section id="planes" className="mx-auto w-full max-w-6xl px-6">
-          <h2 className="text-3xl font-semibold mb-6">Planes</h2>
-          <p className="text-lg text-[color:var(--muted)]">Próximamente: detalles de planes.</p>
-        </section>
+                      <span className="text-sm font-regular leading-6 py-4 text-[color:var(--text)]">Incluye:</span>
+                      <span className="text-sm font-light leading-6 text-[color:var(--muted)]">Hasta 15 caballos bajo un mismo plan.<br />20 chats veterinarios mensuales.<br />6 videollamadas veterinarias.<br />Historial clínico avanzado por caballo.<br />Planes de cuidado propuestos y seguimiento.<br />Prioridad alta en atención</span>
+
+                      <span className="text-sm font-medium leading-6 py-4 text-[color:var(--text)]">Impacto Real:</span>
+                      <span className="text-sm font-light leading-6 text-[color:var(--muted)]">Ahorros operativos significativos al reducir urgencias presenciales y tiempos muertos.</span>
+
+                      <span className="text-sm font-medium leading-6 py-4 text-[color:var(--text)]">Resultado:</span>
+                      <span className="text-sm font-light leading-6 text-[color:var(--muted)]">Salud equina gestionada como sistema, no como emergencias aisladas.</span>
+                    </div>
+
+                    <button
+                      className="mt-6 inline-flex items-center justify-center rounded-full bg-[color:var(--text)] px-6 py-3 text-sm font-light text-[color:var(--bg)] hover:bg-[color:var(--text)]/90 transition-colors"
+                      type="button"
+                    >
+                      Contratar Cuadra 15 por {getPrice("cuadra15")}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex items-start gap-4 text-[color:var(--text)] font-abc h-full">
+                  <div className="w-px self-stretch bg-[color:var(--border)]" />
+                  <div className="flex flex-col gap-2 h-full max-w-xs md:max-w-sm">
+                    <div className="flex flex-col gap-2 min-h-[136px]">
+                      <h3 className="text-5xl font-light leading-12 text-[color:var(--text)]">Pro Entrenador</h3>
+                      <p className="text-2xl font-light leading-6 text-[color:var(--muted)] mt-auto">{getPrice("proEntrenador")}</p>
+                    </div>
+
+                    <div className="flex flex-col gap-1 text-[color:var(--text)] flex-1">
+                      <span className="text-md font-light leading-6 py-4 text-[color:var(--text)]">Ideal para dueños individuales que quieren orientación rápida sin pagar visitas innecesarias.</span>
+
+                      <span className="text-sm font-regular leading-6 py-4 text-[color:var(--text)]">Incluye:</span>
+                      <span className="text-sm font-light leading-6 text-[color:var(--muted)]">10 chats veterinarios al mes<br />3 videollamadas al mes<br />Pre-diagnóstico con IA para cada caso.<br />Seguimiento clínico continuo.<br />Historial estructurado por caballo.<br />Acceso preferente a veterinarios</span>
+
+                      <span className="text-sm font-medium leading-6 py-4 text-[color:var(--text)]">Por qué conviene:</span>
+                      <span className="text-sm font-light leading-6 text-[color:var(--muted)]">Permite resolver múltiples situaciones al mes sin depender de visitas presenciales constantes.</span>
+
+                      <span className="text-sm font-medium leading-6 py-4 text-[color:var(--text)]">Resultado:</span>
+                      <span className="text-sm font-light leading-6 text-[color:var(--muted)]">Más control, menos interrupciones operativas y mejor desempeño del equipo.</span>
+                    </div>
+
+                    <button
+                      className="mt-6 inline-flex items-center justify-center rounded-full bg-[color:var(--text)] px-6 py-3 text-sm font-light text-[color:var(--bg)] hover:bg-[color:var(--text)]/90 transition-colors"
+                      type="button"
+                    >
+                      Contratar Pro Entrenador por {getPrice("proEntrenador")}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex items-start gap-4 text-[color:var(--text)] font-abc h-full">
+                  <div className="w-px self-stretch bg-[color:var(--border)]" />
+                  <div className="flex flex-col gap-2 h-full max-w-xs md:max-w-sm">
+                    <div className="flex flex-col gap-2 min-h-[136px]">
+                      <h3 className="text-5xl font-light leading-12 text-[color:var(--text)]">Rancho de Trabajo</h3>
+                      <p className="text-2xl font-light leading-6 text-[color:var(--muted)] mt-auto">{getPrice("ranchoTrabajo")}</p>
+                    </div>
+
+                    <div className="flex flex-col gap-1 text-[color:var(--text)] flex-1">
+                      <span className="text-md font-light leading-6 py-4 text-[color:var(--text)]">Ideal para: ranchos, centros de trabajo y operaciones intensivas.</span>
+
+                      <span className="text-sm font-regular leading-6 py-4 text-[color:var(--text)]">Incluye:</span>
+                      <span className="text-sm font-light leading-6 text-[color:var(--muted)]">Gestión de hasta 25 caballos.<br />25 chats veterinarios mensuales.<br />5 videollamadas incluidas.<br />Historial clínico completo y centralizado.<br />Planes de cuidado preventivos.<br />Atención prioritaria máxima</span>
+
+                      <span className="text-sm font-medium leading-6 py-4 text-[color:var(--text)]">Impacto Real:</span>
+                      <span className="text-sm font-light leading-6 text-[color:var(--muted)]">Optimiza costos veterinarios, mejora la prevención y profesionaliza la toma de decisiones.</span>
+
+                      <span className="text-sm font-medium leading-6 py-4 text-[color:var(--text)]">Resultado:</span>
+                      <span className="text-sm font-light leading-6 text-[color:var(--muted)]">Menos urgencias, mejor planificación y control total de la operación.</span>
+                    </div>
+
+                    <button
+                      className="mt-6 inline-flex items-center justify-center rounded-full bg-[color:var(--text)] px-6 py-3 text-sm font-light text-[color:var(--bg)] hover:bg-[color:var(--text)]/90 transition-colors"
+                      type="button"
+                    >
+                      Contratar Rancho de Trabajo por {getPrice("ranchoTrabajo")}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div className="w-full py-16 text-center text-[color:var(--text)] text-2xl font-light leading-8 font-abc">
+          Sin cargos ocultos.<br />
+          Puedes cambiar o cancelar cuando quieras.
+        </div>
 
         <section id="faq" className="mx-auto w-full max-w-6xl px-6">
           <h2 className="text-3xl font-semibold mb-6">FAQ</h2>

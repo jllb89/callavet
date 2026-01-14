@@ -126,41 +126,49 @@ export default function SavingsCalculator() {
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-              <ResultCard title="Eventos totales por mes" value={totalEvents.toFixed(2)} />
-              <ResultCard title="Ahorro total estimado" value={fmt.format(totalSavings)} />
+              <ResultCard
+                title="Eventos totales por mes"
+                value={totalEvents.toFixed(2)}
+                description="Casos estimados que atenderías cada mes."
+              />
+              <ResultCard
+                title="Ahorro total estimado"
+                value={fmt.format(totalSavings)}
+                description="Ahorro mensual combinado (visitas evitadas + tiempo recuperado)."
+              />
               <ResultCard
                 title="Ahorro por tiempo"
                 value={fmt.format(savingsTime)}
-                description="Casos resueltos sin desplazar al equipo."
+                description="Valor del tiempo recuperado cuando el caso se resuelve de forma digital."
                 highlight
               />
               <ResultCard
                 title="Payback (días)"
                 value={paybackDays ? paybackDays.toFixed(1) : "—"}
-                description="Días para recuperar la membresía."
+                description="Días estimados para cubrir el costo mensual con los ahorros generados."
                 dot
               />
               <ResultCard
                 title="Visitas evitadas / mes"
                 value={avoidedVisits.toFixed(2)}
-                description="Traslados físicos que ya no harías."
+                description="Traslados físicos evitados gracias a la resolución digital de casos."
                 dot
               />
               <ResultCard
                 title="Ahorro por visitas"
                 value={fmt.format(savingsVisits)}
-                description="Costos evitados por consulta presencial."
+                description="Costos de consulta y traslado que dejas de pagar al resolver remoto."
                 highlight
               />
               <ResultCard
                 title="ROI mensual"
                 value={pct(roi)}
-                description="Retorno vs. costo del plan."
+                description="Retorno mensual estimado comparado contra el costo del plan."
               />
               <div className="flex items-center justify-center">
                 <a
                   href="#plans"
-                  className="inline-flex items-center justify-center rounded-[33.5px] bg-[color:var(--text)] px-8 py-4 text-sm font-medium text-[color:var(--bg)] transition-colors hover:bg-[color:var(--text)]/90"
+                  className="inline-flex items-center justify-center rounded-[33.5px] bg-[color:var(--text)] px-8 py-4 text-sm font-regular text-[color:var(--bg)] transition-colors hover:bg-[color:var(--text)]/90"
                 >
                   Contratar plan
                 </a>
@@ -187,11 +195,11 @@ function ResultCard({
   dot?: boolean;
 }) {
   return (
-    <div className={`flex flex-col gap-2 rounded-xl border border-[color:var(--border)] p-4 ${highlight ? "bg-[color:var(--overlay-soft)]" : ""}`}>
-      <div className="text-2xl font-light">{value}</div>
-      <div className="h-px w-full bg-[color:var(--border)]" />
-      <div className="flex items-center gap-2 text-sm font-normal text-[color:var(--text)]">
-        {dot && <span className="h-1.5 w-1.5 rounded-full bg-green-500 shadow-[0px_0px_4px_1px_rgba(0,255,30,0.25)]" />}
+    <div className="result-card flex flex-col gap-2 rounded-xl border border-[color:var(--border)] p-4">
+      <div className="text-4xl sm:text-5xl font-light">{value}</div>
+      <div className="h-px w-full bg-white/20" />
+      <div className="flex items-center gap-2 text-sm font-light">
+        {dot && <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-green-500 shadow-[0px_0px_4px_1px_rgba(0,255,30,0.25)]" />}
         <span>{description || title}</span>
       </div>
     </div>
