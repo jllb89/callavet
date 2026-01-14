@@ -351,4 +351,29 @@ consistent shape; overlay roller only appears on desktop hover.
 .feature-card-sticky.second-card { top: 58vh; }
 .feature-card-sticky.third-card { top: 64vh; }
 
+/* FAQ section theming */
+.faq-section {
+  background: linear-gradient(180deg, rgba(16, 16, 16, 0) 0%, rgba(28, 28, 28, 0.3) 100%);
+}
+.theme-light .faq-section {
+  background: linear-gradient(180deg, rgba(225, 225, 225, 0) 0%, rgba(208, 208, 208, 0.3) 100%);
+}
+
+.faq-text {
+  color: #ffffff;
+  cursor: pointer;
+}
+.theme-light .faq-text {
+  color: #111111;
+}
+
+.faq-divider {
+  width: 531px;
+  height: 1px;
+  background: linear-gradient(270deg, #101010 0%, #565656 100%);
+}
+.theme-light .faq-divider {
+  background: linear-gradient(270deg, #f2f2f2 0%, #9d9d9d 100%);
+}
+
 

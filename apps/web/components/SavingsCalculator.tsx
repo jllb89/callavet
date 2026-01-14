@@ -74,7 +74,7 @@ export default function SavingsCalculator() {
   const labelClass = "text-sm font-light text-[color:var(--text)]";
 
   return (
-    <section id="calculadora" className="w-full px-6 py-20">
+    <section id="calculadora" className="w-full px-6">
       <div className="mx-auto w-full max-w-[1600px] rounded-2xl border border-[color:var(--border)] bg-[color:var(--benefits-bg)] p-6 sm:p-8 md:p-10">
         <div className="grid w-full gap-10 lg:grid-cols-5 items-start">
           <div className="lg:col-span-2 flex flex-col gap-8 text-[color:var(--text)] font-abc">
@@ -135,6 +135,7 @@ export default function SavingsCalculator() {
                 title="Ahorro total estimado"
                 value={fmt.format(totalSavings)}
                 description="Ahorro mensual combinado (visitas evitadas + tiempo recuperado)."
+                highlight
               />
               <ResultCard
                 title="Ahorro por tiempo"
@@ -164,6 +165,7 @@ export default function SavingsCalculator() {
                 title="ROI mensual"
                 value={pct(roi)}
                 description="Retorno mensual estimado comparado contra el costo del plan."
+                highlight
               />
               <div className="flex items-center justify-center">
                 <a
@@ -194,9 +196,13 @@ function ResultCard({
   highlight?: boolean;
   dot?: boolean;
 }) {
+  const valueClasses = highlight
+    ? "text-4xl sm:text-5xl font-light text-transparent bg-clip-text bg-gradient-to-r from-sky-400 to-emerald-400 drop-shadow-[0_0_10px_rgba(56,189,248,0.35)] drop-shadow-[0_0_14px_rgba(52,211,153,0.25)]"
+    : "text-4xl sm:text-5xl font-light";
+
   return (
     <div className="result-card flex flex-col gap-2 rounded-xl border border-[color:var(--border)] p-4">
-      <div className="text-4xl sm:text-5xl font-light">{value}</div>
+      <div className={valueClasses}>{value}</div>
       <div className="h-px w-full bg-white/20" />
       <div className="flex items-center gap-2 text-sm font-light">
         {dot && <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-green-500 shadow-[0px_0px_4px_1px_rgba(0,255,30,0.25)]" />}

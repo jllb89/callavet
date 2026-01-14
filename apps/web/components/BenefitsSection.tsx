@@ -21,7 +21,7 @@ const benefits = [
         description: "Toda la información del caballo, siempre a la mano",
     },
     {
-        title: "Red de veterinarios aliados cuando sí se necesita presencia física",
+        title: "Red de veterinarios aliados cuando se requiera de presencia física",
         description: "La visita física correcta, en el momento correcto",
     },
 ];
