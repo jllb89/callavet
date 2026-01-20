@@ -536,7 +536,7 @@ consistent shape; overlay roller only appears on desktop hover.
 }
 
 .theme-light .faq-divider {
-  background: linear-gradient(270deg, #f2f2f2 0%, #1a1a1a 100%);
+  background: linear-gradient(270deg, #ffffff 0%, #bababa 100%);
 }
 
 .faq-chevron {
@@ -603,4 +603,23 @@ consistent shape; overlay roller only appears on desktop hover.
 
 .footer-logo {
   height: auto;
+}
+
+.footer-cta {
+  background: #000000;
+  color: #ffffff;
+  transition: background-color 160ms ease, color 160ms ease;
+}
+
+.footer-cta:hover {
+  background: rgba(0, 0, 0, 0.8);
+}
+
+.theme-light .footer-cta {
+  background: #000000;
+  color: #ffffff;
+}
+
+.theme-light .footer-cta:hover {
+  background: rgba(255, 255, 255, 0.85);
 }

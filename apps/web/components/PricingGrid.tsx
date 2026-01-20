@@ -26,7 +26,6 @@ const planCopy: Record<PlanKey, PlanContent> = {
     title: "Starter",
     summary: "Ideal para dueños individuales que quieren orientación rápida sin pagar visitas innecesarias.",
     includes: [
-      "1 videollamada veterinaria al mes.",
       "2 chats veterinarios al mes.",
       "Pre-diagnóstico y direccionamiento con especialistas por medio de IA.",
       "Historial clínico digital del caballo.",
@@ -41,11 +40,11 @@ const planCopy: Record<PlanKey, PlanContent> = {
     title: "Plus",
     summary: "Ideal para dueños individuales que quieren orientación rápida sin pagar visitas innecesarias.",
     includes: [
-      "2 videollamadas veterinarias al mes.",
+      "1 videollamada veterinarias al mes.",
       "3 chats veterinarios al mes.",
       "Pre-diagnóstico y direccionamiento con especialistas por medio de IA.",
       "Historial clínico digital del caballo.",
-      "Planes de cuidado propuestos personalizados.",
+      "Planes de cuidado propuestos personalizados con recordatorios de vacunas, desparacitación y coggins.",
       "Prioridad de atención media",
     ],
     rationaleTitle: "Por qué conviene:",

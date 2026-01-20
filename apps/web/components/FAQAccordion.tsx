@@ -40,7 +40,7 @@ export default function FAQAccordion({ faqs, className }: Props) {
               aria-expanded={isOpen}
             >
               <span className="relative inline-block">
-                <span className="faq-text text-xl font-light font-['ABC_Diatype']">{faq.question}</span>
+                <span className="faq-text text-xl font-light font-abc">{faq.question}</span>
                 <span className="nav-underline" />
               </span>
               <span className={`faq-chevron ${isOpen ? "open" : ""}`} aria-hidden>

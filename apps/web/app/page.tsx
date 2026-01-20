@@ -422,14 +422,14 @@ export default function Home() {
             </a>
           </div>
           </div>
-          <div className="brand-stamp text-center text-[400px] font-normal font-['ABC_Diatype']">Call a Vet</div>
+          <div className="brand-stamp text-center text-[400px] font-normal font-abc">Call a Vet</div>
         </section>
 
                 <footer id="footer" className="footer-overlap w-full px-6 pt-10 pb-16">
                   <div className="footer-rich mx-auto w-full max-w-[1400px]">
                     <div className="grid gap-10 md:grid-cols-[1.6fr_1fr]">
                       <div className="space-y-6">
-                        <div className="flex items-center gap-3 text-2xl font-normal font-['ABC_Diatype']">
+                        <div className="flex items-center gap-3 text-2xl font-normal font-abc">
                           <Image
                             src="/logo-navbar.svg"
                             alt="Call a Vet logo"
@@ -446,24 +446,24 @@ export default function Home() {
                           />
                         </div>
                         <div className="space-y-2">
-                          <div className="text-xl font-normal font-['ABC_Diatype'] leading-snug">¿Listo para atender a tu caballo en minutos?</div>
-                          <div className="text-sm font-normal font-['ABC_Diatype'] leading-6">Chat o videollamada con vets verificados + plan de cuidado y seguimiento.</div>
+                          <div className="text-xl font-normal font-abc leading-snug">¿Listo para atender a tu caballo en minutos?</div>
+                          <div className="text-sm font-normal font-abc leading-6">Chat o videollamada con vets verificados + plan de cuidado y seguimiento.</div>
                         </div>
                         <div className="flex flex-wrap items-center gap-3">
                           <a
                             href="#assist"
-                            className="inline-flex items-center justify-center rounded-[33.5px] bg-black px-6 py-2 text-sm font-normal font-['ABC_Diatype'] text-white hover:bg-black/80"
+                            className="footer-cta inline-flex items-center justify-center rounded-[33.5px] px-6 py-2 text-sm font-normal font-abc"
                           >
                             Obtener asistencia ahora
                           </a>
                           <a
                             href="#plans"
-                            className="inline-flex items-center justify-center rounded-[33.5px] bg-black px-6 py-2 text-sm font-normal font-['ABC_Diatype'] text-white hover:bg-black/80"
+                            className="footer-cta inline-flex items-center justify-center rounded-[33.5px] px-6 py-2 text-sm font-normal font-abc"
                           >
                             Ver planes
                           </a>
                         </div>
-                        <div className="space-y-2 text-xs font-['ABC_Diatype'] leading-5">
+                        <div className="space-y-2 text-xs font-abc leading-5">
                           <div className="font-medium">Aviso importante</div>
                           <div className="font-light">
                             Call a Vet brinda orientación veterinaria remota (chat o videollamada) con base en la información que compartes. No sustituye una consulta presencial ni un servicio de urgencias.
@@ -475,7 +475,7 @@ export default function Home() {
                         </div>
                       </div>
 
-                      <div className="flex flex-col gap-4 text-sm font-normal font-['ABC_Diatype'] md:items-end md:text-right md:ml-auto">
+                      <div className="flex flex-col gap-4 text-sm font-normal font-abc md:items-end md:text-right md:ml-auto">
                         <a className="hover:opacity-80" href="#terms">Términos y Condiciones</a>
                         <a className="hover:opacity-80" href="#refunds">Política de Reembolsos</a>
                         <a className="hover:opacity-80" href="#contact">Contacto</a>
@@ -484,7 +484,7 @@ export default function Home() {
                       </div>
                     </div>
 
-                    <div className="mt-12 flex flex-wrap items-center justify-between gap-4 text-sm font-normal font-['ABC_Diatype']">
+                    <div className="mt-12 flex flex-wrap items-center justify-between gap-4 text-sm font-normal font-abc">
                       <span>© 2025 Call a Vet. Todos los derechos reservados.</span>
                       <div className="flex items-center gap-3 text-current">
                         <svg
