@@ -113,16 +113,6 @@ export default function BenefitsSection() {
                 </div>
             </div>
 
-            <style jsx>{`
-        @keyframes benefitProgress {
-          from { width: 0%; }
-          to { width: 100%; }
-        }
-        @keyframes benefitFade {
-          from { opacity: 0; transform: translateY(6px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-      `}</style>
         </section>
     );
 }

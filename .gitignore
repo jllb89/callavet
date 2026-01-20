@@ -15,3 +15,12 @@ build
 **/.flutter-plugins
 **/.flutter-plugins-dependencies
 **/.packages
+
+# Ignore specific web app routes/files
+apps/web/app/marketing/
+apps/web/app/patientss/
+apps/web/app/start/
+apps/web/app/subscription/
+apps/web/app/video/
+apps/web/app/error.tsx
+apps/web/app/not-found.tsx
