@@ -576,3 +576,31 @@ consistent shape; overlay roller only appears on desktop hover.
   position: relative;
   z-index: 3;
 }
+
+.footer-rich {
+  color: #ffffff;
+}
+
+.footer-rich a {
+  color: inherit;
+}
+
+.theme-light .footer-rich {
+  color: #101010;
+}
+
+.footer-logo-light {
+  display: none;
+}
+
+.theme-light .footer-logo-light {
+  display: inline;
+}
+
+.theme-light .footer-logo-dark {
+  display: none;
+}
+
+.footer-logo {
+  height: auto;
+}
