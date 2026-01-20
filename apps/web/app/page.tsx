@@ -1,12 +1,55 @@
 "use client";
 
+import { useState } from "react";
 import Image from "next/image";
 import Navbar from "../components/Navbar";
 import BenefitsSection from "../components/BenefitsSection";
 import PricingGrid from "../components/PricingGrid";
 import SavingsCalculator from "../components/SavingsCalculator";
+import FAQAccordion from "../components/FAQAccordion";
 
 export default function Home() {
+  const [openFaqs, setOpenFaqs] = useState<Set<string>>(new Set());
+  const faqs = [
+    {
+      question: "¿Y si es una emergencia real?",
+      answer:
+        "Mostramos una barra de alerta con signos de urgencia (sangrado abundante, convulsiones, dificultad respiratoria). En esos casos te recomendamos acudir de inmediato a un centro físico.",
+    },
+    {
+      question: "Seguridad y privacidad",
+      answer: "Ciframos tu información y cumplimos buenas prácticas de protección de datos.",
+    },
+    {
+      question: "Soporte",
+      answer: "WhatsApp y correo. Tiempo de respuesta típico: minutos.",
+    },
+    {
+      question: "Migración y cambios",
+      answer: "Puedes cambiar de plan o cancelar en cualquier momento.",
+    },
+    {
+      question: "¿Puedo usar el chat sin video?",
+      answer: "Sí. Puedes resolver muchas dudas por chat. Si el caso lo amerita, te sugerimos video.",
+    },
+    {
+      question: "¿Qué pasa si me quedo sin chats o videos?",
+      answer: "Puedes contratar un extra o subir de plan.",
+    },
+    {
+      question: "¿Cómo funciona la facturación?",
+      answer: "Pagas con tarjeta de forma segura. Generamos comprobante.",
+    },
+    {
+      question: "¿Los planes incluyen varias mascotas/caballos?",
+      answer: "Sí, especialmente Cuadra está pensado para varios pacientes.",
+    },
+    {
+      question: "¿Cuándo recibo el plan de cuidado propuesto?",
+      answer: "Al finalizar la consulta; también puedes solicitar uno desde el perfil del paciente.",
+    },
+  ];
+
   return (
     <div className="min-h-screen bg-[color:var(--bg)] text-[color:var(--text)]">
       <header className="relative h-[1117px] w-screen overflow-hidden">
@@ -358,87 +401,41 @@ export default function Home() {
               <div className="hidden lg:block" />
               <div className="hidden lg:block" />
               <div className="lg:col-span-2 flex justify-center lg:justify-end">
-                <div className="relative w-full max-w-[531px] h-[600px]">
-                  <div className="absolute left-[275px] top-0 justify-start text-xl font-light font-['ABC_Diatype'] faq-text group">
-                    <span className="relative inline-block">
-                      ¿Y si es una emergencia real?
-                      <span className="nav-underline" />
-                    </span>
-                  </div>
-                  <div className="faq-divider absolute left-0 top-[55px]" />
-                  <div className="absolute left-[257px] top-[415px] justify-start text-xl font-light font-['ABC_Diatype'] faq-text group">
-                    <span className="relative inline-block">
-                      ¿Cómo funciona la facturación?
-                      <span className="nav-underline" />
-                    </span>
-                  </div>
-                  <div className="faq-divider absolute left-0 top-[465px]" />
-                  <div className="absolute left-[349px] top-[205px] justify-start text-xl font-light font-['ABC_Diatype'] faq-text group">
-                    <span className="relative inline-block">
-                      Migración y cambios
-                      <span className="nav-underline" />
-                    </span>
-                  </div>
-                  <div className="faq-divider absolute left-0 top-[254px]" />
-                  <div className="absolute left-[331px] top-[68px] justify-start text-xl font-light font-['ABC_Diatype'] faq-text group">
-                    <span className="relative inline-block">
-                      Seguridad y privacidad
-                      <span className="nav-underline" />
-                    </span>
-                  </div>
-                  <div className="faq-divider absolute left-0 top-[117px]" />
-                  <div className="absolute left-[206px] top-[491px] justify-start text-xl font-light font-['ABC_Diatype'] faq-text group">
-                    <span className="relative inline-block">
-                      ¿Los planes incluyen varios caballos?
-                      <span className="nav-underline" />
-                    </span>
-                  </div>
-                  <div className="faq-divider absolute left-0 top-[541px]" />
-                  <div className="absolute left-[124px] top-[561px] justify-start text-xl font-light font-['ABC_Diatype'] faq-text group">
-                    <span className="relative inline-block">
-                      ¿Cuándo recibo el plan de cuidado propuesto?
-                      <span className="nav-underline" />
-                    </span>
-                  </div>
-                  <div className="faq-divider absolute left-0 top-[611px]" />
-                  <div className="absolute left-[267px] top-[268px] justify-start text-xl font-light font-['ABC_Diatype'] faq-text group">
-                    <span className="relative inline-block">
-                      ¿Puedo usar el chat sin video?
-                      <span className="nav-underline" />
-                    </span>
-                  </div>
-                  <div className="faq-divider absolute left-0 top-[313px]" />
-                  <div className="absolute left-[460px] top-[134px] justify-start text-xl font-light font-['ABC_Diatype'] faq-text group">
-                    <span className="relative inline-block">
-                      Soporte
-                      <span className="nav-underline" />
-                    </span>
-                  </div>
-                  <div className="faq-divider absolute left-0 top-[186px]" />
-                  <div className="absolute left-[156px] top-[335px] justify-start text-xl font-light font-['ABC_Diatype'] faq-text group">
-                    <span className="relative inline-block">
-                      ¿Qué pasa si me quedo sin chats o videos?
-                      <span className="nav-underline" />
-                    </span>
-                  </div>
-                  <div className="faq-divider absolute left-0 top-[383px]" />
+                <div className="w-full max-w-[640px]">
+                  <FAQAccordion faqs={faqs} />
                 </div>
               </div>
+              
             </div>
+            <div className="faq-cta-row flex items-center justify-center gap-4 pt-40">
+            <a
+              href="#assist"
+              className="inline-flex items-center justify-center rounded-[33.5px] bg-[color:var(--text)] px-8 py-4 text-sm font-light text-[color:var(--bg)] hover:bg-[color:var(--text)]/90 transition-colors"
+            >
+              Obtener asistencia ahora
+            </a>
+            <a
+              href="#plans"
+              className="inline-flex items-center justify-center rounded-[33.5px]  bg-[color:var(--bg)] px-8 py-4 text-sm font-light text-[color:var(--text)] hover:bg-[color:var(--card)] transition-colors"
+            >
+              Ver planes
+            </a>
           </div>
+          </div>
+          <div className="brand-stamp text-center text-[400px] font-normal font-['ABC_Diatype']">Call a Vet</div>
         </section>
 
-        <footer id="footer" className="mx-auto w-full max-w-6xl px-6 border-t border-[color:var(--border)] pt-10">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between text-sm text-[color:var(--muted)]">
-            <span>© {new Date().getFullYear()} Call a Vet</span>
-            <div className="flex gap-4">
-              <a href="#plans" className="hover:text-[color:var(--text)]">Planes</a>
-              <a href="#faq" className="hover:text-[color:var(--text)]">FAQ</a>
-              <a href="#como-funciona" className="hover:text-[color:var(--text)]">Cómo funciona</a>
+                <footer id="footer" className="footer-overlap mx-auto w-full max-w-6xl px-6 pt-10">
+                  <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between text-sm text-[color:var(--muted)]">
+                    <span>© {new Date().getFullYear()} Call a Vet</span>
+                    <div className="flex gap-4">
+                      <a href="#plans" className="hover:text-[color:var(--text)]">Planes</a>
+                      <a href="#faq" className="hover:text-[color:var(--text)]">FAQ</a>
+                      <a href="#como-funciona" className="hover:text-[color:var(--text)]">Cómo funciona</a>
+                    </div>
+                  </div>
+                </footer>
+              </main>
             </div>
-          </div>
-        </footer>
-      </main>
-    </div>
-  );
-}
+          );
+        }

@@ -65,20 +65,38 @@ body {
   color: #000000;
   transition: background-color 150ms ease, color 150ms ease;
 }
-.btn-login:hover { background: rgba(255, 255, 255, 0.9); }
+
+.btn-login:hover {
+  background: rgba(255, 255, 255, 0.9);
+}
 
 /* Theme icon swaps */
-.icon-light { display: none; }
-.theme-light .icon-light { display: inline-block; }
-.theme-light .icon-dark { display: none; }
+.icon-light {
+  display: none;
+}
+
+.theme-light .icon-light {
+  display: inline-block;
+}
+
+.theme-light .icon-dark {
+  display: none;
+}
 
 /* Benefits image overlays */
 .benefits-overlay-dark {
-  background: linear-gradient(90deg, rgba(11,11,11,0) 0%, rgba(11, 11, 11, 0.547) 45%, rgb(11, 11, 11) 100%);
+  background: linear-gradient(90deg, rgba(11, 11, 11, 0) 0%, rgba(11, 11, 11, 0.547) 45%, rgb(11, 11, 11) 100%);
   display: block;
 }
-.benefits-overlay-light { display: none; }
-.theme-light .benefits-overlay-dark { display: none; }
+
+.benefits-overlay-light {
+  display: none;
+}
+
+.theme-light .benefits-overlay-dark {
+  display: none;
+}
+
 .theme-light .benefits-overlay-light {
   display: block;
   background: linear-gradient(90deg, rgba(242, 242, 242, 0) 0%, rgba(242, 242, 242, 0.135) 45%, rgb(242, 242, 242) 100%);
@@ -94,12 +112,11 @@ body {
   background: #1f1f1f;
   color: #ffffff;
 }
+
 .theme-light .result-card {
   background: #515151;
-  color: #ffffff;
 }
 
-/* Scroll-driven variables */
 :root {
   --hero-opacity: 1;
   --hero-bg-scale: 1;
@@ -107,7 +124,6 @@ body {
   --how-opacity: 0;
   --how2-opacity: 0;
   --how-scale: 1;
-  --how-ty: 0vh;
   --marquee-opacity: 1;
   --bg2-opacity: 1;
   --overlay-opacity: 1;
@@ -121,13 +137,26 @@ body {
 
 /* Custom animations */
 @keyframes fadeIn {
-  from { opacity: 0; transform: translateY(12px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
+
 /* Continuous left-to-right marquee */
 @keyframes marqueeLTR {
-  0% { transform: translateX(-100%); }
-  100% { transform: translateX(100%); }
+  0% {
+    transform: translateX(-100%);
+  }
+
+  100% {
+    transform: translateX(100%);
+  }
 }
 
 .marquee {
@@ -144,12 +173,22 @@ body {
   opacity: var(--bg2-opacity);
   transition: opacity 400ms ease;
 }
+
 .hero-overlay {
   opacity: var(--overlay-opacity);
   transition: opacity 400ms ease;
 }
-.marquee--30 { top: 23vh; transform: translateY(-50%); }
-.marquee--60 { top: 76vh; transform: translateY(-50%); }
+
+.marquee--30 {
+  top: 23vh;
+  transform: translateY(-50%);
+}
+
+.marquee--60 {
+  top: 76vh;
+  transform: translateY(-50%);
+}
+
 .marquee-track {
   display: inline-flex;
   gap: 6vw;
@@ -157,11 +196,25 @@ body {
   will-change: transform;
   animation: marqueeLTR 600s linear infinite;
 }
-.marquee-item { display: inline-block; }
-.marquee-track--rtl { animation-name: marqueeLTR; animation-direction: reverse; animation-delay: -900s; }
+
+.marquee-item {
+  display: inline-block;
+}
+
+.marquee-track--rtl {
+  animation-name: marqueeLTR;
+  animation-direction: reverse;
+  animation-delay: -900s;
+}
+
 @keyframes riseIn {
-  from { transform: translateY(12px); }
-  to { transform: translateY(0); }
+  from {
+    transform: translateY(12px);
+  }
+
+  to {
+    transform: translateY(0);
+  }
 }
 
 /* Hero scroll effects */
@@ -169,6 +222,7 @@ body {
   opacity: var(--hero-opacity);
   will-change: opacity;
 }
+
 .hero-bg {
   transform: translateY(var(--hero-bg-ty)) scale(var(--hero-bg-scale));
   transform-origin: 50% 50%;
@@ -180,6 +234,7 @@ body {
   opacity: 0;
   transition: opacity 600ms ease;
 }
+
 #features-intro.show {
   opacity: 1;
 }
@@ -197,6 +252,7 @@ body {
   transition: opacity 600ms ease, transform 400ms ease;
   will-change: transform, opacity;
 }
+
 .how-title-secondary {
   opacity: var(--how2-opacity);
   position: fixed;
@@ -209,6 +265,7 @@ body {
   transition: opacity 600ms ease, transform 400ms ease;
   will-change: transform, opacity;
 }
+
 .how-center {
   transform: translate(-50%, -50%) scale(var(--how-scale));
   transform-origin: 50% 50%;
@@ -218,40 +275,67 @@ body {
 /* Advanced nav roller with masking and clone character */
 .roller-mask {
   position: relative;
-  display: inline-grid; /* stack char + clone */
+  display: inline-grid;
+  /* stack char + clone */
   height: 1em;
   line-height: 1;
-  overflow: hidden; /* mask */
+  overflow: hidden;
+  /* mask */
 }
+
 /*
 Note: intentionally no per-character margin adjustment to preserve
 consistent shape; overlay roller only appears on desktop hover.
 */
 
 /* Layer swap: keep normal text by default; show roller on desktop hover */
-.link-normal { opacity: 1; transition: opacity 200ms ease; transition-delay: 420ms; }
-.link-roller { opacity: 0; pointer-events: none; transition: opacity 200ms ease; transition-delay: 420ms; will-change: opacity; }
-@media (min-width: 640px) {
-  .group:hover .link-roller { opacity: 1; transition-delay: 0ms; }
-  .group:hover .link-normal { opacity: 0; transition-delay: 60ms; }
+.link-normal {
+  opacity: 1;
+  transition: opacity 200ms ease;
+  transition-delay: 420ms;
 }
+
+.link-roller {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 200ms ease;
+  transition-delay: 420ms;
+  will-change: opacity;
+}
+
+@media (min-width: 640px) {
+  .group:hover .link-roller {
+    opacity: 1;
+    transition-delay: 0ms;
+  }
+
+  .group:hover .link-normal {
+    opacity: 0;
+    transition-delay: 60ms;
+  }
+}
+
 .roller-char,
 .roller-clone {
   display: block;
-  grid-area: 1 / 1; /* overlap in the same cell */
+  grid-area: 1 / 1;
+  /* overlap in the same cell */
   transform: translateY(0%);
   transition: transform 420ms ease, opacity 220ms ease;
   will-change: transform, opacity;
 }
+
 .roller-clone {
   position: relative;
   transform: translateY(110%);
   opacity: 0;
 }
+
 .group:hover .roller-char {
   transform: translateY(-110%);
   opacity: 0;
 }
+
 .group:hover .roller-clone {
   transform: translateY(0%);
   opacity: 1;
@@ -267,16 +351,19 @@ consistent shape; overlay roller only appears on desktop hover.
   background-color: currentColor;
   transform-origin: left;
   transform: scaleX(0);
-  transition: transform 800ms cubic-bezier(.3,.8,.4,1);
+  transition: transform 800ms cubic-bezier(.3, .8, .4, 1);
 }
+
 .group:hover .nav-underline {
   transform: scaleX(1);
 }
 
 .feature-shell {
   position: relative;
-  padding-top: 120px; /* space for icons overlay */
+  padding-top: 120px;
+  /* space for icons overlay */
 }
+
 .feature-visual {
   position: fixed;
   top: 9vh;
@@ -287,6 +374,7 @@ consistent shape; overlay roller only appears on desktop hover.
   z-index: 38;
   pointer-events: none;
 }
+
 .feature-visual-layer {
   position: absolute;
   inset: 0;
@@ -295,6 +383,7 @@ consistent shape; overlay roller only appears on desktop hover.
   object-fit: cover;
   transition: opacity 900ms ease;
 }
+
 .feature-icons {
   position: fixed;
   top: 0;
@@ -306,10 +395,12 @@ consistent shape; overlay roller only appears on desktop hover.
   z-index: 39;
   pointer-events: none;
 }
+
 .feature-icon-slot {
   display: flex;
   justify-content: center;
 }
+
 .feature-icon-layer {
   width: 72px;
   height: 72px;
@@ -324,37 +415,63 @@ consistent shape; overlay roller only appears on desktop hover.
   gap: 120px;
   min-height: 160vh;
 }
+
 @media (min-width: 768px) {
-  .feature-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .feature-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
+
 .feature-stick {
   position: sticky;
-  top: 60vh; /* stop before center */
+  top: 60vh;
+  /* stop before center */
   align-self: start;
 }
-.feature-stick-2 { margin-top: 16vh; }
-.feature-stick-3 { margin-top: 32vh; }
 
+.feature-stick-2 {
+  margin-top: 16vh;
+}
+
+.feature-stick-3 {
+  transform: translateY(-4px);
+  margin-top: 32vh;
+  transition:
+    opacity 320ms ease,
+    max-height 320ms ease,
+    margin-top 320ms ease,
+    transform 320ms ease;
+}
 
 /* Feature stack (first section) */
 .feature-stack {
   position: relative;
-  min-height: 220vh; /* room for sticky stagger */
+  min-height: 220vh;
+  /* room for sticky stagger */
+  transform: translateY(0);
 }
+
 .feature-card {
   position: sticky;
   top: 70vh;
   padding: 24px;
   border: none;
 }
-.feature-card-sticky.first-card { top: 52vh; }
-.feature-card-sticky.second-card { top: 58vh; }
-.feature-card-sticky.third-card { top: 64vh; }
+
+.feature-card-sticky.first-card {
+    transition:
+  top 58vh;
+}
+
+.feature-card-sticky.third-card {
+  top: 64vh;
+}
 
 /* FAQ section theming */
 .faq-section {
   background: linear-gradient(180deg, rgba(16, 16, 16, 0) 0%, rgba(28, 28, 28, 0.3) 100%);
 }
+
 .theme-light .faq-section {
   background: linear-gradient(180deg, rgba(225, 225, 225, 0) 0%, rgba(208, 208, 208, 0.3) 100%);
 }
@@ -363,17 +480,99 @@ consistent shape; overlay roller only appears on desktop hover.
   color: #ffffff;
   cursor: pointer;
 }
+
 .theme-light .faq-text {
   color: #111111;
 }
 
+.faq-item {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.faq-body {
+  overflow: hidden;
+  max-height: 0;
+  opacity: 0;
+  transition: max-height 260ms ease, opacity 220ms ease;
+}
+.faq-body.open {
+  max-height: 520px;
+  opacity: 1;
+}
+
+.faq-toggle {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  width: 100%;
+  padding: 8px 0;
+  background: none;
+  border: none;
+  text-align: right;
+  cursor: pointer;
+}
+.faq-toggle:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.4);
+  outline-offset: 4px;
+}
+.theme-light .faq-toggle:focus-visible {
+  outline: 2px solid rgba(0, 0, 0, 0.3);
+}
+
+.faq-answer {
+  max-width: 640px;
+  color: var(--muted);
+  font-size: 0.95rem;
+  margin-top: 0;
+}
+
 .faq-divider {
-  width: 531px;
+  width: 100%;
+  max-width: 640px;
   height: 1px;
-  background: linear-gradient(270deg, #101010 0%, #565656 100%);
+  margin-top: 4px;
+  background: linear-gradient(270deg, #101010 0%, #d6d6d6 100%);
 }
+
 .theme-light .faq-divider {
-  background: linear-gradient(270deg, #f2f2f2 0%, #9d9d9d 100%);
+  background: linear-gradient(270deg, #f2f2f2 0%, #1a1a1a 100%);
 }
 
+.faq-chevron {
+  font-size: 1.25rem;
+  color: inherit;
+  transition: transform 240ms ease, opacity 240ms ease;
+  opacity: 0.85;
+  margin-left: 8px;
+}
+.faq-chevron.open {
+  opacity: 1;
+}
 
+/* Brand stamp & footer overlap */
+.brand-stamp {
+  position: relative;
+  top: -4rem;
+  width: 100vw;
+  margin: 0 auto;
+  color: #101010;
+  line-height: 0;
+  text-align: center;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.theme-light .brand-stamp {
+  color: #ffffff;
+}
+
+.faq-cta-row {
+  position: relative;
+  z-index: 2;
+}
+
+.footer-overlap {
+  position: relative;
+  z-index: 3;
+}
