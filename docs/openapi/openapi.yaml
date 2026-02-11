@@ -4,6 +4,7 @@ info:
   version: 0.1.0
   description: >
     Public+private HTTP API for Call-a-Vet. Auth via Supabase JWT (Bearer).
+    Primary login is Phone OTP (Supabase Auth: send code → verify code → session).
     RLS enforced at the DB layer. Idempotency on critical mutations via `Idempotency-Key`.
 
 servers:
