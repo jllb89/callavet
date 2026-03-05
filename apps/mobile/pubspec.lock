@@ -69,10 +69,10 @@ packages:
     dependency: transitive
     description:
       name: characters
-      sha256: f71061c654a3380576a52b451dd5532377954cf9dbd272a78fc8479606670803
+      sha256: faf38497bda5ead2a8c7615f4f7939df04333478bf32e4173fcb06d428b5716b
       url: "https://pub.dev"
     source: hosted
-    version: "1.4.0"
+    version: "1.4.1"
   clock:
     dependency: transitive
     description:
@@ -105,6 +105,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "3.1.2"
+  country_picker:
+    dependency: "direct main"
+    description:
+      name: country_picker
+      sha256: "9b14c04f9a35e99f6de6bcbc453a556bb98345aecb481c7a0e843c94c2bee1f8"
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.0.27"
   crypto:
     dependency: transitive
     description:
@@ -174,6 +182,46 @@ packages:
     description: flutter
     source: sdk
     version: "0.0.0"
+  flutter_libphonenumber:
+    dependency: "direct main"
+    description:
+      name: flutter_libphonenumber
+      sha256: f3cafc1b9a6f9a70f41417cf11e551f98229b228a1bc37be554df544c4014284
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.7.0"
+  flutter_libphonenumber_android:
+    dependency: transitive
+    description:
+      name: flutter_libphonenumber_android
+      sha256: fd83952aacf392005400de5b7ba1e7ac5286fd84afbfbe0bb815bfa99e655044
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.0.0"
+  flutter_libphonenumber_darwin:
+    dependency: transitive
+    description:
+      name: flutter_libphonenumber_darwin
+      sha256: "3379477597c12682ee9cd9ae40589e831ce46ce1c766729cc50e0b4d7dbd8757"
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.1.0"
+  flutter_libphonenumber_platform_interface:
+    dependency: transitive
+    description:
+      name: flutter_libphonenumber_platform_interface
+      sha256: "9de1bd623103aefe1cb892693f85f6b2d2979ab9e6cce5d452ba10aa61ed41ed"
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.1.0"
+  flutter_libphonenumber_web:
+    dependency: transitive
+    description:
+      name: flutter_libphonenumber_web
+      sha256: "3b5be4d5325e8d670f241f02a11d4bf9fd832cb5460d6b6a6926b38861b5881f"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.3.0"
   flutter_lints:
     dependency: "direct dev"
     description:
@@ -332,18 +380,18 @@ packages:
     dependency: transitive
     description:
       name: matcher
-      sha256: dc58c723c3c24bf8d3e2d3ad3f2f9d7bd9cf43ec6feaa64181775e60190153f2
+      sha256: "12956d0ad8390bbcc63ca2e1469c0619946ccb52809807067a7020d57e647aa6"
       url: "https://pub.dev"
     source: hosted
-    version: "0.12.17"
+    version: "0.12.18"
   material_color_utilities:
     dependency: transitive
     description:
       name: material_color_utilities
-      sha256: f7142bb1154231d7ea5f96bc7bde4bda2a0945d2806bb11670e30b850d56bdec
+      sha256: "9c337007e82b1889149c82ed242ed1cb24a66044e30979c44912381e9be4c48b"
       url: "https://pub.dev"
     source: hosted
-    version: "0.11.1"
+    version: "0.13.0"
   meta:
     dependency: transitive
     description:
@@ -657,10 +705,10 @@ packages:
     dependency: transitive
     description:
       name: test_api
-      sha256: ab2726c1a94d3176a45960b6234466ec367179b87dd74f1611adb1f3b5fb9d55
+      sha256: "19a78f63e83d3a61f00826d09bc2f60e191bf3504183c001262be6ac75589fb8"
       url: "https://pub.dev"
     source: hosted
-    version: "0.7.7"
+    version: "0.7.8"
   typed_data:
     dependency: transitive
     description:
@@ -669,6 +717,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.4.0"
+  universal_io:
+    dependency: transitive
+    description:
+      name: universal_io
+      sha256: f63cbc48103236abf48e345e07a03ce5757ea86285ed313a6a032596ed9301e2
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.3.1"
   url_launcher:
     dependency: transitive
     description:

@@ -65,7 +65,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                         ),
                       ),
                       TextButton(
-                        onPressed: () => context.go('/home'),
+                            onPressed: () => context.go('/kyc'),
                         style: TextButton.styleFrom(foregroundColor: Colors.white),
                         child: const Text(
                           'saltar',
@@ -135,7 +135,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                                     curve: Curves.easeOut,
                                   );
                                 } else {
-                                  context.go('/home');
+                                  context.go('/kyc');
                                 }
                               },
                               behavior: HitTestBehavior.opaque,

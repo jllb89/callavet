@@ -16,6 +16,8 @@ dependencies:
   supabase_flutter: ^2.5.4
   flutter_phoenix: ^1.1.1
   flutter_svg: ^2.0.10+1
+  country_picker: ^2.0.25
+  flutter_libphonenumber: ^2.2.3
 
 flutter:
   uses-material-design: true
