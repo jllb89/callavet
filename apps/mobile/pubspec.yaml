@@ -18,6 +18,8 @@ dependencies:
   flutter_svg: ^2.0.10+1
   country_picker: ^2.0.25
   flutter_libphonenumber: ^2.2.3
+  geolocator: ^13.0.2
+  geocoding: ^3.0.0
 
 flutter:
   uses-material-design: true

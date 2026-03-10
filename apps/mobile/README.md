@@ -26,6 +26,7 @@ Use `--dart-define` (or a local `.vscode/launch.json`) for:
 - `SUPABASE_URL`
 - `SUPABASE_ANON_KEY`
 - `API_BASE_URL` (defaults to staging gateway `https://staging.call-a-vet.app`).
+- `BYPASS_OTP` (`true` = skip OTP step in KYC for dev, `false` = require OTP).
 
 ## Next steps
 - Pull design tokens/components from Figma and wire real UI.

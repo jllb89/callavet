@@ -69,20 +69,24 @@ class _SplashScreenState extends State<SplashScreen> {
                       AnimatedOpacity(
                         opacity: _showContent ? 1 : 0,
                         duration: const Duration(milliseconds: 300),
-                        child: Container(
-                          height: 38,
-                          padding: const EdgeInsets.symmetric(horizontal: 20),
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(33.5),
-                          ),
-                          child: Center(
-                            child: Text(
-                              'iniciar sesión',
-                              style: const TextStyle(
-                                color: Colors.black,
-                                fontSize: 14,
-                                fontWeight: FontWeight.w500,
+                        child: GestureDetector(
+                          onTap: () => context.go('/login'),
+                          behavior: HitTestBehavior.opaque,
+                          child: Container(
+                            height: 38,
+                            padding: const EdgeInsets.symmetric(horizontal: 20),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(33.5),
+                            ),
+                            child: Center(
+                              child: Text(
+                                'iniciar sesión',
+                                style: const TextStyle(
+                                  color: Colors.black,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                ),
                               ),
                             ),
                           ),

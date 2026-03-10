@@ -8,6 +8,8 @@ interface UserRow {
   id: string;
   email: string;
   full_name?: string;
+  country?: string | null;
+  state?: string | null;
   role?: string;
   is_verified?: boolean;
   created_at?: string;
@@ -74,12 +76,41 @@ export class MeController {
   async patchMe(@Body() body: PatchMeDto) {
     const sub = this.ensureAuthSub();
     const existingColumns = await this.listUserColumns();
+    const normalizedName = body.full_name ?? body.name;
     // Update name in users if present
-    if (body.name !== undefined && existingColumns.has('full_name')) {
+    if (normalizedName !== undefined && existingColumns.has('full_name')) {
       try {
-        await this.db.query(`update users set full_name = $1, updated_at = now() where id = $2`, [body.name, sub]);
+        await this.db.query(`update users set full_name = $1, updated_at = now() where id = $2`, [normalizedName, sub]);
       } catch (e: any) {
         return { updated: false, reason: 'update_name_failed', error: e?.message || String(e) };
+      }
+    }
+    if (body.email !== undefined && existingColumns.has('email')) {
+      try {
+        await this.db.query(`update users set email = $1, updated_at = now() where id = $2`, [body.email.toLowerCase(), sub]);
+      } catch (e: any) {
+        return { updated: false, reason: 'update_email_failed', error: e?.message || String(e) };
+      }
+    }
+    if ((body.country !== undefined || body.state !== undefined) && (existingColumns.has('country') || existingColumns.has('state'))) {
+      try {
+        const updates: string[] = [];
+        const values: any[] = [];
+        let idx = 1;
+        if (body.country !== undefined && existingColumns.has('country')) {
+          updates.push(`country = $${idx++}`);
+          values.push(body.country.toUpperCase());
+        }
+        if (body.state !== undefined && existingColumns.has('state')) {
+          updates.push(`state = $${idx++}`);
+          values.push(body.state);
+        }
+        if (updates.length) {
+          values.push(sub);
+          await this.db.query(`update users set ${updates.join(', ')}, updated_at = now() where id = $${idx}`, values);
+        }
+      } catch (e: any) {
+        return { updated: false, reason: 'update_location_failed', error: e?.message || String(e) };
       }
     }
     // Upsert timezone into billing_profiles if provided
@@ -104,6 +135,8 @@ export class MeController {
       id: u.id,
       email: u.email,
       name: (u as any).full_name || null,
+      country: (u as any).country || null,
+      state: (u as any).state || null,
       role: (u as any).role || null,
       timezone: bp?.timezone || null,
       billing: bp ? {
@@ -129,7 +162,7 @@ export class MeController {
   private async fetchUserRow(sub: string): Promise<UserRow | undefined> {
     // Try widest selection; progressively narrow if columns missing
     const attempts = [
-      `select id, email, full_name, role, created_at from users where id = $1 limit 1`,
+      `select id, email, full_name, country, state, role, created_at from users where id = $1 limit 1`,
       `select id, email, created_at from users where id = $1 limit 1`
     ];
     for (const sql of attempts) {

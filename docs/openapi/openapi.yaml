@@ -152,6 +152,157 @@ paths:
           description: OK
           content: { application/json: { schema: { type: object, properties: { now: { type: string, format: date-time } } } } }
 
+  /auth/otp/send:
+    post:
+      tags: [Auth & Profile]
+      summary: Send OTP with server-side guardrails
+      description: |
+        Sends OTP through Supabase Auth after passing guardrails.
+        Current policy (staging/prod defaults):
+        - Cooldown: 60s between sends per destination
+        - Per destination window: 3 sends / 15 minutes
+        - Daily cap: SMS 6/day per phone, Email 12/day per email
+        - Per IP: 20 sends / 15 minutes, 150/day
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [channel]
+              properties:
+                channel:
+                  type: string
+                  enum: [sms, email]
+                phone:
+                  type: string
+                  description: E.164 phone number. Required when channel=sms.
+                  example: +525542850675
+                email:
+                  type: string
+                  format: email
+                  description: Required when channel=email.
+                  example: user@example.com
+                shouldCreateUser:
+                  type: boolean
+                  default: false
+      responses:
+        "200":
+          description: OTP accepted and sent downstream
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  cooldownSeconds: { type: integer, example: 60 }
+                  message: { type: string }
+        "400":
+          description: Invalid payload (channel, phone or email format)
+        "429":
+          description: Guardrail blocked request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: false }
+                  code:
+                    type: string
+                    enum:
+                      - cooldown_active
+                      - too_many_requests_window
+                      - daily_cap_reached
+                      - ip_rate_limited_window
+                      - ip_rate_limited_daily
+                      - otp_send_blocked
+                  message: { type: string }
+                  retryAfterSeconds: { type: integer, nullable: true }
+
+  /auth/otp/verify-lock:
+    post:
+      tags: [Auth & Profile]
+      summary: Check temporary verify lock before OTP verification
+      description: |
+        Enforces wrong-code lock policy.
+        Current policy: lock after 5 failed verify attempts within 15 minutes;
+        lock duration 15 minutes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [channel]
+              properties:
+                channel:
+                  type: string
+                  enum: [sms, email]
+                phone:
+                  type: string
+                  description: Required when channel=sms.
+                email:
+                  type: string
+                  format: email
+                  description: Required when channel=email.
+      responses:
+        "200":
+          description: Not locked; verification can proceed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+        "429":
+          description: Verify is temporarily locked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: false }
+                  code:
+                    type: string
+                    enum: [verify_locked, otp_verify_locked]
+                  message: { type: string }
+                  retryAfterSeconds: { type: integer, nullable: true }
+
+  /auth/otp/verify-attempt:
+    post:
+      tags: [Auth & Profile]
+      summary: Record OTP verification attempt outcome
+      description: Records successful/failed verify attempts for lockout logic and telemetry.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [channel, success]
+              properties:
+                channel:
+                  type: string
+                  enum: [sms, email]
+                phone:
+                  type: string
+                  description: Required when channel=sms.
+                email:
+                  type: string
+                  format: email
+                  description: Required when channel=email.
+                success:
+                  type: boolean
+      responses:
+        "200":
+          description: Attempt recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+
   /me:
     get:
       tags: [Auth & Profile]
@@ -2059,8 +2210,12 @@ components:
           schema:
             type: object
             properties:
+              name: { type: string }
               full_name: { type: string }
+              email: { type: string, format: email }
               phone: { type: string }
+              country: { type: string, description: "ISO 3166-1 alpha-2" }
+              state: { type: string }
               language: { type: string, enum: [es, en] }
               timezone: { type: string }
     BillingProfile:
@@ -2499,6 +2654,8 @@ components:
         email: { type: string, format: email }
         full_name: { type: string }
         phone: { type: string }
+        country: { type: string }
+        state: { type: string }
         role: { type: string, enum: [user, vet, admin] }
     BillingProfile:
       type: object
