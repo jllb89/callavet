@@ -1,7 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:country_picker/country_picker.dart';
 import 'package:country_picker/src/country_list_view.dart';
+import 'package:cav_mobile/src/core/config/environment.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:flutter/material.dart';
@@ -165,7 +168,12 @@ class _OtpAttemptGuard {
 }
 
 class KycScreen extends StatefulWidget {
-  const KycScreen({super.key});
+  const KycScreen({
+    super.key,
+    this.startAtProfile = false,
+  });
+
+  final bool startAtProfile;
 
   @override
   State<KycScreen> createState() => _KycScreenState();
@@ -186,6 +194,8 @@ class _KycScreenState extends State<KycScreen> {
   String _islandText = '';
   double _islandOpacity = 0;
 
+  int get _profilePageIndex => _bypassOtpValidationForDev ? 1 : 2;
+
   @override
   void initState() {
     super.initState();
@@ -194,6 +204,45 @@ class _KycScreenState extends State<KycScreen> {
     final fullName = currentUser?.userMetadata?['full_name'];
     if (fullName is String && fullName.trim().isNotEmpty) {
       _nameController.text = fullName.trim();
+    }
+    unawaited(_prefillProfileFromPublicUser());
+    if (widget.startAtProfile) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _pageController.jumpToPage(_profilePageIndex);
+        setState(() => _pageIndex = _profilePageIndex);
+      });
+    }
+  }
+
+  Future<void> _prefillProfileFromPublicUser() async {
+    final user = Supabase.instance.client.auth.currentUser;
+    if (user == null) return;
+    try {
+      final row = await Supabase.instance.client
+          .from('users')
+          .select('full_name,email,state,country')
+          .eq('id', user.id)
+          .maybeSingle();
+      if (row == null || !mounted) return;
+
+      final fullName = (row['full_name'] as String?)?.trim();
+      final email = (row['email'] as String?)?.trim();
+      final state = (row['state'] as String?)?.trim();
+
+      setState(() {
+        if ((fullName ?? '').isNotEmpty && _nameController.text.trim().isEmpty) {
+          _nameController.text = fullName!;
+        }
+        if ((email ?? '').isNotEmpty && _emailController.text.trim().isEmpty) {
+          _emailController.text = email!;
+        }
+        if ((state ?? '').isNotEmpty && _stateController.text.trim().isEmpty) {
+          _stateController.text = state!;
+        }
+      });
+    } catch (err) {
+      _kycFlowLog('Profile prefill lookup failed: $err');
     }
   }
 
@@ -344,9 +393,12 @@ class _KycScreenState extends State<KycScreen> {
     }
     setState(() => _isSavingProfile = true);
     try {
+      final normalizedEmail = email.trim().toLowerCase();
+      await _sendAuthEmailConfirmationIfNeeded(normalizedEmail);
+
       final updatePayload = {
         'full_name': fullName.trim(),
-        'email': email.trim().toLowerCase(),
+        'email': normalizedEmail,
         'country': countryCode.trim().toUpperCase(),
         'state': state.trim(),
       };
@@ -384,6 +436,70 @@ class _KycScreenState extends State<KycScreen> {
       if (mounted) {
         setState(() => _isSavingProfile = false);
       }
+    }
+  }
+
+  Future<void> _sendAuthEmailConfirmationIfNeeded(String rawEmail) async {
+    final email = rawEmail.trim().toLowerCase();
+    if (email.isEmpty) return;
+
+    final client = Supabase.instance.client;
+    final currentUser = client.auth.currentUser;
+    if (currentUser == null) {
+      _kycFlowLog('Skipping auth email confirmation request: no active auth user');
+      return;
+    }
+
+    final currentEmail = (currentUser.email ?? '').trim().toLowerCase();
+    final isAlreadyVerified = currentUser.emailConfirmedAt != null;
+    if (currentEmail == email && isAlreadyVerified) {
+      _kycFlowLog('Auth email already linked and verified: $email');
+      return;
+    }
+
+    try {
+      await _requestEmailConfirmationViaGateway(email);
+      _kycFlowLog('Requested Supabase confirmation email via gateway for auth.users email=$email');
+      unawaited(_showIslandMessage('te enviamos un correo para confirmar tu email'));
+      return;
+    } catch (err) {
+      _kycFlowLog('Gateway confirmation request failed, falling back app-side for $email: $err');
+    }
+
+    try {
+      await client.auth.updateUser(
+        UserAttributes(email: email),
+      );
+      _kycFlowLog('Requested Supabase confirmation email for auth.users email=$email');
+      unawaited(_showIslandMessage('te enviamos un correo para confirmar tu email'));
+    } catch (err) {
+      _kycFlowLog('Failed requesting Supabase confirmation email for $email: $err');
+    }
+  }
+
+  Future<void> _requestEmailConfirmationViaGateway(String email) async {
+    final sessionToken = Supabase.instance.client.auth.currentSession?.accessToken;
+    if (sessionToken == null || sessionToken.isEmpty) {
+      throw StateError('missing auth session token for gateway email confirmation request');
+    }
+
+    final uri = Uri.parse('${Environment.apiBaseUrl}/auth/otp/email/confirm-request');
+    final http = HttpClient();
+    try {
+      final req = await http.postUrl(uri);
+      req.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+      req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $sessionToken');
+      req.add(utf8.encode(jsonEncode({'email': email})));
+
+      final res = await req.close();
+      final body = await utf8.decoder.bind(res).join();
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        throw StateError(
+          'gateway email confirmation request failed status=${res.statusCode} body=$body',
+        );
+      }
+    } finally {
+      http.close(force: true);
     }
   }
 

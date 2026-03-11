@@ -6,6 +6,7 @@ import {
   HttpStatus,
   Post,
   Req,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { DbService } from '../db/db.service';
 
@@ -29,6 +30,10 @@ type VerifyLockBody = {
   channel: OtpChannel;
   phone?: string;
   email?: string;
+};
+
+type EmailConfirmBody = {
+  email: string;
 };
 
 @Controller('auth/otp')
@@ -128,6 +133,52 @@ export class OtpController {
           : HttpStatus.BAD_GATEWAY,
       );
     }
+  }
+
+  private async updateSupabaseUserWithBearer(
+    userBearerToken: string,
+    payload: Record<string, any>,
+  ) {
+    const { supabaseUrl, authKey } = this.getSupabaseAuthConfig();
+    const response = await fetch(`${supabaseUrl}/auth/v1/user`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        apikey: authKey,
+        Authorization: `Bearer ${userBearerToken}`,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const text = await response.text();
+    let json: any = null;
+    if (text) {
+      try {
+        json = JSON.parse(text);
+      } catch {
+        json = null;
+      }
+    }
+
+    if (!response.ok) {
+      const message =
+        json?.msg ||
+        json?.error_description ||
+        json?.error ||
+        'No se pudo solicitar confirmación de email.';
+      throw new HttpException(
+        {
+          ok: false,
+          code: 'supabase_user_update_error',
+          message,
+        },
+        response.status >= 400 && response.status < 500
+          ? response.status
+          : HttpStatus.BAD_GATEWAY,
+      );
+    }
+
+    return json;
   }
 
   @Post('send')
@@ -264,5 +315,52 @@ export class OtpController {
     );
 
     return { ok: true };
+  }
+
+  @Post('email/confirm-request')
+  async requestEmailConfirmation(@Body() body: EmailConfirmBody, @Req() req: any) {
+    const authz = (req?.headers?.authorization || '').toString();
+    if (!authz.startsWith('Bearer ')) {
+      throw new UnauthorizedException('Missing bearer token');
+    }
+
+    const claimsSub = req?.authClaims?.sub?.toString?.();
+    if (!claimsSub) {
+      throw new UnauthorizedException('Missing authenticated user claims');
+    }
+
+    const normalized = this.normalizeEmail(body.email || '');
+    const email = normalized.email;
+
+    const userCheck = await this.db.query<{
+      email: string | null;
+      email_confirmed_at: string | null;
+    }>(
+      `select email, email_confirmed_at
+       from auth.users
+       where id = $1
+       limit 1`,
+      [claimsSub],
+    );
+
+    const current = userCheck.rows[0];
+    const currentEmail = (current?.email || '').trim().toLowerCase();
+    const alreadyVerified = !!current?.email_confirmed_at;
+    if (currentEmail === email && alreadyVerified) {
+      return {
+        ok: true,
+        message: 'Email ya verificado.',
+        status: 'already_verified',
+      };
+    }
+
+    const bearer = authz.slice(7).trim();
+    await this.updateSupabaseUserWithBearer(bearer, { email });
+
+    return {
+      ok: true,
+      message: 'Correo de confirmación enviado.',
+      status: 'confirmation_requested',
+    };
   }
 }

@@ -15,6 +15,10 @@ const bool _loginFlowDebug = bool.fromEnvironment(
   'KYC_FLOW_DEBUG',
   defaultValue: true,
 );
+const bool _bypassOtpValidationForDev = bool.fromEnvironment(
+  'BYPASS_OTP',
+  defaultValue: false,
+);
 
 void _loginLog(String message) {
   if (_loginFlowDebug) {
@@ -50,6 +54,7 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _isPhoneValid = false;
   String? _normalizedPhone;
   Timer? _phoneValidationDebounce;
+  Timer? _emailValidationDebounce;
   Timer? _resendTimer;
 
   int _step = 0;
@@ -62,6 +67,10 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _isVerifyingOtp = false;
   String? _errorText;
   bool _gatewayOtpUnavailable = false;
+  bool _showEmailValidationError = false;
+  bool _showIsland = false;
+  String _islandText = '';
+  double _islandOpacity = 0;
 
   @override
   void initState() {
@@ -72,6 +81,7 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   void dispose() {
     _phoneValidationDebounce?.cancel();
+    _emailValidationDebounce?.cancel();
     _resendTimer?.cancel();
     _phoneController.dispose();
     _emailController.dispose();
@@ -83,6 +93,9 @@ class _LoginScreenState extends State<LoginScreen> {
   Future<void> _initPhoneLibrary() async {
     await init(overrides: {'MX': _buildMexicoOverride()});
     _syncSelectedCountryData();
+    if (mounted) {
+      setState(() {});
+    }
     _schedulePhoneValidation();
   }
 
@@ -168,6 +181,24 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _isValidEmail(String input) {
     final email = input.trim();
     return RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$').hasMatch(email);
+  }
+
+  void _scheduleEmailValidation() {
+    _emailValidationDebounce?.cancel();
+    if (_showEmailValidationError) {
+      setState(() => _showEmailValidationError = false);
+    }
+    final text = _emailController.text.trim();
+    if (text.isEmpty) return;
+
+    _emailValidationDebounce = Timer(const Duration(milliseconds: 700), () {
+      if (!mounted) return;
+      final shouldShow = _emailController.text.trim().isNotEmpty &&
+          !_isValidEmail(_emailController.text.trim());
+      if (_showEmailValidationError != shouldShow) {
+        setState(() => _showEmailValidationError = shouldShow);
+      }
+    });
   }
 
   void _startResendCooldown([int seconds = 60]) {
@@ -404,6 +435,105 @@ class _LoginScreenState extends State<LoginScreen> {
     return false;
   }
 
+  bool _isProfileIncomplete(Map<String, dynamic>? row) {
+    if (row == null) return true;
+    final fullName = (row['full_name'] as String?)?.trim() ?? '';
+    final email = (row['email'] as String?)?.trim() ?? '';
+    final country = (row['country'] as String?)?.trim() ?? '';
+    final state = (row['state'] as String?)?.trim() ?? '';
+    return fullName.isEmpty || email.isEmpty || country.isEmpty || state.isEmpty;
+  }
+
+  Future<void> _sendAuthEmailConfirmationIfNeeded(
+    String? rawEmail, {
+    required String reason,
+  }) async {
+    final email = (rawEmail ?? '').trim().toLowerCase();
+    if (email.isEmpty) return;
+
+    final client = Supabase.instance.client;
+    final currentUser = client.auth.currentUser;
+    if (currentUser == null) {
+      _loginLog('[$reason] Skipping email confirmation request: no active auth user');
+      return;
+    }
+
+    final currentEmail = (currentUser.email ?? '').trim().toLowerCase();
+    final isAlreadyVerified = currentUser.emailConfirmedAt != null;
+    if (currentEmail == email && isAlreadyVerified) {
+      _loginLog('[$reason] Email already linked and verified in auth.users: $email');
+      return;
+    }
+
+    try {
+      await _gatewayPost('/auth/otp/email/confirm-request', {'email': email});
+      _loginLog('[$reason] Requested confirmation email via gateway for auth.users email=$email');
+      unawaited(_showIslandMessage('te enviamos un correo para confirmar tu email'));
+      return;
+    } on _GatewayOtpException catch (err) {
+      _loginLog('[$reason] Gateway email confirmation request failed (will fallback app-side): ${err.message}');
+    } catch (err) {
+      _loginLog('[$reason] Gateway email confirmation request error (will fallback app-side): $err');
+    }
+
+    try {
+      await client.auth.updateUser(
+        UserAttributes(email: email),
+      );
+      _loginLog('[$reason] Requested Supabase confirmation email for auth.users email=$email');
+      unawaited(_showIslandMessage('te enviamos un correo para confirmar tu email'));
+    } catch (err) {
+      _loginLog('[$reason] Failed requesting Supabase confirmation email for $email: $err');
+    }
+  }
+
+  Future<void> _showIslandMessage(String text) async {
+    if (!mounted) return;
+    setState(() {
+      _showIsland = true;
+      _islandText = text;
+      _islandOpacity = 0;
+    });
+    await Future.delayed(const Duration(milliseconds: 30));
+    if (!mounted) return;
+    setState(() => _islandOpacity = 1);
+    await Future.delayed(const Duration(milliseconds: 1000));
+    if (!mounted) return;
+    setState(() => _islandOpacity = 0);
+    await Future.delayed(const Duration(milliseconds: 280));
+    if (!mounted) return;
+    setState(() => _showIsland = false);
+  }
+
+  Future<void> _routeAfterLogin({
+    required String userId,
+    Map<String, dynamic>? userRow,
+  }) async {
+    final client = Supabase.instance.client;
+    final row = userRow ??
+        await client
+            .from('users')
+            .select('id, phone, email, full_name, country, state')
+            .eq('id', userId)
+            .maybeSingle();
+
+    await _sendAuthEmailConfirmationIfNeeded(
+      (row?['email'] as String?) ?? _emailForOtp,
+      reason: 'post-login-route',
+    );
+
+    final incomplete = _isProfileIncomplete(row);
+    _loginLog('Post-login profile completeness check userId=$userId incomplete=$incomplete row=$row');
+    if (!mounted) return;
+    if (incomplete) {
+      _loginLog('Routing userId=$userId to /kyc?start=profile due to incomplete profile');
+      context.go('/kyc?start=profile');
+      return;
+    }
+    _loginLog('Routing userId=$userId to /home (profile complete)');
+    context.go('/home');
+  }
+
   Future<void> _sendOtp() async {
     if (_isSendingOtp) return;
     final normalized = _normalizedPhone;
@@ -419,6 +549,24 @@ class _LoginScreenState extends State<LoginScreen> {
         setState(() {
           _errorText = 'No encontramos una cuenta con ese número. Toca crear una cuenta.';
         });
+        return;
+      }
+
+      if (_bypassOtpValidationForDev) {
+        _loginLog('BYPASS_OTP=true, skipping login OTP verify and checking profile completeness');
+        final userId = Supabase.instance.client.auth.currentUser?.id ?? _existingUserId;
+        if (userId == null) {
+          if (!mounted) return;
+          context.go('/home');
+          return;
+        }
+        final row = await Supabase.instance.client
+            .from('users')
+            .select('id, phone, email, full_name, country, state')
+            .eq('id', userId)
+            .maybeSingle();
+        if (!mounted) return;
+        await _routeAfterLogin(userId: userId, userRow: row);
         return;
       }
 
@@ -491,6 +639,24 @@ class _LoginScreenState extends State<LoginScreen> {
         setState(() {
           _errorText = 'No encontramos una cuenta con ese correo. Toca crear una cuenta.';
         });
+        return;
+      }
+
+      if (_bypassOtpValidationForDev) {
+        _loginLog('BYPASS_OTP=true, skipping login OTP verify (email path) and checking profile completeness');
+        final userId = Supabase.instance.client.auth.currentUser?.id ?? _existingUserId;
+        if (userId == null) {
+          if (!mounted) return;
+          context.go('/home');
+          return;
+        }
+        final row = await Supabase.instance.client
+            .from('users')
+            .select('id, phone, email, full_name, country, state')
+            .eq('id', userId)
+            .maybeSingle();
+        if (!mounted) return;
+        await _routeAfterLogin(userId: userId, userRow: row);
         return;
       }
 
@@ -609,7 +775,7 @@ class _LoginScreenState extends State<LoginScreen> {
       _loginLog('public.users row after login verify: $existingRow');
 
       if (!mounted) return;
-      context.go('/home');
+        await _routeAfterLogin(userId: userId, userRow: existingRow);
     } on _GatewayOtpException catch (err) {
       _loginLog('verify-lock gateway error: ${err.message} code=${err.code} retry=${err.retryAfterSeconds}');
       setState(() => _errorText = _retryMessage(err.message, err.retryAfterSeconds));
@@ -755,45 +921,48 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
         ],
         const Spacer(),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.end,
-          children: [
-            const Text(
-              'continuar',
-              textAlign: TextAlign.right,
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 13,
-                fontFamily: 'ABC Diatype',
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-            const SizedBox(width: 10),
-            SizedBox(
-              width: 45,
-              height: 45,
-              child: ElevatedButton(
-                onPressed: (phoneReady && !_isSendingOtp) ? _sendOtp : null,
-                style: ElevatedButton.styleFrom(
-                  shape: const CircleBorder(),
-                  padding: EdgeInsets.zero,
-                  backgroundColor: Colors.white,
-                  foregroundColor: const Color(0xFF101010),
-                  disabledBackgroundColor: Colors.white.withOpacity(0.2),
+        Padding(
+          padding: const EdgeInsets.only(bottom: 16),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              const Text(
+                'continuar',
+                textAlign: TextAlign.right,
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 13,
+                  fontFamily: 'ABC Diatype',
+                  fontWeight: FontWeight.w500,
                 ),
-                child: _isSendingOtp
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF101010)),
-                        ),
-                      )
-                    : const Icon(Icons.arrow_forward, size: 18),
               ),
-            ),
-          ],
+              const SizedBox(width: 10),
+              SizedBox(
+                width: 45,
+                height: 45,
+                child: ElevatedButton(
+                  onPressed: (phoneReady && !_isSendingOtp) ? _sendOtp : null,
+                  style: ElevatedButton.styleFrom(
+                    shape: const CircleBorder(),
+                    padding: EdgeInsets.zero,
+                    backgroundColor: Colors.white,
+                    foregroundColor: const Color(0xFF101010),
+                    disabledBackgroundColor: Colors.white.withOpacity(0.2),
+                  ),
+                  child: _isSendingOtp
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF101010)),
+                          ),
+                        )
+                      : const Icon(Icons.arrow_forward, size: 18),
+                ),
+              ),
+            ],
+          ),
         ),
       ],
     );
@@ -802,7 +971,9 @@ class _LoginScreenState extends State<LoginScreen> {
   Widget _buildOtpStep() {
     final canSubmit = _otpController.text.trim().length == 6 && !_isVerifyingOtp;
     final destinationLabel = _otpChannel == 'sms' ? _phoneE164 : _emailForOtp;
+    final emailFallbackEnabled = _resendSecondsLeft == 0 && !_isSendingOtp;
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const SizedBox(height: 24),
         const SizedBox(
@@ -820,132 +991,152 @@ class _LoginScreenState extends State<LoginScreen> {
         if (destinationLabel != null && destinationLabel.isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(top: 8),
+            child: SizedBox(
+              width: 351,
+              child: Text(
+                'enviado a $destinationLabel',
+                style: const TextStyle(
+                  color: Color(0x99FFFFFF),
+                  fontSize: 12,
+                  fontFamily: 'ABC Diatype',
+                  fontWeight: FontWeight.w400,
+                ),
+              ),
+            ),
+          ),
+        const SizedBox(height: 24),
+        SizedBox(
+          width: 351,
+          child: Stack(
+            alignment: Alignment.centerLeft,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.start,
+                children: [
+                  _OtpGroupBox(digits: _otpController.text, startIndex: 0),
+                  const SizedBox(width: 20),
+                  _OtpGroupBox(digits: _otpController.text, startIndex: 3),
+                ],
+              ),
+              Opacity(
+                opacity: 0,
+                child: TextField(
+                  controller: _otpController,
+                  focusNode: _otpFocusNode,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.digitsOnly,
+                    LengthLimitingTextInputFormatter(6),
+                  ],
+                  onChanged: (_) => setState(() {}),
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (_errorText != null) ...[
+          const SizedBox(height: 12),
+          Align(
+            alignment: Alignment.centerLeft,
             child: Text(
-              'enviado a $destinationLabel',
+              _errorText!,
               style: const TextStyle(
-                color: Color(0x99FFFFFF),
+                color: Color(0xFFFF8A80),
                 fontSize: 12,
                 fontFamily: 'ABC Diatype',
                 fontWeight: FontWeight.w400,
               ),
             ),
           ),
-        const SizedBox(height: 24),
-        Stack(
-          alignment: Alignment.center,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                _OtpGroupBox(digits: _otpController.text, startIndex: 0),
-                const SizedBox(width: 20),
-                _OtpGroupBox(digits: _otpController.text, startIndex: 3),
-              ],
-            ),
-            Opacity(
-              opacity: 0,
-              child: TextField(
-                controller: _otpController,
-                focusNode: _otpFocusNode,
-                keyboardType: TextInputType.number,
-                inputFormatters: [
-                  FilteringTextInputFormatter.digitsOnly,
-                  LengthLimitingTextInputFormatter(6),
-                ],
-                onChanged: (_) => setState(() {}),
-              ),
-            ),
-          ],
-        ),
-        if (_errorText != null) ...[
-          const SizedBox(height: 12),
-          Text(
-            _errorText!,
-            style: const TextStyle(
-              color: Color(0xFFFF8A80),
-              fontSize: 12,
-              fontFamily: 'ABC Diatype',
-              fontWeight: FontWeight.w400,
-            ),
-          ),
         ],
         const SizedBox(height: 10),
-        TextButton(
-          onPressed: (_resendSecondsLeft == 0 && !_isSendingOtp) ? _resendCode : null,
-          style: TextButton.styleFrom(foregroundColor: Colors.white),
-          child: Text(
-            _isSendingOtp
-                ? 'reenviando...'
-                : _resendSecondsLeft > 0
-                    ? 'reenviar código (${_resendSecondsLeft}s)'
-                    : 'reenviar código',
-            style: TextStyle(
-              color: (_resendSecondsLeft == 0 && !_isSendingOtp)
-                  ? Colors.white
-                  : const Color(0x99FFFFFF),
-              fontSize: 12,
-              fontFamily: 'ABC Diatype',
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-        ),
-        TextButton(
-          onPressed: () => setState(() {
-            _step = 2;
-            _errorText = null;
-          }),
-          style: TextButton.styleFrom(foregroundColor: Colors.white),
-          child: const Text(
-            'enviarlo por correo electrónico',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 12,
-              fontFamily: 'ABC Diatype',
-              fontWeight: FontWeight.w500,
-              decoration: TextDecoration.underline,
-            ),
-          ),
-        ),
-        const Spacer(),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.end,
-          children: [
-            const Text(
-              'iniciar',
-              textAlign: TextAlign.right,
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(
+            onPressed: (_resendSecondsLeft == 0 && !_isSendingOtp) ? _resendCode : null,
+            style: TextButton.styleFrom(foregroundColor: Colors.white),
+            child: Text(
+              _isSendingOtp
+                  ? 'reenviando...'
+                  : _resendSecondsLeft > 0
+                      ? 'reenviar código (${_resendSecondsLeft}s)'
+                      : 'reenviar código',
               style: TextStyle(
-                color: Colors.white,
-                fontSize: 13,
+                color: (_resendSecondsLeft == 0 && !_isSendingOtp)
+                    ? Colors.white
+                    : const Color(0x99FFFFFF),
+                fontSize: 12,
                 fontFamily: 'ABC Diatype',
                 fontWeight: FontWeight.w500,
               ),
             ),
-            const SizedBox(width: 10),
-            SizedBox(
-              width: 45,
-              height: 45,
-              child: ElevatedButton(
-                onPressed: canSubmit ? _verifyOtpAndLogin : null,
-                style: ElevatedButton.styleFrom(
-                  shape: const CircleBorder(),
-                  padding: EdgeInsets.zero,
-                  backgroundColor: Colors.white,
-                  foregroundColor: const Color(0xFF101010),
-                  disabledBackgroundColor: Colors.white.withOpacity(0.2),
-                ),
-                child: _isVerifyingOtp
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF101010)),
-                        ),
-                      )
-                    : const Icon(Icons.arrow_forward, size: 18),
+          ),
+        ),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(
+            onPressed: emailFallbackEnabled
+                ? () => setState(() {
+                      _step = 2;
+                      _errorText = null;
+                    })
+                : null,
+            style: TextButton.styleFrom(foregroundColor: Colors.white),
+            child: Text(
+              'enviarlo por correo electrónico',
+              style: TextStyle(
+                color: emailFallbackEnabled ? Colors.white : const Color(0x99FFFFFF),
+                fontSize: 12,
+                fontFamily: 'ABC Diatype',
+                fontWeight: FontWeight.w500,
+                decoration: TextDecoration.underline,
               ),
             ),
-          ],
+          ),
+        ),
+        const Spacer(),
+        Padding(
+          padding: const EdgeInsets.only(bottom: 16),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              const Text(
+                'iniciar',
+                textAlign: TextAlign.right,
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 13,
+                  fontFamily: 'ABC Diatype',
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              const SizedBox(width: 10),
+              SizedBox(
+                width: 45,
+                height: 45,
+                child: ElevatedButton(
+                  onPressed: canSubmit ? _verifyOtpAndLogin : null,
+                  style: ElevatedButton.styleFrom(
+                    shape: const CircleBorder(),
+                    padding: EdgeInsets.zero,
+                    backgroundColor: Colors.white,
+                    foregroundColor: const Color(0xFF101010),
+                    disabledBackgroundColor: Colors.white.withOpacity(0.2),
+                  ),
+                  child: _isVerifyingOtp
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF101010)),
+                          ),
+                        )
+                      : const Icon(Icons.arrow_forward, size: 18),
+                ),
+              ),
+            ],
+          ),
         ),
       ],
     );
@@ -954,7 +1145,7 @@ class _LoginScreenState extends State<LoginScreen> {
   Widget _buildEmailStep() {
     final email = _emailController.text.trim();
     final isEmailValid = _isValidEmail(email);
-    final showInvalidEmailHint = email.isNotEmpty && !isEmailValid && _errorText == null;
+    final showInvalidEmailHint = _showEmailValidationError && _errorText == null;
 
     return Column(
       children: [
@@ -986,7 +1177,10 @@ class _LoginScreenState extends State<LoginScreen> {
                 child: TextField(
                   controller: _emailController,
                   keyboardType: TextInputType.emailAddress,
-                  onChanged: (_) => setState(() {}),
+                  onChanged: (_) {
+                    setState(() {});
+                    _scheduleEmailValidation();
+                  },
                   style: const TextStyle(
                     color: Colors.white,
                     fontSize: 15,
@@ -1036,45 +1230,48 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
         ],
         const Spacer(),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.end,
-          children: [
-            const Text(
-              'continuar',
-              textAlign: TextAlign.right,
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 13,
-                fontFamily: 'ABC Diatype',
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-            const SizedBox(width: 10),
-            SizedBox(
-              width: 45,
-              height: 45,
-              child: ElevatedButton(
-                onPressed: (isEmailValid && !_isSendingOtp) ? _sendEmailOtp : null,
-                style: ElevatedButton.styleFrom(
-                  shape: const CircleBorder(),
-                  padding: EdgeInsets.zero,
-                  backgroundColor: Colors.white,
-                  foregroundColor: const Color(0xFF101010),
-                  disabledBackgroundColor: Colors.white.withOpacity(0.2),
+        Padding(
+          padding: const EdgeInsets.only(bottom: 16),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              const Text(
+                'continuar',
+                textAlign: TextAlign.right,
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 13,
+                  fontFamily: 'ABC Diatype',
+                  fontWeight: FontWeight.w500,
                 ),
-                child: _isSendingOtp
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF101010)),
-                        ),
-                      )
-                    : const Icon(Icons.arrow_forward, size: 18),
               ),
-            ),
-          ],
+              const SizedBox(width: 10),
+              SizedBox(
+                width: 45,
+                height: 45,
+                child: ElevatedButton(
+                  onPressed: (isEmailValid && !_isSendingOtp) ? _sendEmailOtp : null,
+                  style: ElevatedButton.styleFrom(
+                    shape: const CircleBorder(),
+                    padding: EdgeInsets.zero,
+                    backgroundColor: Colors.white,
+                    foregroundColor: const Color(0xFF101010),
+                    disabledBackgroundColor: Colors.white.withOpacity(0.2),
+                  ),
+                  child: _isSendingOtp
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF101010)),
+                          ),
+                        )
+                      : const Icon(Icons.arrow_forward, size: 18),
+                ),
+              ),
+            ],
+          ),
         ),
       ],
     );
@@ -1082,88 +1279,143 @@ class _LoginScreenState extends State<LoginScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final headerAction = _step == 0
+        ? SizedBox(
+            height: 38,
+            child: TextButton(
+              onPressed: () => context.go('/kyc'),
+              style: TextButton.styleFrom(
+                backgroundColor: Colors.white,
+                foregroundColor: Colors.black,
+                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(33.5),
+                ),
+              ),
+              child: const Text(
+                'crear una cuenta',
+                style: TextStyle(
+                  color: Colors.black,
+                  fontSize: 14,
+                  fontFamily: 'ABC Diatype',
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          )
+        : TextButton(
+            onPressed: () {
+              final currentStep = _step;
+              setState(() {
+                _step = currentStep == 2 ? 1 : 0;
+                _errorText = null;
+                if (currentStep == 1) {
+                  _otpController.clear();
+                }
+              });
+            },
+            style: TextButton.styleFrom(foregroundColor: Colors.white),
+            child: const Text(
+              'volver',
+              textAlign: TextAlign.right,
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 13,
+                fontFamily: 'ABC Diatype',
+                fontWeight: FontWeight.w500,
+                decoration: TextDecoration.underline,
+              ),
+            ),
+          );
+
     return Scaffold(
       backgroundColor: const Color(0xFF101010),
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: Column(
-            children: [
-              Row(
+      body: Stack(
+        children: [
+          SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Column(
                 children: [
-                  const Spacer(),
-                  if (_step == 0)
-                    SizedBox(
-                      height: 38,
-                      child: TextButton(
-                      onPressed: () => context.go('/kyc'),
-                      style: TextButton.styleFrom(
-                        backgroundColor: Colors.white,
-                        foregroundColor: Colors.black,
-                        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(33.5),
-                        ),
+                  Row(
+                    children: [
+                      const Spacer(),
+                      headerAction,
+                    ],
+                  ),
+                  const SizedBox(height: 24),
+                  Row(
+                    children: [
+                      const SizedBox(width: 8),
+                      SvgPicture.asset(
+                        'assets/icons/call a vet.svg',
+                        width: 118,
+                        fit: BoxFit.contain,
                       ),
-                      child: const Text(
-                        'crear una cuenta',
-                        style: TextStyle(
-                          color: Colors.black,
-                          fontSize: 14,
-                          fontFamily: 'ABC Diatype',
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    )
-                    )
-                  else
-                    TextButton(
-                      onPressed: () {
-                        final currentStep = _step;
-                        setState(() {
-                          _step = currentStep == 2 ? 1 : 0;
-                          _errorText = null;
-                          if (currentStep == 1) {
-                            _otpController.clear();
-                          }
-                        });
+                    ],
+                  ),
+                  Expanded(
+                    child: AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 280),
+                      switchInCurve: Curves.easeOut,
+                      switchOutCurve: Curves.easeIn,
+                      transitionBuilder: (child, animation) {
+                        final slide = Tween<Offset>(
+                          begin: const Offset(0.04, 0),
+                          end: Offset.zero,
+                        ).animate(animation);
+                        return FadeTransition(
+                          opacity: animation,
+                          child: SlideTransition(position: slide, child: child),
+                        );
                       },
-                      style: TextButton.styleFrom(foregroundColor: Colors.white),
-                      child: const Text(
-                        'volver',
-                        textAlign: TextAlign.right,
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 13,
-                          fontFamily: 'ABC Diatype',
-                          fontWeight: FontWeight.w500,
-                          decoration: TextDecoration.underline,
-                        ),
+                      child: KeyedSubtree(
+                        key: ValueKey<int>(_step),
+                        child: _step == 0
+                            ? _buildPhoneStep()
+                            : _step == 1
+                                ? _buildOtpStep()
+                                : _buildEmailStep(),
                       ),
                     ),
-                ],
-              ),
-              const SizedBox(height: 24),
-              Row(
-                children: [
-                  const SizedBox(width: 8),
-                  SvgPicture.asset(
-                    'assets/icons/call a vet.svg',
-                    width: 118,
-                    fit: BoxFit.contain,
                   ),
                 ],
               ),
-              Expanded(
-                child: _step == 0
-                    ? _buildPhoneStep()
-                    : _step == 1
-                        ? _buildOtpStep()
-                        : _buildEmailStep(),
-              ),
-            ],
+            ),
           ),
-        ),
+          if (_showIsland)
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 6,
+              left: 0,
+              right: 0,
+              child: IgnorePointer(
+                child: Center(
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 250),
+                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: Colors.black,
+                      borderRadius: BorderRadius.circular(24),
+                    ),
+                    child: AnimatedOpacity(
+                      duration: const Duration(milliseconds: 240),
+                      curve: Curves.easeOut,
+                      opacity: _islandOpacity,
+                      child: Text(
+                        _islandText,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 12,
+                          fontFamily: 'ABC Diatype',
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -1174,11 +1426,13 @@ class _GatewayOtpException implements Exception {
     required this.message,
     this.code,
     this.retryAfterSeconds,
+    this.statusCode,
   });
 
   final String message;
   final String? code;
   final int? retryAfterSeconds;
+  final int? statusCode;
 }
 
 class _OtpGroupBox extends StatelessWidget {

@@ -33,7 +33,10 @@ class AppRouter {
       GoRoute(
         path: '/kyc',
         name: 'kyc',
-        builder: (context, state) => const KycScreen(),
+        builder: (context, state) {
+          final startAtProfile = state.uri.queryParameters['start'] == 'profile';
+          return KycScreen(startAtProfile: startAtProfile);
+        },
       ),
       GoRoute(
         path: '/horse-kyc',

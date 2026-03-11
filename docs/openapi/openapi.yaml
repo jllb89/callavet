@@ -303,6 +303,45 @@ paths:
                 properties:
                   ok: { type: boolean }
 
+  /auth/otp/email/confirm-request:
+    post:
+      tags: [Auth & Profile]
+      summary: Request authenticated email confirmation
+      description: |
+        Requests a Supabase confirmation email for the authenticated user by linking/updating
+        auth.users email. Intended for profile completion flows after user submits email.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+      responses:
+        "200":
+          description: Confirmation request accepted or already verified
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  message: { type: string }
+                  status:
+                    type: string
+                    enum: [confirmation_requested, already_verified]
+        "401":
+          description: Missing/invalid bearer authentication
+        "400":
+          description: Invalid email format
+        "4XX":
+          description: Supabase rejected update request (e.g., email already in use)
+
   /me:
     get:
       tags: [Auth & Profile]
