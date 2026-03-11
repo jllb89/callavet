@@ -10,6 +10,7 @@ interface UserRow {
   full_name?: string;
   country?: string | null;
   state?: string | null;
+  customer_type?: string | null;
   role?: string;
   is_verified?: boolean;
   created_at?: string;
@@ -113,6 +114,13 @@ export class MeController {
         return { updated: false, reason: 'update_location_failed', error: e?.message || String(e) };
       }
     }
+    if (body.customer_type !== undefined && existingColumns.has('customer_type')) {
+      try {
+        await this.db.query(`update users set customer_type = $1, updated_at = now() where id = $2`, [body.customer_type, sub]);
+      } catch (e: any) {
+        return { updated: false, reason: 'update_customer_type_failed', error: e?.message || String(e) };
+      }
+    }
     // Upsert timezone into billing_profiles if provided
     if (body.timezone !== undefined) {
       try {
@@ -137,6 +145,7 @@ export class MeController {
       name: (u as any).full_name || null,
       country: (u as any).country || null,
       state: (u as any).state || null,
+      customerType: (u as any).customer_type || null,
       role: (u as any).role || null,
       timezone: bp?.timezone || null,
       billing: bp ? {
@@ -162,7 +171,7 @@ export class MeController {
   private async fetchUserRow(sub: string): Promise<UserRow | undefined> {
     // Try widest selection; progressively narrow if columns missing
     const attempts = [
-      `select id, email, full_name, country, state, role, created_at from users where id = $1 limit 1`,
+      `select id, email, full_name, country, state, customer_type, role, created_at from users where id = $1 limit 1`,
       `select id, email, created_at from users where id = $1 limit 1`
     ];
     for (const sql of attempts) {

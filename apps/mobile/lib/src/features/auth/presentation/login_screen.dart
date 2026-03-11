@@ -435,13 +435,20 @@ class _LoginScreenState extends State<LoginScreen> {
     return false;
   }
 
-  bool _isProfileIncomplete(Map<String, dynamic>? row) {
-    if (row == null) return true;
+  String? _missingKycStep(Map<String, dynamic>? row) {
+    if (row == null) return 'profile';
     final fullName = (row['full_name'] as String?)?.trim() ?? '';
     final email = (row['email'] as String?)?.trim() ?? '';
     final country = (row['country'] as String?)?.trim() ?? '';
     final state = (row['state'] as String?)?.trim() ?? '';
-    return fullName.isEmpty || email.isEmpty || country.isEmpty || state.isEmpty;
+    final customerType = (row['customer_type'] as String?)?.trim() ?? '';
+    if (fullName.isEmpty || email.isEmpty || country.isEmpty || state.isEmpty) {
+      return 'profile';
+    }
+    if (customerType.isEmpty) {
+      return 'quick';
+    }
+    return null;
   }
 
   Future<void> _sendAuthEmailConfirmationIfNeeded(
@@ -520,7 +527,7 @@ class _LoginScreenState extends State<LoginScreen> {
     final row = userRow ??
         await client
             .from('users')
-            .select('id, phone, email, full_name, country, state')
+            .select('id, phone, email, full_name, country, state, customer_type')
             .eq('id', userId)
             .maybeSingle();
 
@@ -529,12 +536,12 @@ class _LoginScreenState extends State<LoginScreen> {
       reason: 'post-login-route',
     );
 
-    final incomplete = _isProfileIncomplete(row);
-    _loginLog('Post-login profile completeness check userId=$userId incomplete=$incomplete row=$row');
+    final missingStep = _missingKycStep(row);
+    _loginLog('Post-login KYC completeness check userId=$userId missingStep=$missingStep row=$row');
     if (!mounted) return;
-    if (incomplete) {
-      _loginLog('Routing userId=$userId to /kyc?start=profile due to incomplete profile');
-      context.go('/kyc?start=profile');
+    if (missingStep != null) {
+      _loginLog('Routing userId=$userId to /kyc?start=$missingStep due to incomplete KYC');
+      context.go('/kyc?start=$missingStep');
       return;
     }
     _loginLog('Routing userId=$userId to /home (profile complete)');
@@ -569,7 +576,7 @@ class _LoginScreenState extends State<LoginScreen> {
         }
         final row = await Supabase.instance.client
             .from('users')
-            .select('id, phone, email, full_name, country, state')
+            .select('id, phone, email, full_name, country, state, customer_type')
             .eq('id', userId)
             .maybeSingle();
         if (!mounted) return;
@@ -659,7 +666,7 @@ class _LoginScreenState extends State<LoginScreen> {
         }
         final row = await Supabase.instance.client
             .from('users')
-            .select('id, phone, email, full_name, country, state')
+          .select('id, phone, email, full_name, country, state, customer_type')
             .eq('id', userId)
             .maybeSingle();
         if (!mounted) return;
@@ -776,7 +783,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
       final existingRow = await client
           .from('users')
-          .select('id, phone, email, full_name, country, state')
+          .select('id, phone, email, full_name, country, state, customer_type')
           .eq('id', userId)
           .maybeSingle();
       _loginLog('public.users row after login verify: $existingRow');
@@ -1015,10 +1022,10 @@ class _LoginScreenState extends State<LoginScreen> {
         SizedBox(
           width: 351,
           child: Stack(
-            alignment: Alignment.centerLeft,
+            alignment: Alignment.center,
             children: [
               Row(
-                mainAxisAlignment: MainAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   _OtpGroupBox(digits: _otpController.text, startIndex: 0),
                   const SizedBox(width: 20),

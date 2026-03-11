@@ -28,7 +28,7 @@ export class AdminController {
       params.push(`%${q.trim().toLowerCase()}%`);
       where = 'where lower(email) like $1 or lower(coalesce(full_name,\'\')) like $1';
     }
-    const sql = `select id, email, full_name, role, is_verified, created_at
+    const sql = `select id, email, full_name, customer_type, role, is_verified, created_at
                    from users ${where}
                   order by created_at desc
                   limit ${limit} offset ${offset}`;
@@ -41,7 +41,7 @@ export class AdminController {
     assertAdmin(secret);
     if (!userId) throw new BadRequestException('userId required');
     const { rows } = await (this.db as any).query(
-      `select id, email, full_name, role, is_verified, created_at, updated_at from users where id = $1`,
+      `select id, email, full_name, customer_type, role, is_verified, created_at, updated_at from users where id = $1`,
       [userId]
     );
     if (!rows.length) throw new BadRequestException('not_found');

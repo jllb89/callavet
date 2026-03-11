@@ -2255,6 +2255,9 @@ components:
               phone: { type: string }
               country: { type: string, description: "ISO 3166-1 alpha-2" }
               state: { type: string }
+              customer_type:
+                type: string
+                enum: [owner, caballerango, veterinarian, trainer, ranch_responsible]
               language: { type: string, enum: [es, en] }
               timezone: { type: string }
     BillingProfile:
@@ -2683,6 +2686,10 @@ components:
     Me:
       type: object
       properties:
+        customerType:
+          type: string
+          enum: [owner, caballerango, veterinarian, trainer, ranch_responsible]
+          nullable: true
         user: { $ref: "#/components/schemas/User" }
         billing_profile: { $ref: "#/components/schemas/BillingProfile" }
         active_subscription: { $ref: "#/components/schemas/Subscription" }
@@ -2695,6 +2702,10 @@ components:
         phone: { type: string }
         country: { type: string }
         state: { type: string }
+        customer_type:
+          type: string
+          enum: [owner, caballerango, veterinarian, trainer, ranch_responsible]
+          nullable: true
         role: { type: string, enum: [user, vet, admin] }
     BillingProfile:
       type: object

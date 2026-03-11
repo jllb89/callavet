@@ -170,10 +170,10 @@ class _OtpAttemptGuard {
 class KycScreen extends StatefulWidget {
   const KycScreen({
     super.key,
-    this.startAtProfile = false,
+    this.startAt = 'intro',
   });
 
-  final bool startAtProfile;
+  final String startAt;
 
   @override
   State<KycScreen> createState() => _KycScreenState();
@@ -189,12 +189,14 @@ class _KycScreenState extends State<KycScreen> {
   String? _e164Phone;
   bool _isSendingOtp = false;
   bool _isSavingProfile = false;
+    bool _isSavingQuickAnswers = false;
   DateTime? _otpCooldownUntil;
   bool _showIsland = false;
   String _islandText = '';
   double _islandOpacity = 0;
 
   int get _profilePageIndex => _bypassOtpValidationForDev ? 1 : 2;
+  int get _quickQuestionsPageIndex => _profilePageIndex + 1;
 
   @override
   void initState() {
@@ -206,12 +208,52 @@ class _KycScreenState extends State<KycScreen> {
       _nameController.text = fullName.trim();
     }
     unawaited(_prefillProfileFromPublicUser());
-    if (widget.startAtProfile) {
+    if (widget.startAt == 'profile' || widget.startAt == 'quick') {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
-        _pageController.jumpToPage(_profilePageIndex);
-        setState(() => _pageIndex = _profilePageIndex);
+        final targetPage = widget.startAt == 'quick'
+            ? _quickQuestionsPageIndex
+            : _profilePageIndex;
+        _pageController.jumpToPage(targetPage);
+        setState(() => _pageIndex = targetPage);
       });
+    }
+  }
+
+  Future<void> _patchMeViaGateway(Map<String, dynamic> payload) async {
+    final sessionToken = Supabase.instance.client.auth.currentSession?.accessToken;
+    if (sessionToken == null || sessionToken.isEmpty) {
+      throw StateError('missing auth session token for me patch request');
+    }
+
+    final uri = Uri.parse('${Environment.apiBaseUrl}/me');
+    final http = HttpClient();
+    try {
+      final req = await http.patchUrl(uri);
+      req.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+      req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $sessionToken');
+      req.add(utf8.encode(jsonEncode(payload)));
+
+      final res = await req.close();
+      final body = await utf8.decoder.bind(res).join();
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        String message = 'gateway me patch failed';
+        try {
+          final decoded = jsonDecode(body);
+          if (decoded is Map<String, dynamic>) {
+            message = decoded['message']?.toString() ??
+                decoded['reason']?.toString() ??
+                decoded['error']?.toString() ??
+                message;
+          }
+        } catch (_) {}
+        throw _GatewayMePatchException(
+          statusCode: res.statusCode,
+          message: message,
+        );
+      }
+    } finally {
+      http.close(force: true);
     }
   }
 
@@ -402,14 +444,19 @@ class _KycScreenState extends State<KycScreen> {
         'country': countryCode.trim().toUpperCase(),
         'state': state.trim(),
       };
-      _kycFlowLog('Updating public.users with payload=$updatePayload for userId=${user.id}');
-      final updatedRow = await Supabase.instance.client
-          .from('users')
-          .update(updatePayload)
-          .eq('id', user.id)
-          .select('id,email,phone,full_name,country,state,is_verified,updated_at')
-          .maybeSingle();
-      _kycFlowLog('public.users update result for userId=${user.id}: $updatedRow');
+      try {
+        _kycFlowLog('Patching /me via gateway with payload=$updatePayload userId=${user.id}');
+        await _patchMeViaGateway(updatePayload);
+      } catch (err) {
+        _kycFlowLog('Gateway /me patch failed, falling back to direct public.users update: $err');
+        final updatedRow = await Supabase.instance.client
+            .from('users')
+            .update(updatePayload)
+            .eq('id', user.id)
+            .select('id,email,phone,full_name,country,state,is_verified,updated_at')
+            .maybeSingle();
+        _kycFlowLog('public.users fallback update result for userId=${user.id}: $updatedRow');
+      }
       _goNext();
     } on PostgrestException catch (err) {
       _kycFlowLog('Profile update PostgrestException: code=${err.code} message=${err.message} details=${err.details} hint=${err.hint}');
@@ -435,6 +482,50 @@ class _KycScreenState extends State<KycScreen> {
     } finally {
       if (mounted) {
         setState(() => _isSavingProfile = false);
+      }
+    }
+  }
+
+  Future<void> _handleQuickQuestionsContinue(String customerType) async {
+    if (_isSavingQuickAnswers) return;
+    final user = Supabase.instance.client.auth.currentUser;
+    if (user == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No hay sesión activa.')),
+      );
+      return;
+    }
+
+    setState(() => _isSavingQuickAnswers = true);
+    try {
+      final payload = {'customer_type': customerType};
+      try {
+        _kycFlowLog('Patching /me via gateway for quick questions payload=$payload userId=${user.id}');
+        await _patchMeViaGateway(payload);
+      } catch (err) {
+        _kycFlowLog('Gateway /me quick questions patch failed, falling back to direct public.users update: $err');
+        await Supabase.instance.client
+            .from('users')
+            .update(payload)
+            .eq('id', user.id);
+      }
+      _goNext();
+    } on PostgrestException catch (err) {
+      _kycFlowLog('Quick questions update PostgrestException: code=${err.code} message=${err.message}');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo guardar tu tipo de usuario: ${err.message}')),
+      );
+    } catch (err) {
+      _kycFlowLog('Quick questions update error: $err');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo guardar tu tipo de usuario: $err')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isSavingQuickAnswers = false);
       }
     }
   }
@@ -612,10 +703,9 @@ class _KycScreenState extends State<KycScreen> {
                           isSaving: _isSavingProfile,
                           onSubmit: _handleProfileContinue,
                         ),
-                        _KycPlaceholderScreen(
-                          title: 'preguntas rápidas',
-                          description: 'responde tres preguntas para completar tu perfil.',
-                          onNext: _goNext,
+                        _KycQuickQuestionsScreen(
+                          isSaving: _isSavingQuickAnswers,
+                          onSubmit: _handleQuickQuestionsContinue,
                         ),
                         _KycPlaceholderScreen(
                           title: 'todo listo',
@@ -679,6 +769,20 @@ class _GatewayEmailConfirmException implements Exception {
   @override
   String toString() =>
       'Bad state: gateway email confirmation request failed status=$statusCode message=$message';
+}
+
+class _GatewayMePatchException implements Exception {
+  const _GatewayMePatchException({
+    required this.statusCode,
+    required this.message,
+  });
+
+  final int statusCode;
+  final String message;
+
+  @override
+  String toString() =>
+      'Bad state: gateway me patch failed status=$statusCode message=$message';
 }
 
 class _KycPhoneScreen extends StatefulWidget {
@@ -1517,6 +1621,264 @@ class _KycPlaceholderScreen extends StatelessWidget {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _KycQuickQuestionsScreen extends StatefulWidget {
+  const _KycQuickQuestionsScreen({
+    required this.onSubmit,
+    required this.isSaving,
+  });
+
+  final Future<void> Function(String customerType) onSubmit;
+  final bool isSaving;
+
+  @override
+  State<_KycQuickQuestionsScreen> createState() => _KycQuickQuestionsScreenState();
+}
+
+class _KycQuickQuestionsScreenState extends State<_KycQuickQuestionsScreen> {
+  static const List<String> _customerTypeByIndex = [
+    'owner',
+    'caballerango',
+    'veterinarian',
+    'trainer',
+    'ranch_responsible',
+  ];
+
+  int _identityIndex = 0;
+  int _usageIndex = 0;
+  int _coverageIndex = 1;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 11),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const SizedBox(height: 24),
+          const SizedBox(
+            width: 351,
+            child: Text(
+              'cuéntanos de ti.',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 20,
+                fontFamily: 'ABC Diatype',
+                fontWeight: FontWeight.w500,
+                height: 1.10,
+              ),
+            ),
+          ),
+          const SizedBox(height: 40),
+          const Text(
+            '¿con cuál te identificas más?',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 16,
+              fontFamily: 'ABC Diatype',
+              fontWeight: FontWeight.w400,
+            ),
+          ),
+          const SizedBox(height: 16),
+          Wrap(
+            spacing: 11,
+            runSpacing: 11,
+            children: [
+              _QuestionChip(
+                label: 'soy dueño',
+                selected: _identityIndex == 0,
+                onTap: () => setState(() => _identityIndex = 0),
+              ),
+              _QuestionChip(
+                label: 'soy caballerango',
+                selected: _identityIndex == 1,
+                onTap: () => setState(() => _identityIndex = 1),
+              ),
+              _QuestionChip(
+                label: 'soy veterinario',
+                selected: _identityIndex == 2,
+                onTap: () => setState(() => _identityIndex = 2),
+              ),
+              _QuestionChip(
+                label: 'soy entrenador',
+                selected: _identityIndex == 3,
+                onTap: () => setState(() => _identityIndex = 3),
+              ),
+              _QuestionChip(
+                label: 'soy dueño o responsable de un rancho',
+                selected: _identityIndex == 4,
+                onTap: () => setState(() => _identityIndex = 4),
+              ),
+            ],
+          ),
+          const SizedBox(height: 36),
+          const Text(
+            '¿para quién vas a usar la cuenta?',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 16,
+              fontFamily: 'ABC Diatype',
+              fontWeight: FontWeight.w400,
+            ),
+          ),
+          const SizedBox(height: 16),
+          Wrap(
+            spacing: 11,
+            runSpacing: 11,
+            children: [
+              _QuestionChip(
+                label: 'solo para mis caballos',
+                selected: _usageIndex == 0,
+                onTap: () => setState(() => _usageIndex = 0),
+              ),
+              _QuestionChip(
+                label: 'para una cuadra / rancho',
+                selected: _usageIndex == 1,
+                onTap: () => setState(() => _usageIndex = 1),
+              ),
+              _QuestionChip(
+                label: 'para clientes',
+                selected: _usageIndex == 2,
+                onTap: () => setState(() => _usageIndex = 2),
+              ),
+            ],
+          ),
+          const SizedBox(height: 36),
+          const Text(
+            '¿cuántos caballos necesitas cubrir?',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 16,
+              fontFamily: 'ABC Diatype',
+              fontWeight: FontWeight.w400,
+            ),
+          ),
+          const SizedBox(height: 16),
+          Wrap(
+            spacing: 11,
+            runSpacing: 11,
+            children: [
+              _QuestionChip(
+                label: '1',
+                selected: _coverageIndex == 0,
+                onTap: () => setState(() => _coverageIndex = 0),
+              ),
+              _QuestionChip(
+                label: '2-5',
+                selected: _coverageIndex == 1,
+                onTap: () => setState(() => _coverageIndex = 1),
+              ),
+              _QuestionChip(
+                label: '6-15',
+                selected: _coverageIndex == 2,
+                onTap: () => setState(() => _coverageIndex = 2),
+              ),
+              _QuestionChip(
+                label: '16-25',
+                selected: _coverageIndex == 3,
+                onTap: () => setState(() => _coverageIndex = 3),
+              ),
+              _QuestionChip(
+                label: '26+',
+                selected: _coverageIndex == 4,
+                onTap: () => setState(() => _coverageIndex = 4),
+              ),
+            ],
+          ),
+          const Spacer(),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 16),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                const Text(
+                  'nuestros planes',
+                  textAlign: TextAlign.right,
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontFamily: 'ABC Diatype',
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                SizedBox(
+                  width: 45,
+                  height: 45,
+                  child: ElevatedButton(
+                    onPressed: widget.isSaving
+                        ? null
+                        : () => widget.onSubmit(_customerTypeByIndex[_identityIndex]),
+                    style: ElevatedButton.styleFrom(
+                      shape: const CircleBorder(),
+                      padding: EdgeInsets.zero,
+                      backgroundColor: Colors.white,
+                      foregroundColor: const Color(0xFF101010),
+                      disabledBackgroundColor: Colors.white.withValues(alpha: 0.2),
+                    ),
+                    child: widget.isSaving
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF101010)),
+                            ),
+                          )
+                        : const Icon(Icons.arrow_forward, size: 18),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _QuestionChip extends StatelessWidget {
+  const _QuestionChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(40),
+        child: Container(
+          constraints: const BoxConstraints(minHeight: 51),
+          padding: const EdgeInsets.symmetric(horizontal: 19, vertical: 12),
+          decoration: ShapeDecoration(
+            color: selected ? Colors.white : Colors.white.withValues(alpha: 0.06),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(40),
+            ),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              color: selected ? Colors.black : Colors.white,
+              fontSize: 13,
+              fontFamily: 'ABC Diatype',
+              fontWeight: FontWeight.w400,
+              height: 1.85,
+            ),
+          ),
         ),
       ),
     );
