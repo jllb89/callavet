@@ -13,7 +13,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 const bool _loginFlowDebug = bool.fromEnvironment(
   'KYC_FLOW_DEBUG',
-  defaultValue: true,
+  defaultValue: false,
 );
 const bool _bypassOtpValidationForDev = bool.fromEnvironment(
   'BYPASS_OTP',
@@ -471,6 +471,13 @@ class _LoginScreenState extends State<LoginScreen> {
       unawaited(_showIslandMessage('te enviamos un correo para confirmar tu email'));
       return;
     } on _GatewayOtpException catch (err) {
+      final lower = err.message.toLowerCase();
+      final isRateLimited = err.statusCode == 429 || lower.contains('rate limit');
+      if (isRateLimited) {
+        _loginLog('[$reason] Email confirmation is rate-limited in gateway for $email: ${err.message}');
+        unawaited(_showIslandMessage('ya te enviamos un correo recientemente'));
+        return;
+      }
       _loginLog('[$reason] Gateway email confirmation request failed (will fallback app-side): ${err.message}');
     } catch (err) {
       _loginLog('[$reason] Gateway email confirmation request error (will fallback app-side): $err');

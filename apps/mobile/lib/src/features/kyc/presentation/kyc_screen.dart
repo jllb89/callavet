@@ -21,11 +21,11 @@ const bool _bypassOtpValidationForDev = bool.fromEnvironment(
 );
 const bool _kycLocationDebug = bool.fromEnvironment(
   'KYC_LOCATION_DEBUG',
-  defaultValue: true,
+  defaultValue: false,
 );
 const bool _kycFlowDebug = bool.fromEnvironment(
   'KYC_FLOW_DEBUG',
-  defaultValue: true,
+  defaultValue: false,
 );
 
 const List<String> _mexicanStates = [
@@ -462,6 +462,15 @@ class _KycScreenState extends State<KycScreen> {
       _kycFlowLog('Requested Supabase confirmation email via gateway for auth.users email=$email');
       unawaited(_showIslandMessage('te enviamos un correo para confirmar tu email'));
       return;
+    } on _GatewayEmailConfirmException catch (err) {
+      final lower = err.message.toLowerCase();
+      final isRateLimited = err.statusCode == 429 || lower.contains('rate limit');
+      if (isRateLimited) {
+        _kycFlowLog('Gateway confirmation request rate-limited for $email: ${err.message}');
+        unawaited(_showIslandMessage('ya te enviamos un correo recientemente'));
+        return;
+      }
+      _kycFlowLog('Gateway confirmation request failed, falling back app-side for $email: ${err.message}');
     } catch (err) {
       _kycFlowLog('Gateway confirmation request failed, falling back app-side for $email: $err');
     }
@@ -494,8 +503,16 @@ class _KycScreenState extends State<KycScreen> {
       final res = await req.close();
       final body = await utf8.decoder.bind(res).join();
       if (res.statusCode < 200 || res.statusCode >= 300) {
-        throw StateError(
-          'gateway email confirmation request failed status=${res.statusCode} body=$body',
+        String message = 'gateway email confirmation request failed';
+        try {
+          final decoded = jsonDecode(body);
+          if (decoded is Map<String, dynamic>) {
+            message = decoded['message']?.toString() ?? message;
+          }
+        } catch (_) {}
+        throw _GatewayEmailConfirmException(
+          statusCode: res.statusCode,
+          message: message,
         );
       }
     } finally {
@@ -648,6 +665,20 @@ class _KycScreenState extends State<KycScreen> {
       ),
     );
   }
+}
+
+class _GatewayEmailConfirmException implements Exception {
+  const _GatewayEmailConfirmException({
+    required this.statusCode,
+    required this.message,
+  });
+
+  final int statusCode;
+  final String message;
+
+  @override
+  String toString() =>
+      'Bad state: gateway email confirmation request failed status=$statusCode message=$message';
 }
 
 class _KycPhoneScreen extends StatefulWidget {
