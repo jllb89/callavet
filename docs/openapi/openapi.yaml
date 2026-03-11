@@ -713,6 +713,29 @@ paths:
                 properties:
                   ok: { type: boolean }
 
+  /subscriptions/apple/verify:
+    post:
+      tags: [Plans & Subscriptions]
+      summary: Verify Apple subscription transaction and upsert subscription state
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/AppleSubscriptionVerify" }
+      responses:
+        "200":
+          description: Verification accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  provider: { type: string, enum: [apple] }
+                  environment: { type: string, enum: [sandbox, production] }
+                  validation: { type: string }
+                  event_id: { type: string }
+                  mapped_plan_code: { type: string, nullable: true }
+                  provider_subscription_id: { type: string }
+                  result: { type: object, additionalProperties: true }
+
       /subscriptions/admin/overage/purchases:
         get:
           tags: [Plans & Subscriptions, Admin]
@@ -2202,6 +2225,13 @@ paths:
       requestBody: { $ref: "#/components/requestBodies/StripeIngest" }
       responses: { "200": { $ref: "#/components/responses/Ok" } }
 
+  /internal/apple/event:
+    post:
+      tags: [Webhooks]
+      summary: Ingest Apple server notification payload (internal)
+      requestBody: { $ref: "#/components/requestBodies/AppleEventIngest" }
+      responses: { "200": { $ref: "#/components/responses/Ok" } }
+
   /internal/embeddings/backfill:
     post:
       tags: [AI (internal)]
@@ -2484,6 +2514,41 @@ components:
             properties:
               type: { type: string }
               data: { type: object }
+    AppleSubscriptionVerify:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              event_id: { type: string }
+              event_type: { type: string, default: manual_verify }
+              environment: { type: string, enum: [sandbox, production], default: sandbox }
+              original_transaction_id: { type: string }
+              transaction_id: { type: string }
+              product_id: { type: string }
+              app_account_token: { type: string, format: uuid }
+              status: { type: string, enum: [trialing, active, past_due, canceled, expired], default: active }
+              current_period_start: { type: string, format: date-time }
+              current_period_end: { type: string, format: date-time }
+              cancel_at_period_end: { type: boolean }
+              auto_renew: { type: boolean }
+              signed_payload: { type: string }
+              payload: { type: object, additionalProperties: true }
+    AppleEventIngest:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              event_id: { type: string }
+              event_type: { type: string }
+              environment: { type: string, enum: [sandbox, production] }
+              original_transaction_id: { type: string }
+              transaction_id: { type: string }
+              product_id: { type: string }
+              app_account_token: { type: string, format: uuid }
+              signed_payload: { type: string }
+              payload: { type: object, additionalProperties: true }
 
     PlanUpsert:
       content:

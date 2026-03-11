@@ -9,6 +9,210 @@ import { RequestContext } from '../auth/request-context.service';
 export class SubscriptionsController {
   constructor(private readonly db: DbService, private readonly rc: RequestContext, private readonly prices: PriceService) {}
 
+  @Post('apple/verify')
+  async appleVerify(
+    @Body()
+    body: {
+      event_id?: string;
+      event_type?: string;
+      environment?: 'sandbox' | 'production';
+      original_transaction_id?: string;
+      transaction_id?: string;
+      product_id?: string;
+      app_account_token?: string;
+      status?: 'trialing' | 'active' | 'past_due' | 'canceled' | 'expired';
+      current_period_start?: string;
+      current_period_end?: string;
+      cancel_at_period_end?: boolean;
+      auto_renew?: boolean;
+      signed_payload?: string;
+      payload?: any;
+    },
+    @Req() req: any
+  ) {
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    let claimsSub: string | null = (this.rc.claims && (this.rc.claims as any).sub) || null;
+    if (!claimsSub && req?.authClaims?.sub) claimsSub = req.authClaims.sub;
+    const userId = claimsSub && uuidRegex.test(claimsSub) ? claimsSub : null;
+    if (!userId) {
+      throw new HttpException({ ok: false, reason: 'unauthenticated' }, HttpStatus.UNAUTHORIZED);
+    }
+
+    const originalTransactionId = (body?.original_transaction_id || '').trim();
+    const transactionId = (body?.transaction_id || '').trim();
+    const productId = (body?.product_id || '').trim();
+    const providerSubscriptionId = originalTransactionId || transactionId;
+    if (!providerSubscriptionId) {
+      throw new HttpException({ ok: false, reason: 'provider_subscription_id_required' }, HttpStatus.BAD_REQUEST);
+    }
+
+    const eventId =
+      (body?.event_id || '').trim() ||
+      `apple-verify:${providerSubscriptionId}:${(body?.event_type || 'manual_verify').trim() || 'manual_verify'}`;
+    const environment = ((body?.environment || 'sandbox') as string).toLowerCase() === 'production' ? 'production' : 'sandbox';
+    const statusIn = ((body?.status || 'active') as string).toLowerCase();
+    const allowed = new Set(['trialing', 'active', 'past_due', 'canceled', 'expired']);
+    const status = allowed.has(statusIn) ? statusIn : 'active';
+    const now = new Date();
+    const periodStart = body?.current_period_start ? new Date(body.current_period_start) : now;
+    const periodEnd = body?.current_period_end ? new Date(body.current_period_end) : new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+    const cancelAtPeriodEnd = body?.cancel_at_period_end === true;
+    const autoRenew = body?.auto_renew ?? !cancelAtPeriodEnd;
+
+    let mappedPlan: { id: string; code: string } | null = null;
+    if (productId) {
+      const planRes = await this.db.query<{ id: string; code: string }>(
+        `select sp.id, sp.code
+           from subscription_plan_provider_products ppp
+           join subscription_plans sp on sp.id = ppp.plan_id
+          where ppp.is_active
+            and sp.is_active
+            and ppp.provider = 'apple'
+            and ppp.provider_product_id = $1
+          limit 1`,
+        [productId]
+      );
+      mappedPlan = planRes.rows[0] || null;
+    }
+
+    const txResult = await this.db.runInTx(async (q) => {
+      await q(
+        `insert into apple_subscription_events (
+           id,
+           event_id,
+           event_type,
+           environment,
+           original_transaction_id,
+           transaction_id,
+           app_account_token,
+           product_id,
+           signed_payload,
+           payload,
+           processed_at,
+           created_at
+         ) values (
+           gen_random_uuid(),
+           $1,
+           $2,
+           $3,
+           nullif($4,''),
+           nullif($5,''),
+           nullif($6,'')::uuid,
+           nullif($7,''),
+           nullif($8,''),
+           $9::jsonb,
+           now(),
+           now()
+         )
+         on conflict (event_id) do nothing`,
+        [
+          eventId,
+          (body?.event_type || 'manual_verify').trim() || 'manual_verify',
+          environment,
+          originalTransactionId,
+          transactionId,
+          body?.app_account_token || '',
+          productId,
+          body?.signed_payload || '',
+          body?.payload && typeof body.payload === 'object' ? JSON.stringify(body.payload) : null,
+        ]
+      );
+
+      if (!mappedPlan?.id) {
+        return { upserted: false, reason: 'plan_mapping_missing' };
+      }
+
+      const updateRes = await q<{ id: string }>(
+        `update user_subscriptions
+            set plan_id = $2::uuid,
+                status = $3,
+                current_period_start = $4::timestamptz,
+                current_period_end = $5::timestamptz,
+                cancel_at_period_end = $6,
+                auto_renew = $7,
+                provider = 'apple',
+                provider_subscription_id = $1,
+                provider_customer_id = nullif($8,''),
+                updated_at = now()
+          where user_id = auth.uid()
+            and provider = 'apple'
+            and provider_subscription_id = $1
+          returning id`,
+        [
+          providerSubscriptionId,
+          mappedPlan.id,
+          status,
+          periodStart.toISOString(),
+          periodEnd.toISOString(),
+          cancelAtPeriodEnd,
+          autoRenew,
+          body?.app_account_token || '',
+        ]
+      );
+      if (updateRes.rows[0]) {
+        return { upserted: true, mode: 'updated', subscriptionId: updateRes.rows[0].id };
+      }
+
+      const insertRes = await q<{ id: string }>(
+        `insert into user_subscriptions (
+           id,
+           user_id,
+           plan_id,
+           status,
+           started_at,
+           current_period_start,
+           current_period_end,
+           cancel_at_period_end,
+           auto_renew,
+           provider,
+           provider_subscription_id,
+           provider_customer_id,
+           created_at,
+           updated_at
+         ) values (
+           gen_random_uuid(),
+           auth.uid(),
+           $1::uuid,
+           $2,
+           now(),
+           $3::timestamptz,
+           $4::timestamptz,
+           $5,
+           $6,
+           'apple',
+           $7,
+           nullif($8,''),
+           now(),
+           now()
+         )
+         returning id`,
+        [
+          mappedPlan.id,
+          status,
+          periodStart.toISOString(),
+          periodEnd.toISOString(),
+          cancelAtPeriodEnd,
+          autoRenew,
+          providerSubscriptionId,
+          body?.app_account_token || '',
+        ]
+      );
+      return { upserted: true, mode: 'inserted', subscriptionId: insertRes.rows[0]?.id || null };
+    });
+
+    return {
+      ok: true,
+      provider: 'apple',
+      environment,
+      validation: 'pending_apple_server_validation',
+      event_id: eventId,
+      product_id: productId || null,
+      mapped_plan_code: mappedPlan?.code || null,
+      provider_subscription_id: providerSubscriptionId,
+      result: txResult,
+    };
+  }
+
 
   // New Stripe Checkout Session endpoint enforcing metadata.user_id
   @Post('stripe/checkout')

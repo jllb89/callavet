@@ -5,7 +5,7 @@ flutter run \
   --dart-define=API_BASE_URL=https://cav-gateway-staging-ugvx.onrender.com \
   --dart-define=DEV_FORCE_SIGNOUT_ON_START=true \
   --dart-define=BYPASS_OTP=false \
-  --dart-define=KYC_LOCATION_DEBUG=true \
+  --dart-define=KYC_LOCATION_DEBUG=false \
   --dart-define=KYC_FLOW_DEBUG=true \
   -d "iPhone 17 Pro Max"
 
