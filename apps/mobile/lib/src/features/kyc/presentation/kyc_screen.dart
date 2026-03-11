@@ -134,6 +134,8 @@ String _normalizePhoneForOtp(String input) {
   return '+$digits';
 }
 
+String _digitsOnlyPhone(String input) => input.replaceAll(RegExp(r'[^0-9]'), '');
+
 class _OtpAttemptGuard {
   static final Map<String, List<DateTime>> _attemptsByPhone = {};
 
@@ -327,7 +329,37 @@ class _KycScreenState extends State<KycScreen> {
     final normalizedPhone = _normalizePhoneForOtp(e164Phone);
     _kycFlowLog('Phone continue pressed. raw="$e164Phone" normalized="$normalizedPhone"');
     if (_bypassOtpValidationForDev) {
-      _kycFlowLog('BYPASS_OTP=true, skipping OTP step and moving forward without auth verification');
+      final currentSession = Supabase.instance.client.auth.currentSession;
+      final currentUser = currentSession?.user;
+      if (currentSession == null || currentUser == null) {
+        _kycFlowLog('BYPASS_OTP=true blocked: no active auth session');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('BYPASS_OTP requiere una sesión activa. Inicia sesión primero o desactiva el bypass.'),
+            ),
+          );
+        }
+        return;
+      }
+
+      final enteredDigits = _digitsOnlyPhone(normalizedPhone);
+      final sessionPhoneDigits = _digitsOnlyPhone(currentUser.phone ?? '');
+      if (sessionPhoneDigits.isEmpty || sessionPhoneDigits != enteredDigits) {
+        _kycFlowLog(
+          'BYPASS_OTP=true blocked: entered phone does not match active session phone. entered=$enteredDigits session=$sessionPhoneDigits sessionUserId=${currentUser.id}',
+        );
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('El teléfono capturado no coincide con la sesión activa. Cierra sesión o usa OTP normal.'),
+            ),
+          );
+        }
+        return;
+      }
+
+      _kycFlowLog('BYPASS_OTP=true with matching active session, proceeding without OTP verify');
       setState(() => _e164Phone = normalizedPhone);
       _goNext();
       return;

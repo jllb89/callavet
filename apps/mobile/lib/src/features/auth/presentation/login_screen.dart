@@ -567,9 +567,32 @@ class _LoginScreenState extends State<LoginScreen> {
       }
 
       if (_bypassOtpValidationForDev) {
-        _loginLog('BYPASS_OTP=true, skipping login OTP verify and checking profile completeness');
-        final userId = Supabase.instance.client.auth.currentUser?.id ?? _existingUserId;
-        if (userId == null) {
+        final currentSession = Supabase.instance.client.auth.currentSession;
+        final currentUser = currentSession?.user;
+        final enteredDigits = _digitsOnly(normalized);
+        final sessionPhoneDigits = _digitsOnly(currentUser?.phone ?? '');
+
+        if (currentSession == null || currentUser == null) {
+          _loginLog('BYPASS_OTP=true blocked: no active auth session for phone=$normalized');
+          setState(() {
+            _errorText = 'BYPASS_OTP requiere una sesión activa. Inicia sesión primero o desactiva el bypass.';
+          });
+          return;
+        }
+
+        if (sessionPhoneDigits.isEmpty || sessionPhoneDigits != enteredDigits) {
+          _loginLog(
+            'BYPASS_OTP=true blocked: entered phone does not match active session phone. entered=$enteredDigits session=$sessionPhoneDigits sessionUserId=${currentUser.id}',
+          );
+          setState(() {
+            _errorText = 'El teléfono no coincide con la sesión activa. Cierra sesión o usa OTP normal.';
+          });
+          return;
+        }
+
+        _loginLog('BYPASS_OTP=true with matching active session, skipping OTP verify and checking profile completeness');
+        final userId = currentUser.id;
+        if (userId.isEmpty) {
           if (!mounted) return;
           context.go('/home');
           return;
