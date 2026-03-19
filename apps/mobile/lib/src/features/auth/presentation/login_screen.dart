@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:country_picker/country_picker.dart';
 import 'package:cav_mobile/src/core/config/environment.dart';
+import 'package:cav_mobile/src/core/navigation/post_login_routing_controller.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_libphonenumber/flutter_libphonenumber.dart';
@@ -62,7 +63,6 @@ class _LoginScreenState extends State<LoginScreen> {
   String? _emailForOtp;
   String _otpChannel = 'sms';
   int _resendSecondsLeft = 0;
-  String? _existingUserId;
   bool _isSendingOtp = false;
   bool _isVerifyingOtp = false;
   String? _errorText;
@@ -226,6 +226,25 @@ class _LoginScreenState extends State<LoginScreen> {
     return '$message (intenta de nuevo en $waitText)';
   }
 
+  String _gatewayOtpErrorMessage(_GatewayOtpException err, {required String channel}) {
+    final code = (err.code ?? '').toLowerCase();
+    final message = err.message.toLowerCase();
+    final isNotFound = code.contains('not_found') ||
+        code.contains('user_not_found') ||
+        message.contains('not found') ||
+        message.contains('no existe') ||
+        message.contains('usuario no encontrado') ||
+        message.contains('account not found');
+
+    if (isNotFound) {
+      return channel == 'sms'
+          ? 'No encontramos una cuenta con ese número. Toca crear una cuenta.'
+          : 'No encontramos una cuenta con ese correo. Toca crear una cuenta.';
+    }
+
+    return _retryMessage(err.message, err.retryAfterSeconds);
+  }
+
   Future<Map<String, dynamic>> _gatewayPost(String path, Map<String, dynamic> body) async {
     final uri = Uri.parse('${Environment.apiBaseUrl}$path');
     final client = HttpClient();
@@ -247,6 +266,51 @@ class _LoginScreenState extends State<LoginScreen> {
         );
       }
       return data;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Future<bool?> _hasActiveSubscriptionViaGateway() async {
+    final token = Supabase.instance.client.auth.currentSession?.accessToken;
+    if (token == null || token.isEmpty) {
+      _loginLog('Active subscription check skipped: missing auth token');
+      return false;
+    }
+
+    final uri = Uri.parse('${Environment.apiBaseUrl}/subscriptions/my');
+    final client = HttpClient();
+    try {
+      final req = await client.getUrl(uri);
+      req.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+
+      final res = await req.close();
+      final text = await utf8.decoder.bind(res).join();
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        _loginLog(
+          'Active subscription check failed status=${res.statusCode} body=$text',
+        );
+        return null;
+      }
+
+      final decoded =
+          text.isEmpty ? <String, dynamic>{} : (jsonDecode(text) as Map<String, dynamic>);
+      final data = decoded['data'];
+      if (data is! List) {
+        _loginLog('Active subscription check response has non-list data: $decoded');
+        return false;
+      }
+
+      final hasActive = data.whereType<Map>().any((row) {
+        final status = (row['status']?.toString() ?? '').toLowerCase();
+        return status == 'active' || status == 'trialing';
+      });
+      _loginLog('Active subscription check via gateway: hasActive=$hasActive');
+      return hasActive;
+    } catch (err) {
+      _loginLog('Active subscription check threw error: $err');
+      return null;
     } finally {
       client.close(force: true);
     }
@@ -400,41 +464,6 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
-  Future<bool> _phoneExists(String phoneInput) async {
-    final client = Supabase.instance.client;
-    final e164 = _normalizePhone(phoneInput);
-    final digits = _digitsOnly(e164);
-    _loginLog('Checking existing user by phone. e164=$e164 digits=$digits');
-
-    final byDigits = await client
-        .from('users')
-        .select('id, phone, email, full_name')
-        .eq('phone', digits)
-        .maybeSingle();
-
-    if (byDigits != null) {
-      _existingUserId = byDigits['id']?.toString();
-      _loginLog('Existing user found by digits. userId=$_existingUserId row=$byDigits');
-      return true;
-    }
-
-    final byE164 = await client
-        .from('users')
-        .select('id, phone, email, full_name')
-        .eq('phone', e164)
-        .maybeSingle();
-
-    if (byE164 != null) {
-      _existingUserId = byE164['id']?.toString();
-      _loginLog('Existing user found by e164. userId=$_existingUserId row=$byE164');
-      return true;
-    }
-
-    _existingUserId = null;
-    _loginLog('No existing user found for phone=$e164');
-    return false;
-  }
-
   String? _missingKycStep(Map<String, dynamic>? row) {
     if (row == null) return 'profile';
     final fullName = (row['full_name'] as String?)?.trim() ?? '';
@@ -544,8 +573,35 @@ class _LoginScreenState extends State<LoginScreen> {
       context.go('/kyc?start=$missingStep');
       return;
     }
-    _loginLog('Routing userId=$userId to /home (profile complete)');
-    context.go('/home');
+
+    final hasActiveSubscription = await _hasActiveSubscriptionViaGateway();
+    if (!mounted) return;
+
+    if (hasActiveSubscription == true) {
+      _loginLog('Routing userId=$userId to /home (active subscription found)');
+      PostLoginRoutingController.routeTo(
+        context,
+        route: '/home',
+        source: 'login-post-auth-profile-complete',
+        userId: userId,
+        reason: 'active-subscription',
+      );
+      return;
+    }
+
+    _loginLog(
+      'Routing userId=$userId to /subscription-plans '
+      '(no active subscription; loader skipped for login path)',
+    );
+    PostLoginRoutingController.routeTo(
+      context,
+      route: '/subscription-plans',
+      source: 'login-post-auth-profile-complete',
+      userId: userId,
+      reason: hasActiveSubscription == null
+          ? 'subscription-check-failed-fallback-to-plans'
+          : 'no-active-subscription',
+    );
   }
 
   Future<void> _sendOtp() async {
@@ -558,14 +614,6 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
-      final exists = await _phoneExists(normalized);
-      if (!exists) {
-        setState(() {
-          _errorText = 'No encontramos una cuenta con ese número. Toca crear una cuenta.';
-        });
-        return;
-      }
-
       if (_bypassOtpValidationForDev) {
         final currentSession = Supabase.instance.client.auth.currentSession;
         final currentUser = currentSession?.user;
@@ -624,7 +672,7 @@ class _LoginScreenState extends State<LoginScreen> {
       });
     } on _GatewayOtpException catch (err) {
       _loginLog('OTP request gateway error: ${err.message} code=${err.code} retry=${err.retryAfterSeconds}');
-      setState(() => _errorText = _retryMessage(err.message, err.retryAfterSeconds));
+      setState(() => _errorText = _gatewayOtpErrorMessage(err, channel: 'sms'));
     } on AuthException catch (err) {
       _loginLog('OTP request auth error: ${err.message}');
       setState(() => _errorText = err.message);
@@ -638,28 +686,6 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  Future<bool> _emailExists(String emailInput) async {
-    final client = Supabase.instance.client;
-    final normalized = emailInput.trim().toLowerCase();
-    _loginLog('Checking existing user by email=$normalized');
-
-    final byEmail = await client
-        .from('users')
-        .select('id, phone, email, full_name')
-        .eq('email', normalized)
-        .maybeSingle();
-
-    if (byEmail != null) {
-      _existingUserId = byEmail['id']?.toString();
-      _loginLog('Existing user found by email. userId=$_existingUserId row=$byEmail');
-      return true;
-    }
-
-    _existingUserId = null;
-    _loginLog('No existing user found for email=$normalized');
-    return false;
-  }
-
   Future<void> _sendEmailOtp() async {
     if (_isSendingOtp) return;
     final email = _emailController.text.trim().toLowerCase();
@@ -671,17 +697,9 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
-      final exists = await _emailExists(email);
-      if (!exists) {
-        setState(() {
-          _errorText = 'No encontramos una cuenta con ese correo. Toca crear una cuenta.';
-        });
-        return;
-      }
-
       if (_bypassOtpValidationForDev) {
         _loginLog('BYPASS_OTP=true, skipping login OTP verify (email path) and checking profile completeness');
-        final userId = Supabase.instance.client.auth.currentUser?.id ?? _existingUserId;
+        final userId = Supabase.instance.client.auth.currentUser?.id;
         if (userId == null) {
           if (!mounted) return;
           context.go('/home');
@@ -712,7 +730,7 @@ class _LoginScreenState extends State<LoginScreen> {
       });
     } on _GatewayOtpException catch (err) {
       _loginLog('Email OTP request gateway error: ${err.message} code=${err.code} retry=${err.retryAfterSeconds}');
-      setState(() => _errorText = _retryMessage(err.message, err.retryAfterSeconds));
+      setState(() => _errorText = _gatewayOtpErrorMessage(err, channel: 'email'));
     } catch (err) {
       _loginLog('Email OTP request error: $err');
       setState(() => _errorText = 'No se pudo enviar el código: $err');
@@ -797,7 +815,7 @@ class _LoginScreenState extends State<LoginScreen> {
       );
       await _recordVerifyAttempt(true);
       final userId = result.user?.id ?? client.auth.currentUser?.id;
-      _loginLog('verifyOTP success. session=${result.session != null} userId=$userId expectedExisting=$_existingUserId');
+      _loginLog('verifyOTP success. session=${result.session != null} userId=$userId');
 
       if (userId == null) {
         setState(() => _errorText = 'No se creó sesión de usuario.');

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpException, HttpStatus, Post, UseGuards, Req } from '@nestjs/common';
+import { Body, Controller, Get, HttpException, HttpStatus, Post, Query, UseGuards, Req } from '@nestjs/common';
 import { PriceService } from './price.service';
 import { DbService } from '../db/db.service';
 import { AuthGuard } from '../auth/auth.guard';
@@ -1051,6 +1051,87 @@ export class SubscriptionsController {
       return { data: rows };
     } catch (e: any) {
       throw new HttpException(e?.message || 'subscriptions_list_failed', HttpStatus.BAD_REQUEST);
+    }
+  }
+
+  @Get('recommendation')
+  async recommendation(@Query('horses') horsesRaw?: string) {
+    try {
+      if (this.db.isStub) {
+        return { ok: true, recommendedCode: null, strategy: 'stub' } as any;
+      }
+
+      const horsesTargetParsed = Number.parseInt((horsesRaw || '').trim(), 10);
+      const horsesTarget = Number.isFinite(horsesTargetParsed) && horsesTargetParsed > 0
+        ? horsesTargetParsed
+        : null;
+
+      const result = await this.db.runInTx(async (q) => {
+        const plansRes = await q<any>(
+          `select code, pets_included_default, coalesce(price_monthly_cents, price_cents) as monthly_price
+             from subscription_plans
+            where is_active = true
+            order by pets_included_default asc nulls last, coalesce(price_monthly_cents, price_cents) asc nulls last`
+        );
+        const plans = plansRes.rows || [];
+        if (!plans.length) {
+          return { ok: false, reason: 'no_active_plans' } as any;
+        }
+
+        const userRes = await q<any>(
+          `select customer_type
+             from users
+            where id = auth.uid()
+            limit 1`
+        );
+        const customerType = ((userRes.rows[0]?.customer_type || '') as string).trim().toLowerCase() || null;
+
+        let picked = null as any;
+        let strategy = 'fallback_first_active_plan';
+
+        if (horsesTarget !== null) {
+          picked = plans.find((p: any) => {
+            const coverage = Number(p?.pets_included_default || 0);
+            return Number.isFinite(coverage) && coverage >= horsesTarget;
+          }) || null;
+
+          if (!picked) {
+            picked = plans[plans.length - 1] || null;
+          }
+          strategy = 'horses_target';
+        }
+
+        if (!picked && customerType) {
+          const suggestedCode = {
+            owner: 'starter',
+            caballerango: 'plus',
+            veterinarian: 'cuadra',
+            trainer: 'pro-entrenador',
+            ranch_responsible: 'rancho-trabajo',
+          }[customerType] || 'starter';
+
+          picked = plans.find((p: any) => (p?.code || '').toLowerCase() === suggestedCode) || null;
+          if (picked) {
+            strategy = 'customer_type';
+          }
+        }
+
+        if (!picked) {
+          picked = plans[0] || null;
+        }
+
+        return {
+          ok: true,
+          recommendedCode: picked?.code ? String(picked.code).toLowerCase() : null,
+          strategy,
+          horsesTarget,
+          customerType,
+        };
+      });
+
+      return result;
+    } catch (e: any) {
+      throw new HttpException(e?.message || 'subscription_recommendation_failed', HttpStatus.BAD_REQUEST);
     }
   }
 

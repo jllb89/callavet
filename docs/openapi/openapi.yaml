@@ -584,6 +584,57 @@ paths:
       security: [{ bearerAuth: [] }]
       responses: { "200": { $ref: "#/components/responses/ListSubscriptions" } }
 
+  /subscriptions/recommendation:
+    get:
+      tags: [Plans & Subscriptions]
+      summary: Server-side recommended plan for the current user
+      description: |
+        Returns a recommended plan code computed on the server.
+        Strategy:
+        - If `horses` query param is provided, chooses the smallest active plan
+          whose `pets_included_default` covers that amount.
+        - Otherwise falls back to user `customer_type` mapping.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: horses
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+          description: Target number of horses to cover.
+      responses:
+        "200":
+          description: Recommendation resolved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  recommendedCode:
+                    type: string
+                    nullable: true
+                    description: Lowercased subscription plan code.
+                  strategy:
+                    type: string
+                    enum: [horses_target, customer_type, fallback_first_active_plan, stub]
+                  horsesTarget:
+                    type: integer
+                    nullable: true
+                  customerType:
+                    type: string
+                    nullable: true
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
+
   /subscriptions/usage/current:
     get:
       tags: [Plans & Subscriptions]

@@ -13,18 +13,21 @@ export class PlansController {
     }
     const rows = await this.db.runInTx(async (q) => {
       const { rows } = await q(
-        `select id, code, name, description, price_cents, currency, billing_period,
+        `select id, code, name, description, description_json, price_cents, price_monthly_cents, price_annual_cents, currency, billing_period,
                 included_chats, included_videos, pets_included_default, tax_rate, is_active
            from subscription_plans
           where is_active = true
-          order by price_cents asc nulls last`
+          order by coalesce(price_monthly_cents, price_cents) asc nulls last`
       );
       return rows.map((r: any) => ({
         id: r.id,
         code: r.code,
         name: r.name,
         description: r.description,
+        description_json: r.description_json,
         price_cents: r.price_cents,
+        price_monthly_cents: r.price_monthly_cents,
+        price_annual_cents: r.price_annual_cents,
         currency: r.currency,
         billing_period: r.billing_period,
         included_chats: r.included_chats,
@@ -44,7 +47,7 @@ export class PlansController {
     }
     const row = await this.db.runInTx(async (q) => {
       const { rows } = await q(
-        `select id, code, name, description, price_cents, currency, billing_period,
+        `select id, code, name, description, description_json, price_cents, price_monthly_cents, price_annual_cents, currency, billing_period,
                 included_chats, included_videos, pets_included_default, tax_rate, is_active
            from subscription_plans
           where lower(code) = lower($1)
@@ -62,7 +65,10 @@ export class PlansController {
       code: row.code,
       name: row.name,
       description: row.description,
+      description_json: row.description_json,
       price_cents: row.price_cents,
+      price_monthly_cents: row.price_monthly_cents,
+      price_annual_cents: row.price_annual_cents,
       currency: row.currency,
       billing_period: row.billing_period,
       included_chats: row.included_chats,

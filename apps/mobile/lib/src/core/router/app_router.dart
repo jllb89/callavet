@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
+import '../navigation/post_login_routing_controller.dart';
+
 import '../../features/auth/presentation/login_screen.dart';
 import '../../features/chat/presentation/chat_screen.dart';
 import '../../features/home/presentation/home_screen.dart';
@@ -9,6 +11,7 @@ import '../../features/horse_kyc/presentation/horse_kyc_screen.dart';
 import '../../features/kyc/presentation/kyc_screen.dart';
 import '../../features/onboarding/presentation/onboarding_screen.dart';
 import '../../features/onboarding/presentation/splash_screen.dart';
+import '../../features/subscriptions/presentation/subscription_plans_screen.dart';
 import '../../features/user_settings/presentation/user_settings_screen.dart';
 
 class AppRouter {
@@ -42,6 +45,31 @@ class AppRouter {
         path: '/horse-kyc',
         name: 'horseKyc',
         builder: (context, state) => const HorseKycScreen(),
+      ),
+      GoRoute(
+        path: '/subscription-loader',
+        name: 'subscriptionLoader',
+        builder: (context, state) {
+          final horses = int.tryParse(state.uri.queryParameters['horses'] ?? '');
+          postLoginRouteLog(
+            'Router entered /subscription-loader uri=${state.uri} horses=$horses',
+          );
+          return SubscriptionPlansLoaderScreen(horsesTarget: horses);
+        },
+      ),
+      GoRoute(
+        path: '/subscription-plans',
+        name: 'subscriptionPlans',
+        builder: (context, state) {
+          final recommended = state.uri.queryParameters['recommended'];
+          postLoginRouteLog(
+            'Router entered /subscription-plans uri=${state.uri} '
+            'recommended=$recommended',
+          );
+          return SubscriptionPlansScreen(
+            recommendedCode: recommended,
+          );
+        },
       ),
       GoRoute(
         path: '/home',

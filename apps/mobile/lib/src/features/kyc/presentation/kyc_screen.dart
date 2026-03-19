@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:country_picker/country_picker.dart';
 import 'package:country_picker/src/country_list_view.dart';
+import 'package:cav_mobile/src/core/navigation/post_login_routing_controller.dart';
 import 'package:cav_mobile/src/core/config/environment.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
@@ -134,7 +135,114 @@ String _normalizePhoneForOtp(String input) {
   return '+$digits';
 }
 
-String _digitsOnlyPhone(String input) => input.replaceAll(RegExp(r'[^0-9]'), '');
+String _digitsOnlyPhone(String input) =>
+    input.replaceAll(RegExp(r'[^0-9]'), '');
+
+bool _kycGatewayOtpUnavailable = false;
+
+String _otpRetryMessage(String message, int? retryAfterSeconds) {
+  if (retryAfterSeconds == null || retryAfterSeconds <= 0) return message;
+  final minutes = retryAfterSeconds ~/ 60;
+  final seconds = retryAfterSeconds % 60;
+  final waitText = minutes > 0 ? '${minutes}m ${seconds}s' : '${seconds}s';
+  return '$message (try again in $waitText)';
+}
+
+String _kycOtpErrorMessage(_GatewayOtpException err) {
+  final code = (err.code ?? '').toLowerCase();
+  final message = err.message.toLowerCase();
+  final isNotFound = code.contains('not_found') ||
+      code.contains('user_not_found') ||
+      message.contains('not found') ||
+      message.contains('usuario no encontrado') ||
+      message.contains('no existe');
+  if (isNotFound) {
+    return 'No account found with that phone number.';
+  }
+  return _otpRetryMessage(err.message, err.retryAfterSeconds);
+}
+
+bool _isKycGatewayOtpRouteMissing(_GatewayOtpException err) {
+  final msg = err.message.toLowerCase();
+  return (err.statusCode == 404) &&
+      (msg.contains('cannot post /auth/otp/') ||
+          msg.contains('cannot post /api/auth/otp/') ||
+          msg.contains('cannot post /v1/auth/otp/'));
+}
+
+Future<Map<String, dynamic>> _sendOtpDirectSupabaseForKyc({
+  required String phone,
+  required bool shouldCreateUser,
+}) async {
+  await Supabase.instance.client.auth.signInWithOtp(
+    phone: phone,
+    shouldCreateUser: shouldCreateUser,
+    channel: OtpChannel.sms,
+  );
+  return {
+    'ok': true,
+    'cooldownSeconds': 60,
+  };
+}
+
+Future<Map<String, dynamic>> _sendOtpViaGatewayForKyc({
+  required String phone,
+  required bool shouldCreateUser,
+}) async {
+  if (_kycGatewayOtpUnavailable) {
+    return _sendOtpDirectSupabaseForKyc(
+      phone: phone,
+      shouldCreateUser: shouldCreateUser,
+    );
+  }
+
+  final uri = Uri.parse('${Environment.apiBaseUrl}/auth/otp/send');
+  final http = HttpClient();
+  try {
+    final req = await http.postUrl(uri);
+    req.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+    req.add(
+      utf8.encode(
+        jsonEncode({
+          'channel': 'sms',
+          'phone': phone,
+          'shouldCreateUser': shouldCreateUser,
+        }),
+      ),
+    );
+
+    final res = await req.close();
+    final body = await utf8.decoder.bind(res).join();
+    final payload = body.isEmpty
+        ? <String, dynamic>{}
+        : (jsonDecode(body) as Map<String, dynamic>);
+
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw _GatewayOtpException(
+        statusCode: (payload['statusCode'] as num?)?.toInt() ?? res.statusCode,
+        message: payload['message']?.toString() ??
+            'Could not send verification code.',
+        code: payload['code']?.toString(),
+        retryAfterSeconds: (payload['retryAfterSeconds'] as num?)?.toInt(),
+      );
+    }
+    return payload;
+  } on _GatewayOtpException catch (err) {
+    if (_isKycGatewayOtpRouteMissing(err)) {
+      _kycFlowLog(
+        'Gateway OTP route unavailable. Falling back to direct Supabase OTP.',
+      );
+      _kycGatewayOtpUnavailable = true;
+      return _sendOtpDirectSupabaseForKyc(
+        phone: phone,
+        shouldCreateUser: shouldCreateUser,
+      );
+    }
+    rethrow;
+  } finally {
+    http.close(force: true);
+  }
+}
 
 class _OtpAttemptGuard {
   static final Map<String, List<DateTime>> _attemptsByPhone = {};
@@ -142,7 +250,8 @@ class _OtpAttemptGuard {
   static void _prune(String phone, DateTime now) {
     final attempts = _attemptsByPhone[phone];
     if (attempts == null) return;
-    attempts.removeWhere((attempt) => now.difference(attempt) >= _otpAttemptWindow);
+    attempts
+        .removeWhere((attempt) => now.difference(attempt) >= _otpAttemptWindow);
     if (attempts.isEmpty) {
       _attemptsByPhone.remove(phone);
     }
@@ -191,7 +300,7 @@ class _KycScreenState extends State<KycScreen> {
   String? _e164Phone;
   bool _isSendingOtp = false;
   bool _isSavingProfile = false;
-    bool _isSavingQuickAnswers = false;
+  bool _isSavingQuickAnswers = false;
   DateTime? _otpCooldownUntil;
   bool _showIsland = false;
   String _islandText = '';
@@ -199,6 +308,20 @@ class _KycScreenState extends State<KycScreen> {
 
   int get _profilePageIndex => _bypassOtpValidationForDev ? 1 : 2;
   int get _quickQuestionsPageIndex => _profilePageIndex + 1;
+
+  bool _isKycProfileComplete(Map<String, dynamic>? row) {
+    if (row == null) return false;
+    final fullName = (row['full_name'] as String?)?.trim() ?? '';
+    final email = (row['email'] as String?)?.trim() ?? '';
+    final country = (row['country'] as String?)?.trim() ?? '';
+    final state = (row['state'] as String?)?.trim() ?? '';
+    final customerType = (row['customer_type'] as String?)?.trim() ?? '';
+    return fullName.isNotEmpty &&
+        email.isNotEmpty &&
+        country.isNotEmpty &&
+        state.isNotEmpty &&
+        customerType.isNotEmpty;
+  }
 
   @override
   void initState() {
@@ -223,7 +346,8 @@ class _KycScreenState extends State<KycScreen> {
   }
 
   Future<void> _patchMeViaGateway(Map<String, dynamic> payload) async {
-    final sessionToken = Supabase.instance.client.auth.currentSession?.accessToken;
+    final sessionToken =
+        Supabase.instance.client.auth.currentSession?.accessToken;
     if (sessionToken == null || sessionToken.isEmpty) {
       throw StateError('missing auth session token for me patch request');
     }
@@ -275,7 +399,8 @@ class _KycScreenState extends State<KycScreen> {
       final state = (row['state'] as String?)?.trim();
 
       setState(() {
-        if ((fullName ?? '').isNotEmpty && _nameController.text.trim().isEmpty) {
+        if ((fullName ?? '').isNotEmpty &&
+            _nameController.text.trim().isEmpty) {
           _nameController.text = fullName!;
         }
         if ((email ?? '').isNotEmpty && _emailController.text.trim().isEmpty) {
@@ -302,8 +427,9 @@ class _KycScreenState extends State<KycScreen> {
 
   void _goNext() {
     final nextPage = _pageIndex + 1;
-    final totalSteps = _bypassOtpValidationForDev ? 4 : 5;
-    _kycFlowLog('Navigating next: current=$_pageIndex next=$nextPage totalSteps=$totalSteps bypassOtp=$_bypassOtpValidationForDev');
+    final totalSteps = _bypassOtpValidationForDev ? 3 : 4;
+    _kycFlowLog(
+        'Navigating next: current=$_pageIndex next=$nextPage totalSteps=$totalSteps bypassOtp=$_bypassOtpValidationForDev');
     if (nextPage < totalSteps) {
       _pageController.animateToPage(
         nextPage,
@@ -327,7 +453,8 @@ class _KycScreenState extends State<KycScreen> {
   Future<void> _handlePhoneContinue(String e164Phone) async {
     if (_isSendingOtp) return;
     final normalizedPhone = _normalizePhoneForOtp(e164Phone);
-    _kycFlowLog('Phone continue pressed. raw="$e164Phone" normalized="$normalizedPhone"');
+    _kycFlowLog(
+        'Phone continue pressed. raw="$e164Phone" normalized="$normalizedPhone"');
     if (_bypassOtpValidationForDev) {
       final currentSession = Supabase.instance.client.auth.currentSession;
       final currentUser = currentSession?.user;
@@ -336,7 +463,8 @@ class _KycScreenState extends State<KycScreen> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('BYPASS_OTP requiere una sesión activa. Inicia sesión primero o desactiva el bypass.'),
+              content: Text(
+                  'BYPASS_OTP requiere una sesión activa. Inicia sesión primero o desactiva el bypass.'),
             ),
           );
         }
@@ -352,14 +480,16 @@ class _KycScreenState extends State<KycScreen> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('El teléfono capturado no coincide con la sesión activa. Cierra sesión o usa OTP normal.'),
+              content: Text(
+                  'El teléfono capturado no coincide con la sesión activa. Cierra sesión o usa OTP normal.'),
             ),
           );
         }
         return;
       }
 
-      _kycFlowLog('BYPASS_OTP=true with matching active session, proceeding without OTP verify');
+      _kycFlowLog(
+          'BYPASS_OTP=true with matching active session, proceeding without OTP verify');
       setState(() => _e164Phone = normalizedPhone);
       _goNext();
       return;
@@ -370,7 +500,9 @@ class _KycScreenState extends State<KycScreen> {
       final seconds = guardRetryAfter.inSeconds % 60;
       final waitText = minutes > 0 ? '${minutes}m ${seconds}s' : '${seconds}s';
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Límite temporal alcanzado. Intenta de nuevo en $waitText.')),
+        SnackBar(
+            content: Text(
+                'Límite temporal alcanzado. Intenta de nuevo en $waitText.')),
       );
       return;
     }
@@ -378,7 +510,9 @@ class _KycScreenState extends State<KycScreen> {
     if (_otpCooldownUntil != null && now.isBefore(_otpCooldownUntil!)) {
       final secondsLeft = _otpCooldownUntil!.difference(now).inSeconds + 1;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Espera $secondsLeft segundos antes de pedir otro código.')),
+        SnackBar(
+            content: Text(
+                'Espera $secondsLeft segundos antes de pedir otro código.')),
       );
       return;
     }
@@ -387,22 +521,31 @@ class _KycScreenState extends State<KycScreen> {
       _e164Phone = normalizedPhone;
     });
     try {
-      final client = Supabase.instance.client;
-      _kycFlowLog('Requesting OTP via signInWithOtp(phone=$normalizedPhone, channel=sms)');
-      await client.auth.signInWithOtp(
+      _kycFlowLog(
+          'Requesting OTP via gateway /auth/otp/send for phone=$normalizedPhone');
+      final response = await _sendOtpViaGatewayForKyc(
         phone: normalizedPhone,
         shouldCreateUser: true,
-        channel: OtpChannel.sms,
       );
-      _kycFlowLog('OTP request accepted by Supabase for $normalizedPhone');
+      final cooldownSeconds =
+          (response['cooldownSeconds'] as num?)?.toInt() ?? 60;
+      _kycFlowLog(
+          'OTP request accepted for $normalizedPhone cooldown=$cooldownSeconds');
       _OtpAttemptGuard.register(normalizedPhone);
-      _otpCooldownUntil = DateTime.now().add(const Duration(seconds: 60));
+      _otpCooldownUntil = DateTime.now().add(Duration(seconds: cooldownSeconds));
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Código enviado a $normalizedPhone')),
         );
       }
       _goNext();
+    } on _GatewayOtpException catch (err) {
+      _kycFlowLog(
+          'OTP request gateway error: ${err.message} code=${err.code} retry=${err.retryAfterSeconds}');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(_kycOtpErrorMessage(err))),
+      );
     } on AuthException catch (err) {
       _kycFlowLog('OTP request AuthException: ${err.message}');
       if (!mounted) return;
@@ -425,15 +568,20 @@ class _KycScreenState extends State<KycScreen> {
   Future<void> _handleOtpVerified() async {
     final session = Supabase.instance.client.auth.currentSession;
     final user = Supabase.instance.client.auth.currentUser;
-    _kycFlowLog('OTP verified callback. session=${session != null} userId=${user?.id} phone=${user?.phone} email=${user?.email}');
+    _kycFlowLog(
+        'OTP verified callback. session=${session != null} userId=${user?.id} phone=${user?.phone} email=${user?.email}');
+    Map<String, dynamic>? userRow;
     if (user != null) {
       try {
         final row = await Supabase.instance.client
             .from('users')
-            .select('id,email,phone,full_name,country,state,is_verified,created_at,updated_at')
+            .select(
+                'id,email,phone,full_name,country,state,customer_type,is_verified,created_at,updated_at')
             .eq('id', user.id)
             .maybeSingle();
-        _kycFlowLog('public.users lookup after OTP for userId=${user.id}: $row');
+        userRow = row;
+        _kycFlowLog(
+            'public.users lookup after OTP for userId=${user.id}: $row');
       } catch (err) {
         _kycFlowLog('public.users lookup after OTP failed: $err');
       }
@@ -446,6 +594,41 @@ class _KycScreenState extends State<KycScreen> {
       _islandText = '';
       _islandOpacity = 0;
     });
+
+    if (_isKycProfileComplete(userRow)) {
+      _kycFlowLog(
+          'OTP verified for existing complete user; checking active subscription to route directly');
+      final hasActiveSubscription = await _hasActiveSubscriptionViaGateway();
+      if (!mounted) return;
+
+      if (hasActiveSubscription == true) {
+        postLoginRouteLog(
+          'KYC complete profile and active subscription found. Routing to /home userId=${user?.id}',
+        );
+        PostLoginRoutingController.routeTo(
+          context,
+          route: '/home',
+          source: 'kyc-otp-complete-profile',
+          userId: user?.id,
+          reason: 'active-subscription',
+        );
+      } else {
+        postLoginRouteLog(
+          'KYC complete profile and no active subscription. Routing directly to /subscription-plans userId=${user?.id}',
+        );
+        PostLoginRoutingController.routeTo(
+          context,
+          route: '/subscription-plans',
+          source: 'kyc-otp-complete-profile',
+          userId: user?.id,
+          reason: hasActiveSubscription == null
+              ? 'subscription-check-failed-fallback-to-plans'
+              : 'no-active-subscription',
+        );
+      }
+      return;
+    }
+
     _goNext();
   }
 
@@ -457,7 +640,8 @@ class _KycScreenState extends State<KycScreen> {
   }) async {
     if (_isSavingProfile) return;
     final user = Supabase.instance.client.auth.currentUser;
-    _kycFlowLog('Profile submit started. userId=${user?.id} emailInput=${email.trim().toLowerCase()} stateInput=${state.trim()} countryInput=${countryCode.trim().toUpperCase()}');
+    _kycFlowLog(
+        'Profile submit started. userId=${user?.id} emailInput=${email.trim().toLowerCase()} stateInput=${state.trim()} countryInput=${countryCode.trim().toUpperCase()}');
     if (user == null) {
       _kycFlowLog('Profile submit aborted: no active auth user/session');
       ScaffoldMessenger.of(context).showSnackBar(
@@ -477,25 +661,30 @@ class _KycScreenState extends State<KycScreen> {
         'state': state.trim(),
       };
       try {
-        _kycFlowLog('Patching /me via gateway with payload=$updatePayload userId=${user.id}');
+        _kycFlowLog(
+            'Patching /me via gateway with payload=$updatePayload userId=${user.id}');
         await _patchMeViaGateway(updatePayload);
       } catch (err) {
-        _kycFlowLog('Gateway /me patch failed, falling back to direct public.users update: $err');
+        _kycFlowLog(
+            'Gateway /me patch failed, falling back to direct public.users update: $err');
         final updatedRow = await Supabase.instance.client
             .from('users')
             .update(updatePayload)
             .eq('id', user.id)
-            .select('id,email,phone,full_name,country,state,is_verified,updated_at')
+            .select(
+                'id,email,phone,full_name,country,state,is_verified,updated_at')
             .maybeSingle();
-        _kycFlowLog('public.users fallback update result for userId=${user.id}: $updatedRow');
+        _kycFlowLog(
+            'public.users fallback update result for userId=${user.id}: $updatedRow');
       }
       _goNext();
     } on PostgrestException catch (err) {
-      _kycFlowLog('Profile update PostgrestException: code=${err.code} message=${err.message} details=${err.details} hint=${err.hint}');
+      _kycFlowLog(
+          'Profile update PostgrestException: code=${err.code} message=${err.message} details=${err.details} hint=${err.hint}');
       if (!mounted) return;
       final message = (err.message).toLowerCase();
-      final isDuplicateEmail =
-          message.contains('users_email_key') || message.contains('duplicate key');
+      final isDuplicateEmail = message.contains('users_email_key') ||
+          message.contains('duplicate key');
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
@@ -518,7 +707,55 @@ class _KycScreenState extends State<KycScreen> {
     }
   }
 
-  Future<void> _handleQuickQuestionsContinue(String customerType) async {
+  Future<bool?> _hasActiveSubscriptionViaGateway() async {
+    final token = Supabase.instance.client.auth.currentSession?.accessToken;
+    if (token == null || token.isEmpty) {
+      _kycFlowLog('Active subscription check skipped: missing auth token');
+      return false;
+    }
+
+    final uri = Uri.parse('${Environment.apiBaseUrl}/subscriptions/my');
+    final http = HttpClient();
+    try {
+      final req = await http.getUrl(uri);
+      req.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+
+      final res = await req.close();
+      final raw = await utf8.decoder.bind(res).join();
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        _kycFlowLog(
+          'Active subscription check failed status=${res.statusCode} body=$raw',
+        );
+        return null;
+      }
+
+      final decoded =
+          raw.isEmpty ? <String, dynamic>{} : (jsonDecode(raw) as Map<String, dynamic>);
+      final data = decoded['data'];
+      if (data is! List) {
+        _kycFlowLog('Active subscription check response has non-list data: $decoded');
+        return false;
+      }
+
+      final hasActive = data.whereType<Map>().any((row) {
+        final status = (row['status']?.toString() ?? '').toLowerCase();
+        return status == 'active' || status == 'trialing';
+      });
+      _kycFlowLog('Active subscription check via gateway: hasActive=$hasActive');
+      return hasActive;
+    } catch (err) {
+      _kycFlowLog('Active subscription check threw error: $err');
+      return null;
+    } finally {
+      http.close(force: true);
+    }
+  }
+
+  Future<void> _handleQuickQuestionsContinue(
+    String customerType,
+    int horsesTarget,
+  ) async {
     if (_isSavingQuickAnswers) return;
     final user = Supabase.instance.client.auth.currentUser;
     if (user == null) {
@@ -533,21 +770,41 @@ class _KycScreenState extends State<KycScreen> {
     try {
       final payload = {'customer_type': customerType};
       try {
-        _kycFlowLog('Patching /me via gateway for quick questions payload=$payload userId=${user.id}');
+        _kycFlowLog(
+            'Patching /me via gateway for quick questions payload=$payload userId=${user.id}');
         await _patchMeViaGateway(payload);
       } catch (err) {
-        _kycFlowLog('Gateway /me quick questions patch failed, falling back to direct public.users update: $err');
+        _kycFlowLog(
+            'Gateway /me quick questions patch failed, falling back to direct public.users update: $err');
         await Supabase.instance.client
             .from('users')
             .update(payload)
             .eq('id', user.id);
       }
-      _goNext();
+      postLoginRouteLog(
+        'KYC quick questions completed. userId=${user.id} '
+        'customerType=$customerType horsesTarget=$horsesTarget. Preparing subscription recommendation',
+      );
+      if (!mounted) return;
+      final query = '?horses=$horsesTarget';
+      postLoginRouteLog(
+        'Routing from KYC quick questions completion to /subscription-loader$query for userId=${user.id}',
+      );
+      PostLoginRoutingController.routeTo(
+        context,
+        route: '/subscription-loader$query',
+        source: 'kyc-quick-questions-complete',
+        userId: user.id,
+        reason: 'quick-questions-complete-horses-target',
+      );
     } on PostgrestException catch (err) {
-      _kycFlowLog('Quick questions update PostgrestException: code=${err.code} message=${err.message}');
+      _kycFlowLog(
+          'Quick questions update PostgrestException: code=${err.code} message=${err.message}');
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('No se pudo guardar tu tipo de usuario: ${err.message}')),
+        SnackBar(
+            content:
+                Text('No se pudo guardar tu tipo de usuario: ${err.message}')),
       );
     } catch (err) {
       _kycFlowLog('Quick questions update error: $err');
@@ -569,7 +826,8 @@ class _KycScreenState extends State<KycScreen> {
     final client = Supabase.instance.client;
     final currentUser = client.auth.currentUser;
     if (currentUser == null) {
-      _kycFlowLog('Skipping auth email confirmation request: no active auth user');
+      _kycFlowLog(
+          'Skipping auth email confirmation request: no active auth user');
       return;
     }
 
@@ -582,40 +840,52 @@ class _KycScreenState extends State<KycScreen> {
 
     try {
       await _requestEmailConfirmationViaGateway(email);
-      _kycFlowLog('Requested Supabase confirmation email via gateway for auth.users email=$email');
-      unawaited(_showIslandMessage('te enviamos un correo para confirmar tu email'));
+      _kycFlowLog(
+          'Requested Supabase confirmation email via gateway for auth.users email=$email');
+      unawaited(
+          _showIslandMessage('te enviamos un correo para confirmar tu email'));
       return;
     } on _GatewayEmailConfirmException catch (err) {
       final lower = err.message.toLowerCase();
-      final isRateLimited = err.statusCode == 429 || lower.contains('rate limit');
+      final isRateLimited =
+          err.statusCode == 429 || lower.contains('rate limit');
       if (isRateLimited) {
-        _kycFlowLog('Gateway confirmation request rate-limited for $email: ${err.message}');
+        _kycFlowLog(
+            'Gateway confirmation request rate-limited for $email: ${err.message}');
         unawaited(_showIslandMessage('ya te enviamos un correo recientemente'));
         return;
       }
-      _kycFlowLog('Gateway confirmation request failed, falling back app-side for $email: ${err.message}');
+      _kycFlowLog(
+          'Gateway confirmation request failed, falling back app-side for $email: ${err.message}');
     } catch (err) {
-      _kycFlowLog('Gateway confirmation request failed, falling back app-side for $email: $err');
+      _kycFlowLog(
+          'Gateway confirmation request failed, falling back app-side for $email: $err');
     }
 
     try {
       await client.auth.updateUser(
         UserAttributes(email: email),
       );
-      _kycFlowLog('Requested Supabase confirmation email for auth.users email=$email');
-      unawaited(_showIslandMessage('te enviamos un correo para confirmar tu email'));
+      _kycFlowLog(
+          'Requested Supabase confirmation email for auth.users email=$email');
+      unawaited(
+          _showIslandMessage('te enviamos un correo para confirmar tu email'));
     } catch (err) {
-      _kycFlowLog('Failed requesting Supabase confirmation email for $email: $err');
+      _kycFlowLog(
+          'Failed requesting Supabase confirmation email for $email: $err');
     }
   }
 
   Future<void> _requestEmailConfirmationViaGateway(String email) async {
-    final sessionToken = Supabase.instance.client.auth.currentSession?.accessToken;
+    final sessionToken =
+        Supabase.instance.client.auth.currentSession?.accessToken;
     if (sessionToken == null || sessionToken.isEmpty) {
-      throw StateError('missing auth session token for gateway email confirmation request');
+      throw StateError(
+          'missing auth session token for gateway email confirmation request');
     }
 
-    final uri = Uri.parse('${Environment.apiBaseUrl}/auth/otp/email/confirm-request');
+    final uri =
+        Uri.parse('${Environment.apiBaseUrl}/auth/otp/email/confirm-request');
     final http = HttpClient();
     try {
       final req = await http.postUrl(uri);
@@ -696,7 +966,8 @@ class _KycScreenState extends State<KycScreen> {
                       ),
                       TextButton(
                         onPressed: () => context.go('/home'),
-                        style: TextButton.styleFrom(foregroundColor: Colors.white),
+                        style:
+                            TextButton.styleFrom(foregroundColor: Colors.white),
                         child: const Text(
                           'saltar',
                           textAlign: TextAlign.right,
@@ -739,11 +1010,6 @@ class _KycScreenState extends State<KycScreen> {
                           isSaving: _isSavingQuickAnswers,
                           onSubmit: _handleQuickQuestionsContinue,
                         ),
-                        _KycPlaceholderScreen(
-                          title: 'todo listo',
-                          description: 'confirmación antes de ver los planes.',
-                          onNext: _goNext,
-                        ),
                       ],
                     ),
                   ),
@@ -760,7 +1026,8 @@ class _KycScreenState extends State<KycScreen> {
                 child: Center(
                   child: AnimatedContainer(
                     duration: const Duration(milliseconds: 250),
-                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 18, vertical: 10),
                     decoration: BoxDecoration(
                       color: Colors.black,
                       borderRadius: BorderRadius.circular(24),
@@ -801,6 +1068,20 @@ class _GatewayEmailConfirmException implements Exception {
   @override
   String toString() =>
       'Bad state: gateway email confirmation request failed status=$statusCode message=$message';
+}
+
+class _GatewayOtpException implements Exception {
+  const _GatewayOtpException({
+    required this.statusCode,
+    required this.message,
+    this.code,
+    this.retryAfterSeconds,
+  });
+
+  final int statusCode;
+  final String message;
+  final String? code;
+  final int? retryAfterSeconds;
 }
 
 class _GatewayMePatchException implements Exception {
@@ -1099,7 +1380,8 @@ class _KycPhoneScreenState extends State<_KycPhoneScreen> {
                                   LibPhonenumberTextFormatter(
                                     country: _selectedCountryData!,
                                     phoneNumberType: PhoneNumberType.mobile,
-                                    phoneNumberFormat: PhoneNumberFormat.national,
+                                    phoneNumberFormat:
+                                        PhoneNumberFormat.national,
                                     inputContainsCountryCode: false,
                                   ),
                                 ],
@@ -1150,7 +1432,8 @@ class _KycPhoneScreenState extends State<_KycPhoneScreen> {
               valueListenable: widget.phoneController,
               builder: (context, value, child) {
                 final hasInput = value.text.trim().isNotEmpty;
-                final isEnabled = hasInput && _isValid && _normalizedPhone != null;
+                final isEnabled =
+                    hasInput && _isValid && _normalizedPhone != null;
                 return ElevatedButton(
                   onPressed: isEnabled && !widget.isSending
                       ? () => widget.onSubmitPhone(_normalizedPhone!)
@@ -1240,7 +1523,8 @@ class _KycProfileScreenState extends State<_KycProfileScreen> {
   }
 
   Future<void> _preselectStateFromLocation() async {
-    if (_stateAutofillAttempted || widget.stateController.text.trim().isNotEmpty) {
+    if (_stateAutofillAttempted ||
+        widget.stateController.text.trim().isNotEmpty) {
       return;
     }
     _stateAutofillAttempted = true;
@@ -1250,7 +1534,8 @@ class _KycProfileScreenState extends State<_KycProfileScreen> {
       _kycLog('Location service enabled: $serviceEnabled');
       if (!serviceEnabled) {
         if (mounted) {
-          setState(() => _locationDebugText = 'Ubicación desactivada en el dispositivo.');
+          setState(() =>
+              _locationDebugText = 'Ubicación desactivada en el dispositivo.');
         }
         return;
       }
@@ -1264,7 +1549,8 @@ class _KycProfileScreenState extends State<_KycProfileScreen> {
       if (permission == LocationPermission.denied ||
           permission == LocationPermission.deniedForever) {
         if (mounted) {
-          setState(() => _locationDebugText = 'Permiso de ubicación no concedido.');
+          setState(
+              () => _locationDebugText = 'Permiso de ubicación no concedido.');
         }
         return;
       }
@@ -1282,7 +1568,8 @@ class _KycProfileScreenState extends State<_KycProfileScreen> {
       );
       if (placemarks.isEmpty) {
         if (mounted) {
-          setState(() => _locationDebugText = 'No se pudo resolver estado por coordenadas.');
+          setState(() => _locationDebugText =
+              'No se pudo resolver estado por coordenadas.');
         }
         return;
       }
@@ -1470,7 +1757,8 @@ class _KycProfileScreenState extends State<_KycProfileScreen> {
                                 ),
                               ),
                             ),
-                            if (_kycLocationDebug && _locationDebugText != null) ...[
+                            if (_kycLocationDebug &&
+                                _locationDebugText != null) ...[
                               const SizedBox(height: 8),
                               SelectableText(
                                 _locationDebugText!,
@@ -1506,14 +1794,18 @@ class _KycProfileScreenState extends State<_KycProfileScreen> {
                             width: 45,
                             height: 45,
                             child: ElevatedButton(
-                              onPressed: (_canContinue && !widget.isSaving) ? _submit : null,
+                              onPressed: (_canContinue && !widget.isSaving)
+                                  ? _submit
+                                  : null,
                               style: ElevatedButton.styleFrom(
                                 shape: const CircleBorder(),
                                 padding: EdgeInsets.zero,
                                 backgroundColor: Colors.white,
                                 foregroundColor: const Color(0xFF101010),
-                                disabledBackgroundColor: Colors.white.withOpacity(0.2),
-                                disabledForegroundColor: Colors.white.withOpacity(0.6),
+                                disabledBackgroundColor:
+                                    Colors.white.withOpacity(0.2),
+                                disabledForegroundColor:
+                                    Colors.white.withOpacity(0.6),
                               ),
                               child: widget.isSaving
                                   ? const SizedBox(
@@ -1521,7 +1813,8 @@ class _KycProfileScreenState extends State<_KycProfileScreen> {
                                       height: 16,
                                       child: CircularProgressIndicator(
                                         strokeWidth: 2,
-                                        valueColor: AlwaysStoppedAnimation<Color>(
+                                        valueColor:
+                                            AlwaysStoppedAnimation<Color>(
                                           Color(0xFF101010),
                                         ),
                                       ),
@@ -1592,84 +1885,18 @@ class _KycInputField extends StatelessWidget {
   }
 }
 
-class _KycPlaceholderScreen extends StatelessWidget {
-  const _KycPlaceholderScreen({
-    required this.title,
-    required this.description,
-    required this.onNext,
-  });
-
-  final String title;
-  final String description;
-  final VoidCallback onNext;
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              title,
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 18,
-                fontFamily: 'ABC Diatype',
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            const SizedBox(height: 12),
-            Text(
-              description,
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                color: Colors.white70,
-                fontSize: 13,
-                fontFamily: 'ABC Diatype',
-                fontWeight: FontWeight.w400,
-              ),
-            ),
-            const SizedBox(height: 24),
-            ElevatedButton(
-              onPressed: onNext,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.white,
-                foregroundColor: const Color(0xFF101010),
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(18),
-                ),
-              ),
-              child: const Text(
-                'continuar',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontFamily: 'ABC Diatype',
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 class _KycQuickQuestionsScreen extends StatefulWidget {
   const _KycQuickQuestionsScreen({
     required this.onSubmit,
     required this.isSaving,
   });
 
-  final Future<void> Function(String customerType) onSubmit;
+  final Future<void> Function(String customerType, int horsesTarget) onSubmit;
   final bool isSaving;
 
   @override
-  State<_KycQuickQuestionsScreen> createState() => _KycQuickQuestionsScreenState();
+  State<_KycQuickQuestionsScreen> createState() =>
+      _KycQuickQuestionsScreenState();
 }
 
 class _KycQuickQuestionsScreenState extends State<_KycQuickQuestionsScreen> {
@@ -1684,6 +1911,8 @@ class _KycQuickQuestionsScreenState extends State<_KycQuickQuestionsScreen> {
   int _identityIndex = 0;
   int _usageIndex = 0;
   int _coverageIndex = 1;
+
+  static const List<int> _horseTargetsByCoverageIndex = [1, 5, 15, 25, 26];
 
   @override
   Widget build(BuildContext context) {
@@ -1845,13 +2074,18 @@ class _KycQuickQuestionsScreenState extends State<_KycQuickQuestionsScreen> {
                   child: ElevatedButton(
                     onPressed: widget.isSaving
                         ? null
-                        : () => widget.onSubmit(_customerTypeByIndex[_identityIndex]),
+                        : () => widget
+                            .onSubmit(
+                              _customerTypeByIndex[_identityIndex],
+                              _horseTargetsByCoverageIndex[_coverageIndex],
+                            ),
                     style: ElevatedButton.styleFrom(
                       shape: const CircleBorder(),
                       padding: EdgeInsets.zero,
                       backgroundColor: Colors.white,
                       foregroundColor: const Color(0xFF101010),
-                      disabledBackgroundColor: Colors.white.withValues(alpha: 0.2),
+                      disabledBackgroundColor:
+                          Colors.white.withValues(alpha: 0.2),
                     ),
                     child: widget.isSaving
                         ? const SizedBox(
@@ -1859,7 +2093,8 @@ class _KycQuickQuestionsScreenState extends State<_KycQuickQuestionsScreen> {
                             height: 16,
                             child: CircularProgressIndicator(
                               strokeWidth: 2,
-                              valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF101010)),
+                              valueColor: AlwaysStoppedAnimation<Color>(
+                                  Color(0xFF101010)),
                             ),
                           )
                         : const Icon(Icons.arrow_forward, size: 18),
@@ -1896,7 +2131,8 @@ class _QuestionChip extends StatelessWidget {
           constraints: const BoxConstraints(minHeight: 51),
           padding: const EdgeInsets.symmetric(horizontal: 19, vertical: 12),
           decoration: ShapeDecoration(
-            color: selected ? Colors.white : Colors.white.withValues(alpha: 0.06),
+            color:
+                selected ? Colors.white : Colors.white.withValues(alpha: 0.06),
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(40),
             ),
@@ -1971,9 +2207,9 @@ class _KycOtpScreenState extends State<_KycOtpScreen> {
     super.dispose();
   }
 
-  void _startResendCooldown() {
+  void _startResendCooldown([int seconds = 60]) {
     _resendTimer?.cancel();
-    setState(() => _resendSecondsLeft = 60);
+    setState(() => _resendSecondsLeft = seconds);
     _resendTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (!mounted) {
         timer.cancel();
@@ -2011,10 +2247,12 @@ class _KycOtpScreenState extends State<_KycOtpScreen> {
         token: code,
         phone: phone,
       );
-      _kycFlowLog('verifyOTP success. session=${result.session != null} userId=${result.user?.id} phone=${result.user?.phone} email=${result.user?.email}');
+      _kycFlowLog(
+          'verifyOTP success. session=${result.session != null} userId=${result.user?.id} phone=${result.user?.phone} email=${result.user?.email}');
       final currentUser = client.auth.currentUser;
       final currentSession = client.auth.currentSession;
-      _kycFlowLog('Post-verify currentSession=${currentSession != null} currentUserId=${currentUser?.id}');
+      _kycFlowLog(
+          'Post-verify currentSession=${currentSession != null} currentUserId=${currentUser?.id}');
       widget.onVerified();
     } on AuthException catch (err) {
       _kycFlowLog('verifyOTP AuthException: ${err.message}');
@@ -2042,7 +2280,8 @@ class _KycOtpScreenState extends State<_KycOtpScreen> {
       final minutes = guardRetryAfter.inMinutes;
       final seconds = guardRetryAfter.inSeconds % 60;
       final waitText = minutes > 0 ? '${minutes}m ${seconds}s' : '${seconds}s';
-      setState(() => _errorText = 'demasiados intentos. intenta de nuevo en $waitText.');
+      setState(() =>
+          _errorText = 'demasiados intentos. intenta de nuevo en $waitText.');
       return;
     }
     setState(() {
@@ -2050,20 +2289,25 @@ class _KycOtpScreenState extends State<_KycOtpScreen> {
       _errorText = null;
     });
     try {
-      final client = Supabase.instance.client;
       _kycFlowLog('Resending OTP for phone=$normalizedPhone');
-      await client.auth.signInWithOtp(
+      final response = await _sendOtpViaGatewayForKyc(
         phone: normalizedPhone,
         shouldCreateUser: true,
-        channel: OtpChannel.sms,
       );
-      _kycFlowLog('Resend OTP accepted by Supabase for phone=$normalizedPhone');
+      final cooldownSeconds =
+          (response['cooldownSeconds'] as num?)?.toInt() ?? 60;
+      _kycFlowLog(
+          'Resend OTP accepted for phone=$normalizedPhone cooldown=$cooldownSeconds');
       _OtpAttemptGuard.register(normalizedPhone);
       if (!mounted) return;
-      _startResendCooldown();
+      _startResendCooldown(cooldownSeconds);
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('código reenviado.')),
       );
+    } on _GatewayOtpException catch (err) {
+      _kycFlowLog(
+          'Resend OTP gateway error: ${err.message} code=${err.code} retry=${err.retryAfterSeconds}');
+      setState(() => _errorText = _kycOtpErrorMessage(err));
     } on AuthException catch (err) {
       _kycFlowLog('Resend OTP AuthException: ${err.message}');
       setState(() => _errorText = err.message);
@@ -2186,9 +2430,10 @@ class _KycOtpScreenState extends State<_KycOtpScreen> {
           child: SizedBox(
             width: double.infinity,
             child: ElevatedButton(
-              onPressed: (!_isVerifying && _codeController.text.trim().length == 6)
-                  ? _verifyCode
-                  : null,
+              onPressed:
+                  (!_isVerifying && _codeController.text.trim().length == 6)
+                      ? _verifyCode
+                      : null,
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.white,
                 foregroundColor: const Color(0xFF101010),
@@ -2249,7 +2494,8 @@ class _OtpGroupBox extends StatelessWidget {
         children: List.generate(3, (index) {
           final digitIndex = startIndex + index;
           final value = digitIndex < digits.length ? digits[digitIndex] : '';
-          return _OtpDigitSlot(value: value, isActive: digitIndex == digits.length);
+          return _OtpDigitSlot(
+              value: value, isActive: digitIndex == digits.length);
         }),
       ),
     );
