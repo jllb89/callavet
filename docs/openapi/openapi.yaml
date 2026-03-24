@@ -739,6 +739,52 @@ paths:
                   ok: { type: boolean, default: false }
                   reason: { $ref: "#/components/schemas/ErrorReason" }
 
+  /subscriptions/activate-plan:
+    post:
+      tags: [Plans & Subscriptions]
+      summary: Activate or switch plan server-side (internal flow)
+      description: |
+        Activates a plan directly in server/database without external checkout.
+        Intended for controlled internal or transitional flows.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code:
+                  type: string
+                  description: Plan code to activate.
+                seats:
+                  type: integer
+                  minimum: 1
+                  description: Optional pets/horse seats override.
+      responses:
+        "200":
+          description: Plan activated or switched
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  action: { type: string, enum: [activate-plan] }
+                  mode: { type: string, enum: [inserted, updated] }
+                  subscription: { type: object, additionalProperties: true }
+                  plan: { type: object, additionalProperties: true }
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
+
   /subscriptions/stripe/checkout:
     post:
       tags: [Plans & Subscriptions]

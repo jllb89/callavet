@@ -896,6 +896,173 @@ export class SubscriptionsController {
     }
   }
 
+  @Post('activate-plan')
+  async activatePlan(@Body() body: { code?: string; seats?: number }) {
+    try {
+      if (this.db.isStub) return { ok: true, stub: true, action: 'activate-plan' } as any;
+      const code = (body?.code || '').trim();
+      if (!code) return { ok: false, reason: 'validation_error', details: 'code required' };
+
+      const row = await this.db.runInTx(async (q) => {
+        const stripeManagedActive = await q<any>(
+          `select id, provider, status, current_period_end
+             from user_subscriptions
+            where user_id = auth.uid()
+              and provider = 'stripe'
+              and status in ('trialing','active')
+              and coalesce(current_period_end, now()) > now()
+            order by current_period_end desc nulls last
+            limit 1`
+        );
+        if (stripeManagedActive.rows[0]) {
+          return {
+            stripeManagedActive: true,
+            existing: stripeManagedActive.rows[0],
+          } as any;
+        }
+
+        const plan = await q<any>(
+          `select id, code, included_chats, included_videos, pets_included_default, billing_period
+             from subscription_plans
+            where is_active and lower(code)=lower($1)
+            limit 1`,
+          [code]
+        );
+        if (!plan.rows[0]) return { planNotFound: true } as any;
+
+        const active = await q<any>(
+          `select id, plan_id, current_period_start, current_period_end
+             from user_subscriptions
+            where user_id = auth.uid()
+              and status in ('trialing','active')
+              and coalesce(current_period_end, now()) > now()
+            order by current_period_end desc nulls last
+            limit 1`
+        );
+
+        const planRow = plan.rows[0];
+        const seats = body?.seats || planRow.pets_included_default;
+
+        if (active.rows[0]) {
+          const subId = active.rows[0].id;
+          const upd = await q<any>(
+            `update user_subscriptions
+                set plan_id = $1,
+                    status = 'active',
+                    pets_included = coalesce($2, pets_included),
+                    provider = coalesce(provider, 'internal'),
+                    auto_renew = true,
+                    updated_at = now()
+              where id = $3
+              returning id, plan_id, status, current_period_start, current_period_end, pets_included`,
+            [planRow.id, seats, subId]
+          );
+
+          await q(
+            `insert into subscription_usage (
+               id, subscription_id, period_start, period_end,
+               included_chats, included_videos,
+               consumed_chats, consumed_videos,
+               overage_chats, overage_videos,
+               updated_at
+             ) values (
+               gen_random_uuid(), $1, $2, $3,
+               $4, $5,
+               0, 0,
+               0, 0,
+               now()
+             )
+             on conflict (subscription_id, period_start, period_end)
+             do update set
+               included_chats = EXCLUDED.included_chats,
+               included_videos = EXCLUDED.included_videos,
+               updated_at = now()`,
+            [
+              subId,
+              upd.rows[0].current_period_start,
+              upd.rows[0].current_period_end,
+              planRow.included_chats,
+              planRow.included_videos,
+            ]
+          );
+
+          return { mode: 'updated', subscription: upd.rows[0], plan: planRow };
+        }
+
+        const ins = await q<any>(
+          `insert into user_subscriptions (
+             id, user_id, plan_id, status,
+             started_at, current_period_start, current_period_end,
+             cancel_at_period_end, auto_renew,
+             provider, pets_included,
+             created_at, updated_at
+           ) values (
+             gen_random_uuid(), auth.uid(), $1, 'active',
+             now(), now(),
+             case
+               when lower(coalesce($3::text, 'month')) = 'year' then now() + interval '1 year'
+               else now() + interval '1 month'
+             end,
+             false, true,
+             'internal', $2,
+             now(), now()
+           )
+           returning id, plan_id, status, current_period_start, current_period_end, pets_included`,
+          [planRow.id, seats, planRow.billing_period]
+        );
+
+        const sub = ins.rows[0];
+        await q(
+          `insert into subscription_usage (
+             id, subscription_id, period_start, period_end,
+             included_chats, included_videos,
+             consumed_chats, consumed_videos,
+             overage_chats, overage_videos,
+             updated_at
+           ) values (
+             gen_random_uuid(), $1, $2, $3,
+             $4, $5,
+             0, 0,
+             0, 0,
+             now()
+           )
+           on conflict (subscription_id, period_start, period_end)
+           do update set
+             included_chats = EXCLUDED.included_chats,
+             included_videos = EXCLUDED.included_videos,
+             updated_at = now()`,
+          [
+            sub.id,
+            sub.current_period_start,
+            sub.current_period_end,
+            planRow.included_chats,
+            planRow.included_videos,
+          ]
+        );
+
+        return { mode: 'inserted', subscription: sub, plan: planRow };
+      });
+
+      if ((row as any).stripeManagedActive) {
+        return {
+          ok: false,
+          reason: 'stripe_subscription_active_use_stripe_flow',
+          existing: (row as any).existing,
+        };
+      }
+      if ((row as any).planNotFound) return { ok: false, reason: 'plan_not_found' };
+      return {
+        ok: true,
+        action: 'activate-plan',
+        mode: (row as any).mode,
+        subscription: (row as any).subscription,
+        plan: (row as any).plan,
+      };
+    } catch (e: any) {
+      throw new (require('@nestjs/common').HttpException)({ ok: false, reason: 'activate_plan_failed', error: e?.message }, 400);
+    }
+  }
+
   @Post('reserve-chat')
   async reserveChat(@Body() body: { userId: string; sessionId: string }) {
     try {

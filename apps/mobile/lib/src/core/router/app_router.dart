@@ -72,6 +72,17 @@ class AppRouter {
         },
       ),
       GoRoute(
+        path: '/subscription-success',
+        name: 'subscriptionSuccess',
+        builder: (context, state) {
+          final plan = state.uri.queryParameters['plan'];
+          postLoginRouteLog(
+            'Router entered /subscription-success uri=${state.uri} plan=$plan',
+          );
+          return SubscriptionSuccessMockScreen(planCode: plan);
+        },
+      ),
+      GoRoute(
         path: '/home',
         name: 'home',
         builder: (context, state) => const HomeScreen(),

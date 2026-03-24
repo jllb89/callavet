@@ -216,10 +216,15 @@ class _SubscriptionPlansScreenState extends State<SubscriptionPlansScreen> {
         for (final plan in plans) plan.code.toLowerCase(): plan,
       };
       final suggestedCode = widget.recommendedCode?.trim().toLowerCase();
-      final resolvedRecommendedCode =
+      String? resolvedRecommendedCode =
           (suggestedCode != null && planByCode.containsKey(suggestedCode))
               ? suggestedCode
               : _SubscriptionPlansRepository.instance.cachedRecommendedCode;
+
+      if (resolvedRecommendedCode == null) {
+        resolvedRecommendedCode =
+            await _SubscriptionPlansRepository.instance.prepareSuggestions();
+      }
 
       setState(() {
         _plans = plans;
@@ -278,11 +283,8 @@ class _SubscriptionPlansScreenState extends State<SubscriptionPlansScreen> {
 
         if (!mounted) return;
         if (changeResult['ok'] == true) {
-          _subscriptionLog('Subscription patch succeeded. Routing to /home');
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Tu suscripción fue actualizada.')),
-          );
-          context.go('/home');
+          _subscriptionLog('Subscription patch succeeded. Routing to /subscription-success');
+          context.go('/subscription-success?plan=${selected.code}');
           return;
         }
 
@@ -294,50 +296,21 @@ class _SubscriptionPlansScreenState extends State<SubscriptionPlansScreen> {
       }
 
       _subscriptionLog(
-        'No active subscription. Creating Stripe checkout for plan=${selected.code}',
+        'No active subscription. Activating subscription server-side for plan=${selected.code}',
       );
-      final checkoutUrl = await _SubscriptionPlansRepository.instance
-          .createStripeCheckout(selected.code);
-      _subscriptionLog('stripe/checkout response url=$checkoutUrl');
+      final activationResult =
+          await _SubscriptionPlansRepository.instance.activatePlan(selected.code);
+      _subscriptionLog('activate-plan response: $activationResult');
 
       if (!mounted) return;
-      if (checkoutUrl == null || checkoutUrl.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('No se pudo iniciar el checkout en este momento.'),
-          ),
-        );
-        _subscriptionLog('Checkout URL missing; aborting launch.');
+      if (activationResult['ok'] == true) {
+        context.go('/subscription-success?plan=${selected.code}');
         return;
       }
 
-      final uri = Uri.tryParse(checkoutUrl);
-      if (uri == null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('URL de checkout inválida.')),
-        );
-        _subscriptionLog('Checkout URL parsing failed. raw=$checkoutUrl');
-        return;
-      }
-
-      final opened = await launchUrl(
-        uri,
-        mode: LaunchMode.externalApplication,
-      );
-      if (!mounted) return;
-      if (!opened) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('No se pudo abrir el checkout.')),
-        );
-        _subscriptionLog('launchUrl returned false for uri=$uri');
-        return;
-      }
-
-      _subscriptionLog('Checkout opened successfully. uri=$uri');
+      final reason = activationResult['reason']?.toString() ?? 'unknown_error';
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Completa el pago para activar tu suscripción.'),
-        ),
+        SnackBar(content: Text('No se pudo activar la suscripción: $reason')),
       );
     } catch (err) {
       _subscriptionLog('Subscribe flow failed: $err');
@@ -428,7 +401,7 @@ class _SubscriptionPlansScreenState extends State<SubscriptionPlansScreen> {
                             text: 'nuestros planes: ',
                             style: TextStyle(
                               color: Colors.white,
-                              fontSize: 20,
+                              fontSize: 16,
                               fontFamily: 'ABC Diatype',
                               fontWeight: FontWeight.w500,
                               height: 1.10,
@@ -439,7 +412,7 @@ class _SubscriptionPlansScreenState extends State<SubscriptionPlansScreen> {
                                 'desde un solo caballo hasta operaciones completas.',
                             style: TextStyle(
                               color: Colors.white,
-                              fontSize: 20,
+                              fontSize: 16,
                               fontFamily: 'ABC Diatype',
                               fontWeight: FontWeight.w300,
                               height: 1.10,
@@ -492,12 +465,6 @@ class _SubscriptionPlansScreenState extends State<SubscriptionPlansScreen> {
                               selected: _selectedPlan?.id == plan.id,
                               isRecommended:
                                   _recommendedCode == plan.code.toLowerCase(),
-                              priceLabel: _formatPrice(
-                                _isAnnual
-                                    ? plan.annualCents
-                                    : plan.monthlyCents,
-                              ),
-                              periodLabel: _isAnnual ? 'anual' : 'mensual',
                               onTap: () => _handlePlanSelected(plan),
                             ),
                           )
@@ -745,30 +712,48 @@ class _PlanDescription extends StatelessWidget {
     final pesos = (cents / 100).round();
     return '\$$pesos';
   }
+
 }
 
 class _PlanChip extends StatelessWidget {
   const _PlanChip({
     required this.label,
-    required this.priceLabel,
-    required this.periodLabel,
     required this.selected,
     required this.onTap,
     required this.isRecommended,
   });
 
   final String label;
-  final String priceLabel;
-  final String periodLabel;
   final bool selected;
   final VoidCallback onTap;
   final bool isRecommended;
 
   @override
   Widget build(BuildContext context) {
-    return Stack(
-      clipBehavior: Clip.none,
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        if (isRecommended)
+          Container(
+            margin: const EdgeInsets.only(left: 14, bottom: 4),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+            decoration: ShapeDecoration(
+              color: const Color(0xFF101010),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(40),
+              ),
+            ),
+            child: const Text(
+              'recomendado',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 8,
+                fontFamily: 'ABC Diatype',
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
         GestureDetector(
           onTap: onTap,
           child: Container(
@@ -795,45 +780,10 @@ class _PlanChip extends StatelessWidget {
                     height: 1.40,
                   ),
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  '$priceLabel / $periodLabel',
-                  style: TextStyle(
-                    color: selected
-                        ? Colors.black.withValues(alpha: 0.74)
-                        : Colors.white.withValues(alpha: 0.85),
-                    fontSize: 10,
-                    fontFamily: 'ABC Diatype',
-                    fontWeight: FontWeight.w400,
-                  ),
-                ),
               ],
             ),
           ),
         ),
-        if (isRecommended)
-          Positioned(
-            top: -9,
-            left: 14,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-              decoration: ShapeDecoration(
-                color: selected ? Colors.black : Colors.white,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(40),
-                ),
-              ),
-              child: Text(
-                'recomendado',
-                style: TextStyle(
-                  color: selected ? Colors.white : Colors.black,
-                  fontSize: 8,
-                  fontFamily: 'ABC Diatype',
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ),
-          ),
       ],
     );
   }
@@ -1105,6 +1055,27 @@ class _SubscriptionPlansRepository {
     return response['url']?.toString();
   }
 
+  Future<Map<String, dynamic>> activatePlan(String code) async {
+    final token = Supabase.instance.client.auth.currentSession?.accessToken;
+    if (token == null || token.isEmpty) {
+      _subscriptionLog('activatePlan aborted: missing auth token. code=$code');
+      return {'ok': false, 'reason': 'missing_auth_token'};
+    }
+
+    _subscriptionLog('Calling /subscriptions/activate-plan with code=$code');
+    final response = await _request(
+      method: 'POST',
+      path: '/subscriptions/activate-plan',
+      token: token,
+      body: {'code': code},
+    );
+
+    if (response is Map<String, dynamic>) {
+      return response;
+    }
+    return {'ok': false, 'reason': 'invalid_activate_plan_response'};
+  }
+
   Future<dynamic> _request({
     required String method,
     required String path,
@@ -1258,5 +1229,101 @@ class _SubscriptionPlan {
     if (value is int) return value;
     if (value is String) return int.tryParse(value);
     return null;
+  }
+}
+
+class SubscriptionSuccessMockScreen extends StatelessWidget {
+  const SubscriptionSuccessMockScreen({
+    super.key,
+    this.planCode,
+  });
+
+  final String? planCode;
+
+  @override
+  Widget build(BuildContext context) {
+    final planLabel = (planCode ?? '').trim().isEmpty
+        ? 'tu plan'
+        : (planCode ?? '').replaceAll('-', ' ');
+
+    return Scaffold(
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          const DecoratedBox(
+            decoration: BoxDecoration(
+              image: DecorationImage(
+                image: AssetImage('assets/images/onboarding/rectangle_1.png'),
+                fit: BoxFit.cover,
+              ),
+            ),
+          ),
+          DecoratedBox(
+            decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.55)),
+          ),
+          SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(24, 24, 24, 32),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  const Spacer(),
+                  const Icon(
+                    Icons.check_circle_rounded,
+                    color: Colors.white,
+                    size: 74,
+                  ),
+                  const SizedBox(height: 20),
+                  const Text(
+                    'suscripción activada',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 24,
+                      fontFamily: 'ABC Diatype',
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    'Tu plan $planLabel ya está activo.',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      fontFamily: 'ABC Diatype',
+                      fontWeight: FontWeight.w400,
+                    ),
+                  ),
+                  const Spacer(),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 48,
+                    child: ElevatedButton(
+                      onPressed: () => context.go('/home'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        foregroundColor: Colors.black,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(33.5),
+                        ),
+                      ),
+                      child: const Text(
+                        'ir al inicio',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontFamily: 'ABC Diatype',
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
