@@ -62,7 +62,7 @@ export class AppointmentsController {
           `select id from appointments
             where vet_id = $1
               and status in ('scheduled','active','confirmed')
-              and tsrange(starts_at, ends_at) && tsrange($2::timestamptz, ($2::timestamptz + make_interval(mins => $3)))
+              and tstzrange(starts_at, ends_at) && tstzrange($2::timestamptz, ($2::timestamptz + make_interval(mins => $3)))
             limit 1`,
           [body.vetId, body.startsAt, duration]
         );
@@ -157,7 +157,7 @@ export class AppointmentsController {
                     generate_series(r.start_at, r.end_at - make_interval(mins => (select dur from params)), make_interval(mins => (select dur from params))) as gs
            ),
            booked as (
-             select tsrange(starts_at, ends_at) as appt_range
+             select tstzrange(starts_at, ends_at) as appt_range
                from appointments
               where vet_id = (select vet_id from params)
                 and status in ('scheduled','active','confirmed')
@@ -165,7 +165,7 @@ export class AppointmentsController {
            select slot_start, slot_end
              from slots s
             where not exists (
-              select 1 from booked b where tsrange(s.slot_start, s.slot_end) && b.appt_range
+              select 1 from booked b where tstzrange(s.slot_start, s.slot_end) && b.appt_range
             )
             order by slot_start asc
             limit 200`,

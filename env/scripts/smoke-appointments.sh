@@ -32,7 +32,14 @@ if [[ -n "$VET_ID" ]]; then
   [[ -n "$SINCE" ]] && qs+="&since=$SINCE"
   [[ -n "$UNTIL" ]] && qs+="&until=$UNTIL"
   echo "[2] GET /vets/$VET_ID/availability/slots?$qs"
-  curl -sS "$GATEWAY_BASE/vets/$VET_ID/availability/slots?$qs" $hdrs | tee /dev/stderr | jq '.data | .[0] // {}'
+  slots_resp=$(curl -sS -w $'\n%{http_code}' "$GATEWAY_BASE/vets/$VET_ID/availability/slots?$qs" $hdrs)
+  slots_body=$(printf '%s\n' "$slots_resp" | sed '$d')
+  slots_status=$(printf '%s\n' "$slots_resp" | tail -n 1)
+  echo "$slots_body" | tee /dev/stderr | jq '.data | .[0] // {}'
+  if [[ "$slots_status" != "200" ]]; then
+    echo "ERROR: slots request failed with HTTP $slots_status" >&2
+    exit 1
+  fi
 else
   echo "[2] Skipped slots: set VET_ID to test." >&2
 fi
@@ -42,7 +49,19 @@ if [[ -n "$VET_ID" ]]; then
   startsAt=$(date -u -v+1H +"%Y-%m-%dT%H:%M:%SZ")
   echo "[3] POST /appointments (missing specialty)"
   body=$(jq -n --arg vetId "$VET_ID" --arg startsAt "$startsAt" --argjson durationMin $DURATION_MIN '{vetId: $vetId, startsAt: $startsAt, durationMin: $durationMin}')
-  curl -sS -X POST "$GATEWAY_BASE/appointments" $hdrs -d "$body" | tee /dev/stderr | jq '.reason // .status // .ok'
+  create_resp=$(curl -sS -w $'\n%{http_code}' -X POST "$GATEWAY_BASE/appointments" $hdrs -d "$body")
+  create_body=$(printf '%s\n' "$create_resp" | sed '$d')
+  create_status=$(printf '%s\n' "$create_resp" | tail -n 1)
+  echo "$create_body" | tee /dev/stderr | jq '.reason // .status // .ok // .message'
+  if [[ "$create_status" != "400" ]]; then
+    echo "ERROR: missing-specialty appointment request should return HTTP 400, got $create_status" >&2
+    exit 1
+  fi
+  create_message=$(echo "$create_body" | jq -r '.message // .reason // empty')
+  if [[ "$create_message" != "specialty_required" ]]; then
+    echo "ERROR: expected specialty_required for missing-specialty appointment request, got ${create_message:-<empty>}" >&2
+    exit 1
+  fi
 else
   echo "[3] Skipped create missing specialty: set VET_ID." >&2
 fi

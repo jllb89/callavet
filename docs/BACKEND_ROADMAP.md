@@ -56,7 +56,7 @@ Deliverables:
 - [x] Add rate limits and input hardening for OTP, session start, message create, room creation, and note creation.
 	Completed on 2026-04-22: added [services/gateway-api/src/modules/rate-limit/rate-limit.module.ts](/Users/jorge/Desktop/call-a-vet/services/gateway-api/src/modules/rate-limit/rate-limit.module.ts) plus endpoint guards/decorators, and applied them to OTP send, session start, session message create, session note create, and video room creation with additional payload validation.
 - [x] Create a backend smoke suite that covers subscriptions, sessions, messages, appointments, notes, and video endpoints.
-	Completed on 2026-04-22: added [env/scripts/smoke-backend-core.sh](/Users/jorge/Desktop/call-a-vet/env/scripts/smoke-backend-core.sh) to orchestrate the existing subscriptions, sessions, messages, appointments, session-notes, and video smoke scripts.
+	Completed on 2026-04-22: added [env/scripts/smoke-backend-core.sh](/Users/jorge/Desktop/call-a-vet/env/scripts/smoke-backend-core.sh) to orchestrate the existing subscriptions, sessions, messages, appointments, session-notes, and video smoke scripts. Validated on staging on 2026-04-23 against the redeployed gateway for subscriptions, sessions, messages, appointments list access, session notes, and video room lifecycle.
 
 Exit criteria:
 - No critical OpenAPI endpoint is stub-only.
@@ -193,7 +193,7 @@ Reason:
 - Returning to Flutter earlier would force UI work on unstable or stubbed backend capabilities.
 
 ## Suggested Execution Order for the Next 30 Days
-- Validate Phase 0 on staging with the backend core smoke suite and fix any environment-specific failures.
+- Phase 0 staging validation completed on 2026-04-23; keep the backend core smoke suite green as a deployment gate.
 - Start Phase 1 immediately after contract cleanup.
 - Make a hard provider decision for video during Phase 1, even if Phase 3 implementation starts later.
 - Define the encounter and horse-history schema during Phase 1 so chat and video events can link into it cleanly.
