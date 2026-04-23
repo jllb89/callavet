@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpCode, HttpException, HttpStatus, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpException, HttpStatus, Param, Patch, Post, Put, UseGuards } from '@nestjs/common';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { AuthGuard } from '../auth/auth.guard';
 import { DbService } from '../db/db.service';
@@ -14,6 +14,42 @@ export class PetsController {
     private readonly schema: SchemaService,
   ) {}
   private supabase?: SupabaseClient;
+
+  private sanitizeStringArray(input: unknown): string[] {
+    if (!Array.isArray(input)) return [];
+    return [...new Set(input.map((v) => this.normalizeString(v)).filter((v) => !!v))];
+  }
+
+  private ensureJsonObject(input: unknown, fieldName: string): Record<string, any> {
+    if (input == null) return {};
+    if (typeof input !== 'object' || Array.isArray(input)) {
+      throw new HttpException(`${fieldName} must be an object`, HttpStatus.BAD_REQUEST);
+    }
+    return input as Record<string, any>;
+  }
+
+  private ensureJsonArray(input: unknown, fieldName: string): any[] {
+    if (input == null) return [];
+    if (!Array.isArray(input)) {
+      throw new HttpException(`${fieldName} must be an array`, HttpStatus.BAD_REQUEST);
+    }
+    return input;
+  }
+
+  private async assertPetAccessible(petId: string): Promise<void> {
+    const userId = this.rc.requireUuidUserId();
+    const { rows } = await this.db.runInTx(async (q) => {
+      return q(
+        `select p.id
+           from pets p
+          where p.id = $1::uuid
+            and (p.user_id = $2::uuid or is_admin())
+          limit 1`,
+        [petId, userId],
+      );
+    });
+    if (!rows.length) throw new HttpException('Not Found', HttpStatus.NOT_FOUND);
+  }
 
   private normalizeString(input: unknown): string {
     return typeof input === 'string' ? input.trim() : '';
@@ -343,6 +379,127 @@ export class PetsController {
     });
     if (!rows.length) throw new HttpException('Not Found', 404);
     return;
+  }
+
+  @Get(':id/health-profile')
+  async getHealthProfile(@Param('id') id: string) {
+    await this.assertPetAccessible(id);
+    const { rows } = await this.db.runInTx(async (q) => {
+      return q(
+        `select pet_id, allergies, chronic_conditions, current_medications, vaccine_history,
+                injury_history, procedure_history, feed_profile, insurance, emergency_contacts,
+                created_at, updated_at
+           from pet_health_profiles
+          where pet_id = $1::uuid
+          limit 1`,
+        [id],
+      );
+    });
+
+    if (rows.length) return rows[0];
+
+    const created = await this.db.runInTx(async (q) => {
+      const { rows } = await q(
+        `insert into pet_health_profiles (pet_id)
+         values ($1::uuid)
+         on conflict (pet_id) do update set pet_id = excluded.pet_id
+         returning pet_id, allergies, chronic_conditions, current_medications, vaccine_history,
+                   injury_history, procedure_history, feed_profile, insurance, emergency_contacts,
+                   created_at, updated_at`,
+        [id],
+      );
+      return rows[0];
+    });
+
+    return created;
+  }
+
+  @Put(':id/health-profile')
+  async upsertHealthProfile(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      allergies?: string[];
+      chronic_conditions?: string[];
+      current_medications?: any[];
+      vaccine_history?: any[];
+      injury_history?: any[];
+      procedure_history?: any[];
+      feed_profile?: Record<string, any>;
+      insurance?: Record<string, any>;
+      emergency_contacts?: any[];
+    },
+  ) {
+    await this.assertPetAccessible(id);
+
+    const payload = {
+      allergies: this.sanitizeStringArray(body?.allergies),
+      chronic_conditions: this.sanitizeStringArray(body?.chronic_conditions),
+      current_medications: this.ensureJsonArray(body?.current_medications, 'current_medications'),
+      vaccine_history: this.ensureJsonArray(body?.vaccine_history, 'vaccine_history'),
+      injury_history: this.ensureJsonArray(body?.injury_history, 'injury_history'),
+      procedure_history: this.ensureJsonArray(body?.procedure_history, 'procedure_history'),
+      feed_profile: this.ensureJsonObject(body?.feed_profile, 'feed_profile'),
+      insurance: this.ensureJsonObject(body?.insurance, 'insurance'),
+      emergency_contacts: this.ensureJsonArray(body?.emergency_contacts, 'emergency_contacts'),
+    };
+
+    const { rows } = await this.db.runInTx(async (q) => {
+      return q(
+        `insert into pet_health_profiles (
+           pet_id,
+           allergies,
+           chronic_conditions,
+           current_medications,
+           vaccine_history,
+           injury_history,
+           procedure_history,
+           feed_profile,
+           insurance,
+           emergency_contacts
+         )
+         values (
+           $1::uuid,
+           $2::text[],
+           $3::text[],
+           $4::jsonb,
+           $5::jsonb,
+           $6::jsonb,
+           $7::jsonb,
+           $8::jsonb,
+           $9::jsonb,
+           $10::jsonb
+         )
+         on conflict (pet_id) do update set
+           allergies = excluded.allergies,
+           chronic_conditions = excluded.chronic_conditions,
+           current_medications = excluded.current_medications,
+           vaccine_history = excluded.vaccine_history,
+           injury_history = excluded.injury_history,
+           procedure_history = excluded.procedure_history,
+           feed_profile = excluded.feed_profile,
+           insurance = excluded.insurance,
+           emergency_contacts = excluded.emergency_contacts,
+           updated_at = now()
+         returning pet_id, allergies, chronic_conditions, current_medications, vaccine_history,
+                   injury_history, procedure_history, feed_profile, insurance, emergency_contacts,
+                   created_at, updated_at`,
+        [
+          id,
+          payload.allergies,
+          payload.chronic_conditions,
+          JSON.stringify(payload.current_medications),
+          JSON.stringify(payload.vaccine_history),
+          JSON.stringify(payload.injury_history),
+          JSON.stringify(payload.procedure_history),
+          JSON.stringify(payload.feed_profile),
+          JSON.stringify(payload.insurance),
+          JSON.stringify(payload.emergency_contacts),
+        ],
+      );
+    });
+
+    return rows[0];
   }
 
   @Post(':id/files/signed-url')

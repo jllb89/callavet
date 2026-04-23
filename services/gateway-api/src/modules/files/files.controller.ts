@@ -74,8 +74,35 @@ export class FilesController {
     if (error) {
       throw new BadRequestException(`upload failed: ${error.message}`);
     }
-    // Optional: auto-create image_cases entry if petId provided
+    // Optional: auto-create encounter-linked artifacts if petId provided
     if (body.petId) {
+      const encounterSql = `select coalesce($1::uuid, public.ensure_clinical_encounter($2::uuid, $3::uuid)) as encounter_id`;
+      const encounterRes = await (this.db as any).query(encounterSql, [
+        body.encounterId || null,
+        body.sessionId || null,
+        body.petId,
+      ]);
+      const encounterId = encounterRes.rows[0]?.encounter_id || null;
+
+      if (encounterId) {
+        const fileIdRes = await (this.db as any).query(`select gen_random_uuid() as id`);
+        const fileId = fileIdRes.rows[0].id;
+        await (this.db as any).query(
+          `insert into encounter_files (id, encounter_id, pet_id, session_id, uploaded_by, storage_path, content_type, labels, created_at)
+           values ($1, $2::uuid, $3::uuid, $4::uuid, auth.uid(), $5, $6, $7::text[], now())
+           on conflict (encounter_id, storage_path) do nothing`,
+          [
+            fileId,
+            encounterId,
+            body.petId,
+            body.sessionId || null,
+            body.path,
+            contentType,
+            body.labels || [],
+          ]
+        );
+      }
+
       const idSql = `select gen_random_uuid() as id`;
       const idRes = await (this.db as any).query(idSql);
       const id = idRes.rows[0].id;
@@ -83,7 +110,7 @@ export class FilesController {
         `insert into image_cases (id, encounter_id, pet_id, session_id, image_url, labels, findings, diagnosis_label, created_at)
          values (
            $1,
-           coalesce($2::uuid, public.ensure_clinical_encounter($4::uuid, $3::uuid)),
+           $2::uuid,
            $3,
            $4,
            $5,
@@ -94,7 +121,7 @@ export class FilesController {
          )`,
         [
           id,
-          body.encounterId || null,
+          encounterId,
           body.petId,
           body.sessionId || null,
           body.path,

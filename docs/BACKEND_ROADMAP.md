@@ -137,6 +137,9 @@ Started on 2026-04-23. Migration `0043_horse_kyc_schema.sql` is applied on stagi
 Update on 2026-04-23:
 Clinical encounter backbone implementation started with migration `0045_phase4_clinical_encounters.sql` (mirrored in `packages/db/migrations`). This introduces `public.clinical_encounters`, links `consultation_notes`, `image_cases`, and `care_plans` via `encounter_id`, and adds `ensure_clinical_encounter()` to consistently bind session-linked artifacts into one encounter timeline.
 
+Update on 2026-04-23 (post-redeploy full pass):
+Migration `0046_phase4_clinical_record_hardening.sql` added a structured horse health profile model (`public.pet_health_profiles`), structured clinical note fields (`assessment_text`, `diagnosis_text`, `follow_up_instructions`, `next_follow_up_at`, `severity`), and encounter-linked file artifacts (`public.encounter_files`). Gateway endpoints now expose `/pets/:petId/health-profile`, enrich `/sessions/:sessionId/notes`, and extend encounter timeline reads (`/pets/:petId/encounters`, `/encounters/:encounterId`) with files, session/appointment context, and health profile payloads.
+
 Goal:
 Move from free-text notes and loosely linked artifacts to a real clinical record that future AI and referral logic can trust.
 
@@ -207,7 +210,8 @@ Reason:
 - Returning to Flutter earlier would force UI work on unstable or stubbed backend capabilities.
 
 ## Suggested Execution Order for the Next 30 Days
-- Final backend smoke validation rerun completed on 2026-04-23 after smoke-script hardening: consolidated suite result `PASS=19 FAIL=0` (realtime script is environment-aware and reports skip for external TLS/connectivity constraints unless strict mode is enabled).
+- Final backend smoke validation rerun completed on 2026-04-23 after redeploy and targeted regression fixes: consolidated staging suite result `PASS=19 FAIL=0`.
+- Validation note: interpreter-aware suite execution is required (`zsh` shebang scripts must not be forced through `bash`), otherwise false negatives appear (for example, `print: command not found`) that do not reflect backend runtime health.
 - Phase 0 staging validation completed on 2026-04-23; keep the backend core smoke suite green as a deployment gate.
 - Phase 1 closed on staging on 2026-04-23 with a fresh all-green backend core smoke rerun, including the new vet-operations coverage.
 - Supabase CLI is now normalized around the native `supabase/` project; use `SUPABASE_DIRECT_DATABASE_URL` for CLI migration commands, with local mirrored history currently spanning `0035` through `0043`.
@@ -216,6 +220,7 @@ Reason:
 - Phase 2 staging proof is complete; keep `env/scripts/smoke-realtime-phase2.mjs` green as a gate for chat-service deploys.
 - Phase 3 is intentionally deferred; prioritize Phase 4 structured clinical record rollout before resuming video infrastructure work.
 - Do not add new Flutter medical-record features until Phase 4 contracts are stable.
+- Keep `env/scripts/smoke-phase4-clinical-record.sh` green as the deployment gate for clinical-record changes (health profile, structured notes, encounter timeline linking).
 
 ## Related Files
 - `services/gateway-api/src/modules/subscriptions/subscriptions.controller.ts`

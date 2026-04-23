@@ -14,7 +14,9 @@ export class SessionNotesController {
   async listSessionNotes(@Param('sessionId') sessionId: string) {
     const items = await this.db.runInTx(async (q) => {
       const { rows } = await q(
-        `select id, encounter_id, session_id, vet_id, pet_id, summary_text, plan_summary, created_at
+        `select id, encounter_id, session_id, vet_id, pet_id,
+                summary_text, plan_summary, assessment_text, diagnosis_text,
+                follow_up_instructions, next_follow_up_at, severity, created_at
            from consultation_notes
           where session_id = $1
             and (
@@ -45,15 +47,43 @@ export class SessionNotesController {
   @RateLimit({ key: 'sessions.notes.create', limit: 10, windowMs: 300_000 })
   async createSessionNote(
     @Param('sessionId') sessionId: string,
-    @Body() body: { summary_text?: string; plan_summary?: string; pet_id?: string }
+    @Body()
+    body: {
+      summary_text?: string;
+      plan_summary?: string;
+      assessment_text?: string;
+      diagnosis_text?: string;
+      follow_up_instructions?: string;
+      next_follow_up_at?: string;
+      severity?: 'low' | 'medium' | 'high' | 'critical';
+      pet_id?: string;
+    }
   ) {
     const summaryText = (body?.summary_text || '').toString().trim();
     const planSummary = (body?.plan_summary || '').toString().trim();
-    if (!summaryText && !planSummary) {
-      throw new HttpException('summary_text_or_plan_summary_required', HttpStatus.BAD_REQUEST);
+    const assessmentText = (body?.assessment_text || '').toString().trim();
+    const diagnosisText = (body?.diagnosis_text || '').toString().trim();
+    const followUpInstructions = (body?.follow_up_instructions || '').toString().trim();
+    const severity = body?.severity ? String(body.severity).trim().toLowerCase() : null;
+    const nextFollowUpAt = body?.next_follow_up_at ? new Date(body.next_follow_up_at) : null;
+
+    if (!summaryText && !planSummary && !assessmentText && !diagnosisText && !followUpInstructions) {
+      throw new HttpException('structured_note_content_required', HttpStatus.BAD_REQUEST);
     }
-    if (summaryText.length > 8000 || planSummary.length > 8000) {
+    if (
+      summaryText.length > 8000 ||
+      planSummary.length > 8000 ||
+      assessmentText.length > 8000 ||
+      diagnosisText.length > 4000 ||
+      followUpInstructions.length > 4000
+    ) {
       throw new HttpException('note_too_long', HttpStatus.BAD_REQUEST);
+    }
+    if (severity && !['low', 'medium', 'high', 'critical'].includes(severity)) {
+      throw new HttpException('severity_invalid', HttpStatus.BAD_REQUEST);
+    }
+    if (nextFollowUpAt && Number.isNaN(nextFollowUpAt.getTime())) {
+      throw new HttpException('next_follow_up_at_invalid', HttpStatus.BAD_REQUEST);
     }
     let pet_id = (body || {}).pet_id || null;
     // Derive pet_id from session if not provided
@@ -73,7 +103,22 @@ export class SessionNotesController {
     try {
       const row = await this.db.runInTx(async (q) => {
         const { rows } = await q(
-          `insert into consultation_notes (id, encounter_id, session_id, vet_id, pet_id, summary_text, plan_summary, embedding, created_at)
+          `insert into consultation_notes (
+             id,
+             encounter_id,
+             session_id,
+             vet_id,
+             pet_id,
+             summary_text,
+             plan_summary,
+             assessment_text,
+             diagnosis_text,
+             follow_up_instructions,
+             next_follow_up_at,
+             severity,
+             embedding,
+             created_at
+           )
            values (
              gen_random_uuid(),
              public.ensure_clinical_encounter($1, $2),
@@ -82,11 +127,28 @@ export class SessionNotesController {
              $2,
              $3,
              $4,
+             $5,
+             $6,
+             $7,
+             $8::timestamptz,
+             $9,
              NULL,
              now()
            )
-           returning id, encounter_id, session_id, vet_id, pet_id, summary_text, plan_summary, created_at`,
-          [sessionId, pet_id, summaryText || null, planSummary || null]
+           returning id, encounter_id, session_id, vet_id, pet_id,
+                     summary_text, plan_summary, assessment_text, diagnosis_text,
+                     follow_up_instructions, next_follow_up_at, severity, created_at`,
+          [
+            sessionId,
+            pet_id,
+            summaryText || null,
+            planSummary || null,
+            assessmentText || null,
+            diagnosisText || null,
+            followUpInstructions || null,
+            nextFollowUpAt ? nextFollowUpAt.toISOString() : null,
+            severity,
+          ]
         );
         if (process.env.DEV_DB_DEBUG === '1') {
           // eslint-disable-next-line no-console

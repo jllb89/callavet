@@ -475,6 +475,45 @@ paths:
       requestBody: { $ref: "#/components/requestBodies/SignedUrl" }
       responses: { "200": { $ref: "#/components/responses/SignedUrl" } }
 
+  /pets/{petId}/health-profile:
+    get:
+      tags: [Pets, Notes & Care Plans]
+      summary: Get structured horse health profile
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/petId" } ]
+      responses: { "200": { $ref: "#/components/responses/PetHealthProfile" } }
+    put:
+      tags: [Pets, Notes & Care Plans]
+      summary: Upsert structured horse health profile
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/petId" } ]
+      requestBody: { $ref: "#/components/requestBodies/PetHealthProfileUpsert" }
+      responses: { "200": { $ref: "#/components/responses/PetHealthProfile" } }
+
+  /pets/{petId}/encounters:
+    get:
+      tags: [Notes & Care Plans]
+      summary: List encounter timeline for a pet
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/petId" }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200 }
+      responses: { "200": { $ref: "#/components/responses/ListEncounters" } }
+
+  /encounters/{encounterId}:
+    get:
+      tags: [Notes & Care Plans]
+      summary: Get full encounter timeline detail
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: encounterId
+          required: true
+          schema: { type: string, format: uuid }
+      responses: { "200": { $ref: "#/components/responses/EncounterDetail" } }
+
   /centers/near:
     get:
       tags: [Centers]
@@ -2633,6 +2672,37 @@ components:
             properties:
               summary_text: { type: string }
               plan_summary: { type: string }
+              assessment_text: { type: string }
+              diagnosis_text: { type: string }
+              follow_up_instructions: { type: string }
+              next_follow_up_at: { type: string, format: date-time, nullable: true }
+              severity: { type: string, enum: [low, medium, high, critical], nullable: true }
+              pet_id: { type: string, format: uuid, nullable: true }
+    PetHealthProfileUpsert:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              allergies: { type: array, items: { type: string } }
+              chronic_conditions: { type: array, items: { type: string } }
+              current_medications:
+                type: array
+                items: { type: object, additionalProperties: true }
+              vaccine_history:
+                type: array
+                items: { type: object, additionalProperties: true }
+              injury_history:
+                type: array
+                items: { type: object, additionalProperties: true }
+              procedure_history:
+                type: array
+                items: { type: object, additionalProperties: true }
+              feed_profile: { type: object, additionalProperties: true }
+              insurance: { type: object, additionalProperties: true }
+              emergency_contacts:
+                type: array
+                items: { type: object, additionalProperties: true }
     CarePlanCreate:
       content:
         application/json:
@@ -2640,6 +2710,8 @@ components:
             type: object
             properties:
               created_by_ai: { type: boolean, default: true }
+              session_id: { type: string, format: uuid, nullable: true }
+              encounter_id: { type: string, format: uuid, nullable: true }
               short_term: { type: string }
               mid_term: { type: string }
               long_term: { type: string }
@@ -2669,6 +2741,8 @@ components:
             type: object
             properties:
               image_url: { type: string, format: uri }
+              encounter_id: { type: string, format: uuid, nullable: true }
+              session_id: { type: string, format: uuid, nullable: true }
               labels: { type: array, items: { type: string } }
               findings: { type: string }
               diagnosis_label: { type: string }
@@ -3018,6 +3092,27 @@ components:
               expiresIn: { type: integer, nullable: true }
               method: { type: string }
               headers: { type: object, additionalProperties: true }
+    PetHealthProfile:
+      description: Structured horse health profile
+      content: { application/json: { schema: { $ref: "#/components/schemas/PetHealthProfile" } } }
+    ListEncounters:
+      description: Encounter list
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Encounter" } } } } } }
+    EncounterDetail:
+      description: Encounter timeline detail
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              encounter: { $ref: "#/components/schemas/Encounter" }
+              notes: { type: array, items: { $ref: "#/components/schemas/Notes" } }
+              imageCases: { type: array, items: { $ref: "#/components/schemas/ImageCase" } }
+              carePlans: { type: array, items: { $ref: "#/components/schemas/CarePlan" } }
+              files: { type: array, items: { $ref: "#/components/schemas/EncounterFile" } }
+              appointment: { $ref: "#/components/schemas/Appointment", nullable: true }
+              session: { $ref: "#/components/schemas/Session", nullable: true }
+              healthProfile: { $ref: "#/components/schemas/PetHealthProfile", nullable: true }
     ListUsers:
       description: Users
       content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/User" } } } } } }
@@ -3250,16 +3345,48 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
+        encounter_id: { type: string, format: uuid, nullable: true }
         session_id: { type: string, format: uuid }
         pet_id: { type: string, format: uuid }
         vet_id: { type: string, format: uuid, nullable: true }
-        summary_text: { type: string }
-        plan_summary: { type: string }
+        summary_text: { type: string, nullable: true }
+        plan_summary: { type: string, nullable: true }
+        assessment_text: { type: string, nullable: true }
+        diagnosis_text: { type: string, nullable: true }
+        follow_up_instructions: { type: string, nullable: true }
+        next_follow_up_at: { type: string, format: date-time, nullable: true }
+        severity: { type: string, enum: [low, medium, high, critical], nullable: true }
         created_at: { type: string, format: date-time }
+    PetHealthProfile:
+      type: object
+      properties:
+        pet_id: { type: string, format: uuid }
+        allergies: { type: array, items: { type: string } }
+        chronic_conditions: { type: array, items: { type: string } }
+        current_medications:
+          type: array
+          items: { type: object, additionalProperties: true }
+        vaccine_history:
+          type: array
+          items: { type: object, additionalProperties: true }
+        injury_history:
+          type: array
+          items: { type: object, additionalProperties: true }
+        procedure_history:
+          type: array
+          items: { type: object, additionalProperties: true }
+        feed_profile: { type: object, additionalProperties: true }
+        insurance: { type: object, additionalProperties: true }
+        emergency_contacts:
+          type: array
+          items: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
     CarePlan:
       type: object
       properties:
         id: { type: string, format: uuid }
+        encounter_id: { type: string, format: uuid, nullable: true }
         pet_id: { type: string, format: uuid }
         created_by_ai: { type: boolean }
         short_term: { type: string }
@@ -3278,11 +3405,43 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
+        encounter_id: { type: string, format: uuid, nullable: true }
         pet_id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid, nullable: true }
         image_url: { type: string, format: uri }
         labels: { type: array, items: { type: string } }
         findings: { type: string }
         diagnosis_label: { type: string }
+    EncounterFile:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        encounter_id: { type: string, format: uuid }
+        pet_id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid, nullable: true }
+        storage_path: { type: string }
+        content_type: { type: string, nullable: true }
+        labels: { type: array, items: { type: string } }
+        created_at: { type: string, format: date-time }
+    Encounter:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid, nullable: true }
+        appointment_id: { type: string, format: uuid, nullable: true }
+        pet_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        vet_id: { type: string, format: uuid, nullable: true }
+        video_room_id: { type: string, nullable: true }
+        status: { type: string }
+        started_at: { type: string, format: date-time, nullable: true }
+        ended_at: { type: string, format: date-time, nullable: true }
+        notes_count: { type: integer, nullable: true }
+        image_cases_count: { type: integer, nullable: true }
+        care_plans_count: { type: integer, nullable: true }
+        files_count: { type: integer, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
     Appointment:
       type: object
       properties:
