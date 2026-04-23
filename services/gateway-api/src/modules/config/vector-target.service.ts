@@ -28,15 +28,29 @@ export class VectorTargetService implements OnModuleInit {
   // Cache: all target IDs (useful for type generation at startup)
   private targetIds = new Set<string>();
   private isReady = false;
+  private reloadPromise?: Promise<void>;
 
   constructor(private readonly db: DbService) {}
 
   async onModuleInit() {
     await this.db.ensureReady();
     if (!this.db.isStub) {
-      await this.loadAllTargets();
+      await this.reloadTargets();
       this.isReady = true;
     }
+  }
+
+  async getConfigOrReload(targetId: string): Promise<VectorTargetConfig> {
+    let config = this.targetCache.get(targetId);
+    if (config) return config;
+
+    await this.reloadTargets();
+    config = this.targetCache.get(targetId);
+    if (config) return config;
+
+    throw new Error(
+      `Vector target "${targetId}" not found. Available: ${Array.from(this.targetIds).join(', ')}`,
+    );
   }
 
   /**
@@ -103,8 +117,24 @@ export class VectorTargetService implements OnModuleInit {
     return Array.from(this.targetIds).sort();
   }
 
+  private async reloadTargets(): Promise<void> {
+    if (this.reloadPromise) {
+      await this.reloadPromise;
+      return;
+    }
+
+    this.reloadPromise = this.loadAllTargets();
+    try {
+      await this.reloadPromise;
+    } finally {
+      this.reloadPromise = undefined;
+    }
+  }
+
   private async loadAllTargets(): Promise<void> {
     try {
+      this.targetCache.clear();
+      this.targetIds.clear();
       const { rows } = await this.db.query<VectorTargetConfig>(
         `select id, table_name, embedding_column, dimension, snippet_expression, is_active
            from vector_targets

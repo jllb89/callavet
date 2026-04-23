@@ -146,27 +146,19 @@ export class SchemaService implements OnModuleInit {
       if (!def) continue;
 
       // Parse: CHECK (sex = ANY(ARRAY['male','female','gelding']))
-      const anyMatch = def.match(/\((\w+)\s*=\s*ANY\s*\(\s*ARRAY\[(.*?)\]\s*\)\)/);
+      const anyMatch = def.match(/\((\w+)\s*=\s*ANY\s*\(\s*ARRAY\[(.*?)\](?:\s*::[^\)]*)?\s*\)\)/);
       if (anyMatch) {
         const fieldName = anyMatch[1];
-        const valuesStr = anyMatch[2];
-        const values = valuesStr
-          .split(',')
-          .map((v: string) => v.trim().replace(/^'|'$/g, ''))
-          .filter((v: string) => v);
+        const values = this.extractQuotedStrings(anyMatch[2]);
         enumMap.set(fieldName, new Set(values));
         continue;
       }
 
       // Parse: CHECK (observed_last_6_months[1] = ANY(ARRAY[...]))
-      const arrayElementMatch = def.match(/\((\w+)\[1\]\s*=\s*ANY\s*\(\s*ARRAY\[(.*?)\]\s*\)\)/);
+      const arrayElementMatch = def.match(/\((\w+)\[1\]\s*=\s*ANY\s*\(\s*ARRAY\[(.*?)\](?:\s*::[^\)]*)?\s*\)\)/);
       if (arrayElementMatch) {
         const fieldName = arrayElementMatch[1];
-        const valuesStr = arrayElementMatch[2];
-        const values = valuesStr
-          .split(',')
-          .map((v: string) => v.trim().replace(/^'|'$/g, ''))
-          .filter((v: string) => v);
+        const values = this.extractQuotedStrings(arrayElementMatch[2]);
         enumMap.set(`${fieldName}_element`, new Set(values));
         continue;
       }
@@ -175,17 +167,17 @@ export class SchemaService implements OnModuleInit {
       const inMatch = def.match(/\((\w+)\s+IN\s*\((.*?)\)\)/);
       if (inMatch) {
         const fieldName = inMatch[1];
-        const valuesStr = inMatch[2];
-        const values = valuesStr
-          .split(',')
-          .map((v: string) => v.trim().replace(/^'|'$/g, ''))
-          .filter((v: string) => v);
+        const values = this.extractQuotedStrings(inMatch[2]);
         enumMap.set(fieldName, new Set(values));
         continue;
       }
     }
 
     return enumMap;
+  }
+
+  private extractQuotedStrings(str: string): string[] {
+    return Array.from(str.matchAll(/'((?:''|[^'])*)'/g), (match) => match[1].replace(/''/g, "'"));
   }
 
   private extractMaxLength(fieldName: string, constraints: any[]): number | undefined {

@@ -15,6 +15,7 @@ export class EnumService implements OnModuleInit {
   constructor(private readonly db: DbService) {}
 
   async onModuleInit() {
+    await this.db.ensureReady();
     if (!this.db.isStub) {
       await this.loadAllEnums();
       this.isReady = true;
@@ -58,11 +59,21 @@ export class EnumService implements OnModuleInit {
   private async loadAllEnums(): Promise<void> {
     // Query all CHECK constraints from information_schema
     const { rows: constraints } = await this.db.query(
-      `select table_name, constraint_definition
-         from information_schema.table_constraints
-         join information_schema.constraint_column_usage using (constraint_name, table_schema, table_name)
-        where table_schema = 'public' and constraint_type = 'CHECK'
-        order by table_name, constraint_name`,
+      `select tc.table_name,
+              ccu.column_name,
+              cc.check_clause as constraint_definition
+         from information_schema.table_constraints tc
+         join information_schema.constraint_column_usage ccu
+           on ccu.constraint_catalog = tc.constraint_catalog
+          and ccu.constraint_schema = tc.constraint_schema
+          and ccu.constraint_name = tc.constraint_name
+         join information_schema.check_constraints cc
+           on cc.constraint_catalog = tc.constraint_catalog
+          and cc.constraint_schema = tc.constraint_schema
+          and cc.constraint_name = tc.constraint_name
+        where tc.table_schema = 'public'
+          and tc.constraint_type = 'CHECK'
+        order by tc.table_name, tc.constraint_name`,
       [],
     );
 
@@ -73,7 +84,7 @@ export class EnumService implements OnModuleInit {
       // Parse CHECK constraint to extract column name and allowed values
       const parsed = this.parseCheckConstraint(def);
       if (parsed) {
-        const key = `${table}.${parsed.column}`;
+        const key = `${table}.${row.column_name || parsed.column}`;
         this.enumCache.set(key, parsed.values);
       }
     }
@@ -93,7 +104,7 @@ export class EnumService implements OnModuleInit {
 
     // Format 1: column = ANY(ARRAY['val1','val2',...])
     const anyMatch = definition.match(
-      /\((\w+)\s*=\s*ANY\s*\(\s*ARRAY\[(.*?)\]\s*\)\)/,
+      /\((\w+)\s*=\s*ANY\s*\(\s*ARRAY\[(.*?)\](?:\s*::[^\)]*)?\s*\)\)/,
     );
     if (anyMatch) {
       const column = anyMatch[1];
@@ -113,7 +124,7 @@ export class EnumService implements OnModuleInit {
 
     // Format 3: array element check column[1] = ANY(ARRAY[...])
     const arrayElementMatch = definition.match(
-      /\((\w+)\[1\]\s*=\s*ANY\s*\(\s*ARRAY\[(.*?)\]\s*\)\)/,
+      /\((\w+)\[1\]\s*=\s*ANY\s*\(\s*ARRAY\[(.*?)\](?:\s*::[^\)]*)?\s*\)\)/,
     );
     if (arrayElementMatch) {
       // Store under column_element_values for special handling
@@ -131,10 +142,7 @@ export class EnumService implements OnModuleInit {
    * "val1','val2','val3" -> Set("val1", "val2", "val3")
    */
   private extractQuotedStrings(str: string): Set<string> {
-    const values = str
-      .split(',')
-      .map((s) => s.trim().replace(/^'|'$/g, ''))
-      .filter((s) => s.length > 0);
+    const values = Array.from(str.matchAll(/'((?:''|[^'])*)'/g), (match) => match[1].replace(/''/g, "'"));
     return new Set(values);
   }
 }

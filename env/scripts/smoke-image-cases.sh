@@ -2,9 +2,13 @@
 set -euo pipefail
 
 : ${GATEWAY_BASE:?"Set GATEWAY_BASE"}
-: ${TOKEN:?"Set TOKEN (Bearer JWT)"}
-: ${PET_ID:?"Set PET_ID (uuid)"}
+: ${TOKEN:=${SB_ACCESS_TOKEN:-}}
 : ${SESSION_ID:=}
+
+if [[ -z "$TOKEN" && -n "${AUTH_HEADER:-}" ]]; then
+  TOKEN=${AUTH_HEADER#Authorization: Bearer }
+fi
+: ${TOKEN:?"Set TOKEN (Bearer JWT)"}
 
 hdr=(
   -H "Authorization: Bearer $TOKEN"
@@ -23,6 +27,16 @@ if [[ -z "$curl_bin" ]]; then
 fi
 [[ -z "$jq_bin" ]] && jq_bin=/usr/bin/jq
 [[ -z "$file_bin" ]] && file_bin=/usr/bin/file
+
+if [[ -z "${PET_ID:-}" ]]; then
+  if [[ -n "$jq_bin" && -x "$jq_bin" ]]; then
+    PET_ID=$($curl_bin -sS -X GET "$GATEWAY_BASE/pets" -H "Authorization: Bearer $TOKEN" | "$jq_bin" -r '.data[0].id // empty' 2>/dev/null || true)
+  else
+    PET_ID=''
+  fi
+fi
+
+: ${PET_ID:?"Set PET_ID (uuid)"}
 
 # Create a tiny PNG (1x1) base64 payload
 # Precomputed transparent PNG

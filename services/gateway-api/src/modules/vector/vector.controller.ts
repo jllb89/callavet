@@ -36,7 +36,7 @@ export class VectorController {
       }
 
       // Get target config from VectorTargetService
-      const cfg = this.vectorTargetService.getConfig(target);
+      const cfg = await this.vectorTargetService.getConfigOrReload(target);
       if (!cfg) throw new Error('unsupported_target');
 
       // Ensure embedding dimension matches table definition (pad/trim)
@@ -131,7 +131,7 @@ export class VectorController {
       const { target, items } = body || ({} as any);
       if (!target || !Array.isArray(items) || items.length === 0) throw new Error('invalid_request');
 
-      const cfg = this.vectorTargetService.getConfig(target);
+      const cfg = await this.vectorTargetService.getConfigOrReload(target);
       if (!cfg) throw new Error('unsupported_target');
 
       if (this.db.isStub) return { ok: true, updated: items.length, mode: 'stub', reason: 'db_unavailable' };
