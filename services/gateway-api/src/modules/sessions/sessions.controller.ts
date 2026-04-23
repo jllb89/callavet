@@ -4,11 +4,16 @@ import { AuthGuard } from '../auth/auth.guard';
 import { RequestContext } from '../auth/request-context.service';
 import { EndpointRateLimitGuard } from '../rate-limit/endpoint-rate-limit.guard';
 import { RateLimit } from '../rate-limit/rate-limit.decorator';
+import { ValidatorService } from '../config/validator.service';
 
 @Controller('sessions')
 @UseGuards(AuthGuard)
 export class SessionsController {
-  constructor(private readonly db: DbService, private readonly rc: RequestContext) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly rc: RequestContext,
+    private readonly validator: ValidatorService,
+  ) {}
 
   @Get()
   async list(
@@ -97,9 +102,7 @@ export class SessionsController {
       // Support `kind`, `mode`, or `type` field from clients; default chat
       const incoming = (body.kind || body.mode || body.type || 'chat')?.toString().toLowerCase();
       const kind: 'chat'|'video' = incoming === 'video' ? 'video' : 'chat';
-      if (body.sessionId && !/^[0-9a-fA-F-]{36}$/.test(body.sessionId)) {
-        throw new BadRequestException('sessionId must be a UUID when provided');
-      }
+      if (body.sessionId) this.validator.validateUUID(body.sessionId, 'sessionId');
       if (this.db.isStub) {
         const sessionId = body.sessionId || `sess_${Date.now()}`;
         return { ok: true, mode: 'stub', sessionId, kind };

@@ -3,11 +3,17 @@ import { PriceService } from './price.service';
 import { DbService } from '../db/db.service';
 import { AuthGuard } from '../auth/auth.guard';
 import { RequestContext } from '../auth/request-context.service';
+import { EnumService } from '../config/enum.service';
 
 @Controller('subscriptions')
 @UseGuards(AuthGuard)
 export class SubscriptionsController {
-  constructor(private readonly db: DbService, private readonly rc: RequestContext, private readonly prices: PriceService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly rc: RequestContext,
+    private readonly prices: PriceService,
+    private readonly enumService: EnumService,
+  ) {}
 
   @Post('apple/verify')
   async appleVerify(
@@ -44,8 +50,8 @@ export class SubscriptionsController {
       `apple-verify:${providerSubscriptionId}:${(body?.event_type || 'manual_verify').trim() || 'manual_verify'}`;
     const environment = ((body?.environment || 'sandbox') as string).toLowerCase() === 'production' ? 'production' : 'sandbox';
     const statusIn = ((body?.status || 'active') as string).toLowerCase();
-    const allowed = new Set(['trialing', 'active', 'past_due', 'canceled', 'expired']);
-    const status = allowed.has(statusIn) ? statusIn : 'active';
+    const allowedStatuses = this.enumService.getValues('apple_subscription_events', 'status');
+    const status = allowedStatuses.size > 0 && allowedStatuses.has(statusIn) ? statusIn : 'active';
     const now = new Date();
     const periodStart = body?.current_period_start ? new Date(body.current_period_start) : now;
     const periodEnd = body?.current_period_end ? new Date(body.current_period_end) : new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);

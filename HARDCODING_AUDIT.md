@@ -189,12 +189,12 @@ Comprehensive scan of backend (10+ controllers) and database (43 migrations + 11
 | Location | Issue | Priority | Notes |
 |----------|-------|----------|-------|
 | `otp.controller.ts:17` | `type OtpChannel = 'sms' \| 'email'` | Low | Static 2-value contract, unlikely to change |
-| `otp.controller.ts:96` | Inline email regex | Low | Should use `ValidatorService.validateEmail()` |
-| `otp.controller.ts:80` | Inline phone normalization | Low | Should use `ValidatorService.validatePhoneE164()` |
+| `otp.controller.ts:96` | Inline email regex | ✅ FIXED | Uses `ValidatorService.validateEmail()` (commit 6f9f66a) |
+| `otp.controller.ts:80` | Inline phone normalization | ✅ FIXED | Uses `ValidatorService.validatePhoneE164()` (commit 6f9f66a) |
 | `subscriptions.controller.ts:47` | `new Set(['trialing','active','past_due','canceled','expired'])` | Low | External contract with Apple/Stripe, consider loading from EnumService |
 | `appointments.controller.ts:196-198` | State machine transition rules | Very Low | Business logic, not a simple enum — intentionally in code |
 | `me.controller.ts` | Inline email regex | Low | Should use `ValidatorService.validateEmail()` |
-| `kb.controller.ts:80` | Inline UUID regex test | Low | Should use `ValidatorService.isValidUUID()` |
+| `kb.controller.ts:80` | Inline UUID regex test | ✅ FIXED | Uses `ValidatorService.isValidUUID()` (commit 6f9f66a) |
 
 ---
 
@@ -232,8 +232,8 @@ services/gateway-api/src/modules/
 ├── vets/ratings.controller.ts       ✅ 3 issues fixed (commit 003fcad)
 ├── vector/vector.controller.ts      ✅ 5 issues fixed (commit 003fcad)
 ├── subscriptions/subscriptions.controller.ts  ⏳ 2 remaining (low priority - Stripe/Apple contracts)
-├── auth/otp.controller.ts           ⏳ 3 remaining (type OtpChannel, email regex, phone regex)
-├── kb/kb.controller.ts              ⏳ 1 remaining (inline UUID regex)
+├── auth/otp.controller.ts           ✅ inline email/phone regex fixed (commit 6f9f66a)
+├── kb/kb.controller.ts              ✅ inline UUID test fixed (commit 6f9f66a)
 ├── me/me.controller.ts              ⏳ 1 remaining (inline email regex)
 ├── admin/admin.controller.ts        ⏳ minor (pattern)
 ├── messages/messages.controller.ts  ⏳ minor (pagination constants)
