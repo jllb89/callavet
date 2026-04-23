@@ -93,6 +93,15 @@ export class DbService {
         };
         try {
           this.pool = new Pool(cfg);
+          this.pool.on('error', (err: any) => {
+            this.lastError = err?.message || String(err);
+            // eslint-disable-next-line no-console
+            console.error('[db] pool error event:', {
+              message: this.lastError,
+              code: err?.code,
+              severity: err?.severity,
+            });
+          });
         } catch (e: any) {
           this.lastError = e?.message || String(e);
           // eslint-disable-next-line no-console
