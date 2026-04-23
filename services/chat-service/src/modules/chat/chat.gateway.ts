@@ -31,7 +31,7 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
         this.getState(socket).sessions = this.getState(socket).sessions || new Set<string>();
         next();
       } catch (error) {
-        next(new Error(this.toErrorMessage(error)));
+        next(new Error(this.toClientErrorMessage(error)));
       }
     });
   }
@@ -47,7 +47,8 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     try {
       await this.joinSession(client, { sessionId, afterStreamOrder });
     } catch (error) {
-      client.emit('server.error', { message: this.toErrorMessage(error) });
+      this.logger.warn(`Chat connection failed: ${this.describeError(error)}`);
+      client.emit('server.error', { message: this.toClientErrorMessage(error) });
       client.disconnect(true);
     }
   }
@@ -111,7 +112,7 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       this.emitDelivery(payload.sessionId, receipt);
       return { ok: true, receipt };
     } catch (error) {
-      throw new WsException(this.toErrorMessage(error));
+      throw new WsException(this.toClientErrorMessage(error));
     }
   }
 
@@ -128,7 +129,7 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       });
       return { ok: true, receipt };
     } catch (error) {
-      throw new WsException(this.toErrorMessage(error));
+      throw new WsException(this.toClientErrorMessage(error));
     }
   }
 
@@ -141,7 +142,7 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       this.server.to(payload.sessionId).emit('server.message.edited', { message });
       return { ok: true, message };
     } catch (error) {
-      throw new WsException(this.toErrorMessage(error));
+      throw new WsException(this.toClientErrorMessage(error));
     }
   }
 
@@ -154,7 +155,7 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       this.server.to(payload.sessionId).emit('server.message.deleted', { messageId: message.id, deletedAt: message.deleted_at });
       return { ok: true, message };
     } catch (error) {
-      throw new WsException(this.toErrorMessage(error));
+      throw new WsException(this.toClientErrorMessage(error));
     }
   }
 
@@ -171,7 +172,7 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       });
       return { ok: true, message };
     } catch (error) {
-      throw new WsException(this.toErrorMessage(error));
+      throw new WsException(this.toClientErrorMessage(error));
     }
   }
 
@@ -198,7 +199,7 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       });
       return { ok: true, sessionId: payload.sessionId, cursor: sync.cursor };
     } catch (error) {
-      throw new WsException(this.toErrorMessage(error));
+      throw new WsException(this.toClientErrorMessage(error));
     }
   }
 
@@ -213,7 +214,7 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       const release = roomSize === 0 ? await this.chat.releaseSessionIfUnused(payload.sessionId, actor.claims) : { released: false, reason: 'room_not_empty' };
       return { ok: true, sessionId: payload.sessionId, release };
     } catch (error) {
-      throw new WsException(this.toErrorMessage(error));
+      throw new WsException(this.toClientErrorMessage(error));
     }
   }
 
@@ -233,7 +234,7 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       });
       return { ok: true };
     } catch (error) {
-      throw new WsException(this.toErrorMessage(error));
+      throw new WsException(this.toClientErrorMessage(error));
     }
   }
 
@@ -251,7 +252,7 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       });
       return { ok: true, duplicate: result.duplicate, committed: result.committed, message: result.message };
     } catch (error) {
-      throw new WsException(this.toErrorMessage(error));
+      throw new WsException(this.toClientErrorMessage(error));
     }
   }
 
@@ -392,7 +393,7 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     };
   }
 
-  private toErrorMessage(error: unknown): string {
+  private toClientErrorMessage(error: unknown): string {
     if (error instanceof WsException) {
       const cause = error.getError();
       return typeof cause === 'string' ? cause : 'chat_error';
@@ -400,8 +401,53 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     if (error instanceof Error && error.message) {
       return error.message;
     }
-    this.logger.warn(`Unexpected chat error: ${String(error)}`);
+    this.logger.warn(`Unexpected chat error: ${this.describeError(error)}`);
     return 'chat_error';
+  }
+
+  private describeError(error: unknown): string {
+    if (error instanceof WsException) {
+      return this.describeError(error.getError());
+    }
+    const aggregateErrors = this.getAggregateErrors(error);
+    if (aggregateErrors) {
+      const children = aggregateErrors
+        .map((child: unknown) => this.describeError(child))
+        .filter((value: string) => value.length > 0)
+        .join(' | ');
+      return children ? `AggregateError: ${children}` : 'AggregateError';
+    }
+    if (error instanceof Error) {
+      const parts = [error.name];
+      if (error.message) {
+        parts.push(error.message);
+      }
+      const code = Reflect.get(error, 'code');
+      if (typeof code === 'string' && code.length > 0) {
+        parts.push(`code=${code}`);
+      }
+      const cause = Reflect.get(error, 'cause');
+      if (cause) {
+        parts.push(`cause=${this.describeError(cause)}`);
+      }
+      return parts.join(': ');
+    }
+    if (typeof error === 'string') {
+      return error;
+    }
+    return String(error);
+  }
+
+  private getAggregateErrors(error: unknown): unknown[] | undefined {
+    if (!error || typeof error !== 'object') {
+      return undefined;
+    }
+    const name = Reflect.get(error, 'name');
+    const errors = Reflect.get(error, 'errors');
+    if (name === 'AggregateError' && Array.isArray(errors)) {
+      return errors;
+    }
+    return undefined;
   }
   }
 
