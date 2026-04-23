@@ -88,18 +88,18 @@ Exit criteria:
 Target: 2 to 3 weeks
 
 Status:
-Started in-repo on 2026-04-23. The chat-service now verifies websocket JWTs, authorizes session joins against `chat_sessions`, persists websocket-originated messages into `public.messages`, records delivery and read receipts in `public.message_receipts`, supports idempotency with `client_key`, adds stable `stream_order` sequencing, and releases unused reserved entitlements when an empty room is explicitly left. Remaining proof step is to apply `0042_realtime_chat_backbone.sql`, deploy chat-service, and run a focused realtime smoke against staging.
+Closed on staging on 2026-04-23. The chat-service now verifies websocket JWTs, authorizes session joins against `chat_sessions`, persists websocket-originated messages into `public.messages`, records delivery and read receipts in `public.message_receipts`, supports idempotency with `client_key`, adds stable `stream_order` sequencing, and releases unused reserved entitlements when an empty room is explicitly left. Migration `0042_realtime_chat_backbone.sql` was applied to staging DB and remote Supabase history repaired through `0042`. Focused realtime smoke test passed end-to-end: owner and vet joined appointment-backed session, message persisted with idempotent resend recognized as duplicate, delivery and read receipts broadcast correctly to both participants, unauthorized join rejected with "not_found", all DB records and transcript state consistent.
 
 Goal:
 Move chat from prototype transport to a production-grade consult channel that is tied to session and entitlement state.
 
 Deliverables:
-- Verify Supabase JWT on websocket connect.
-- Authorize room join against session membership and role.
-- Persist websocket-originated messages through the same source of truth used for transcript retrieval.
-- Implement delivery, read receipts, reconnect behavior, ordering guarantees, and idempotency.
-- Tie session start, reserve, commit, and release flows to the chat lifecycle so entitlements are consumed exactly once.
-- Add moderation and redaction hooks so transcripts remain supportable.
+- [x] Verify Supabase JWT on websocket connect.
+- [x] Authorize room join against session membership and role.
+- [x] Persist websocket-originated messages through the same source of truth used for transcript retrieval.
+- [x] Implement delivery, read receipts, reconnect behavior, ordering guarantees, and idempotency.
+- [x] Tie session start, reserve, commit, and release flows to the chat lifecycle so entitlements are consumed exactly once.
+- [x] Add moderation and redaction hooks so transcripts remain supportable.
 
 Exit criteria:
 - Realtime chat can reconnect without losing state or producing duplicate consumption.
@@ -108,6 +108,9 @@ Exit criteria:
 
 ## Phase 3. Video Consultation Platform
 Target: 2 to 3 weeks
+
+Status:
+Deferred on 2026-04-23 by product priority to focus on Phase 4 structured clinical record work first.
 
 Goal:
 Replace fake room issuance with a real video backend that behaves like subscriptions and billing do today.
@@ -127,6 +130,9 @@ Exit criteria:
 
 ## Phase 4. Structured Clinical Record for Horses
 Target: 3 weeks
+
+Status:
+Started on 2026-04-23. Migration `0043_horse_kyc_schema.sql` is applied on staging and mirrored in Supabase CLI history. `public.pets` now stores horse KYC fields as structured columns with enum and conditional constraints, array validations, indexed query surfaces, and updated search-vector rebuilding for retrieval and embedding workflows.
 
 Goal:
 Move from free-text notes and loosely linked artifacts to a real clinical record that future AI and referral logic can trust.
@@ -200,11 +206,12 @@ Reason:
 ## Suggested Execution Order for the Next 30 Days
 - Phase 0 staging validation completed on 2026-04-23; keep the backend core smoke suite green as a deployment gate.
 - Phase 1 closed on staging on 2026-04-23 with a fresh all-green backend core smoke rerun, including the new vet-operations coverage.
-- Supabase CLI is now normalized around the native `supabase/` project; use `SUPABASE_DIRECT_DATABASE_URL` for CLI migration commands, with local mirrored history currently spanning `0035` through `0042`.
+- Supabase CLI is now normalized around the native `supabase/` project; use `SUPABASE_DIRECT_DATABASE_URL` for CLI migration commands, with local mirrored history currently spanning `0035` through `0043`.
 - Make a hard provider decision for video during Phase 1, even if Phase 3 implementation starts later.
 - Define the encounter and horse-history schema during Phase 1 so chat and video events can link into it cleanly.
-- Start Phase 2 staging proof by applying `0042_realtime_chat_backbone.sql`, deploying chat-service, and running a websocket smoke before widening Flutter chat work.
-- Do not add new Flutter chat or video work until Phase 2 contracts are stable.
+- Phase 2 staging proof is complete; keep `env/scripts/smoke-realtime-phase2.mjs` green as a gate for chat-service deploys.
+- Phase 3 is intentionally deferred; prioritize Phase 4 structured clinical record rollout before resuming video infrastructure work.
+- Do not add new Flutter medical-record features until Phase 4 contracts are stable.
 
 ## Related Files
 - `services/gateway-api/src/modules/subscriptions/subscriptions.controller.ts`

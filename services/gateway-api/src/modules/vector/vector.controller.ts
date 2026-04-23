@@ -50,7 +50,11 @@ export class VectorController {
         notes: { table: 'consultation_notes', embCol: 'embedding', snippet: `left(coalesce(summary_text,'') || ' ' || coalesce(plan_summary,''), 240)` },
         products: { table: 'products', embCol: 'embedding', snippet: `left(coalesce(name,'') || ' ' || coalesce(description,''), 240)` },
         services: { table: 'services', embCol: 'embedding', snippet: `left(coalesce(name,'') || ' ' || coalesce(description,''), 240)` },
-        pets: { table: 'pets', embCol: 'embedding', snippet: `left(coalesce(name,'') || ' ' || coalesce(medical_notes,''), 240)` },
+        pets: {
+          table: 'pets',
+          embCol: 'embedding',
+          snippet: `left(coalesce(name,'') || ' ' || coalesce(breed,'') || ' ' || coalesce(primary_activity,'') || ' ' || coalesce(discipline,'') || ' ' || coalesce(additional_notes,''), 240)`,
+        },
         vets: { table: 'vets', embCol: 'embedding', snippet: `left(coalesce(bio,''), 240)` },
       };
       const cfg = map[target as VectorTarget];

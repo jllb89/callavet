@@ -1350,19 +1350,46 @@ components:
     PetInput:
       type: object
       properties:
-        name: { type: string }
-        species: { type: string }
-        breed: { type: string }
-        birthdate: { type: string, format: date }
-        sex: { type: string }
-        weight_kg: { type: number }
-        medical_notes: { type: string }
-      required: [name, species]
+        name: { type: string, maxLength: 100 }
+        species: { type: string, enum: [horse] }
+        sex: { type: string, enum: [male, female, gelding] }
+        age_range: { type: string, enum: [foal_0_2, young_3_5, adult_6_15, senior_16_plus] }
+        weight_range: { type: string, enum: [lt_400, 400_500, 500_600, gt_600] }
+        location:
+          type: object
+          properties:
+            country: { type: string, maxLength: 100 }
+            state_region: { type: string, maxLength: 100 }
+        location_country: { type: string, maxLength: 100 }
+        location_state_region: { type: string, maxLength: 100 }
+        breed: { type: string, enum: [quarter_horse, thoroughbred, pre, arabian, criollo, appaloosa, paint_horse, warmblood, mixed, other] }
+        warmblood_subbreed: { type: string, enum: [holsteiner, hanoverian, kwpn, oldenburg, selle_francais, westphalian, trakehner, other], nullable: true }
+        other_breed_text: { type: string, maxLength: 100, nullable: true }
+        primary_activity: { type: string, enum: [competition, regular_training, rehabilitation_recovery, retired, recreational] }
+        discipline: { type: string, enum: [jumping, dressage, polo, endurance, barrel_racing, reining, charreada, ranch_work, recreational, other] }
+        other_discipline_text: { type: string, maxLength: 100, nullable: true }
+        training_intensity: { type: string, enum: [1_2_per_week, 3_4_per_week, 5_plus_per_week] }
+        terrain: { type: string, enum: [sand, grass, dirt, mixed, other] }
+        other_terrain_text: { type: string, maxLength: 100, nullable: true }
+        observed_last_6_months:
+          type: array
+          items: { type: string, enum: [mild_lameness, stiffness, performance_drop, appetite_changes, none] }
+        known_conditions:
+          type: array
+          items: { type: string, enum: [digestive, locomotor, respiratory, skin, none] }
+        current_treatments_or_supplements: { type: string, maxLength: 500, nullable: true }
+        last_vet_check: { type: string, enum: [lt_3_months, 3_6_months, gt_6_months, dont_remember] }
+        vaccines_up_to_date: { type: string, enum: [yes, no, not_sure] }
+        deworming_status: { type: string, enum: [regular, irregular, not_sure] }
+        additional_notes: { type: string, maxLength: 1000, nullable: true }
     Pet:
       allOf:
         - $ref: "#/components/schemas/PetInput"
         - type: object
-          properties: { id: { type: string, format: uuid }, user_id: { type: string, format: uuid } }
+          properties:
+            id: { type: string, format: uuid }
+            user_id: { type: string, format: uuid }
+            created_at: { type: string, format: date-time }
     VetInput:
       type: object
       properties:

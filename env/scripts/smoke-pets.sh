@@ -16,7 +16,7 @@ echo "$resp" | $JQ -e '.data | type == "array"' >/dev/null 2>&1; assert_ok $? "p
 
 # Create pet
 resp=$(curl -sS -X POST -H "$AUTH_HEADER" -H 'Content-Type: application/json' \
-  -d '{"name":"Fido","species":"dog","breed":"mix"}' \
+  -d '{"name":"Fido","species":"horse","sex":"gelding","age_range":"adult_6_15","weight_range":"500_600","location":{"country":"MX","state_region":"Jalisco"},"breed":"criollo","primary_activity":"regular_training","discipline":"recreational","training_intensity":"3_4_per_week","terrain":"mixed","observed_last_6_months":["none"],"known_conditions":["none"],"last_vet_check":"3_6_months","vaccines_up_to_date":"yes","deworming_status":"regular"}' \
   "$BASE/pets") || true
 pet_id=$(echo "$resp" | $JQ -r '.id // empty')
 [[ -n "$pet_id" ]]; assert_ok $? "pets create"

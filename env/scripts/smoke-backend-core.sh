@@ -70,7 +70,7 @@ else
 fi
 
 if [[ -z "$PET_ID" ]]; then
-  create_pet_resp=$(curl -sS -X POST "$GATEWAY_BASE/pets" "${JSON_HEADER[@]}" -d '{"name":"Smoke Horse","species":"equine","breed":"criollo"}')
+  create_pet_resp=$(curl -sS -X POST "$GATEWAY_BASE/pets" "${JSON_HEADER[@]}" -d '{"name":"Smoke Horse","species":"horse","sex":"gelding","age_range":"adult_6_15","weight_range":"500_600","location":{"country":"MX","state_region":"Jalisco"},"breed":"criollo","primary_activity":"regular_training","discipline":"recreational","training_intensity":"3_4_per_week","terrain":"mixed","observed_last_6_months":["none"],"known_conditions":["none"],"last_vet_check":"3_6_months","vaccines_up_to_date":"yes","deworming_status":"regular"}')
   if command -v jq >/dev/null 2>&1; then
     PET_ID=$(echo "$create_pet_resp" | jq -r '.id // empty' 2>/dev/null || true)
   else
