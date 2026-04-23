@@ -2,17 +2,20 @@ import { BadRequestException, Controller, Get, Param, Post, Body, UseGuards, Not
 import { AuthGuard } from '../auth/auth.guard';
 import { DbService } from '../db/db.service';
 import { RequestContext } from '../auth/request-context.service';
-
-const UUID_RE = /^[0-9a-fA-F-]{36}$/;
+import { ValidatorService } from '../config/validator.service';
 
 @Controller()
 @UseGuards(AuthGuard)
 export class RatingsController {
-  constructor(private readonly db: DbService, private readonly rc: RequestContext) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly rc: RequestContext,
+    private readonly validator: ValidatorService,
+  ) {}
 
   @Get('vets/:vetId/ratings')
   async listForVet(@Param('vetId') vetId: string) {
-    if (!UUID_RE.test(vetId)) throw new BadRequestException('vetId must be a UUID');
+    this.validator.validateUUID(vetId, 'vetId');
     if (this.db.isStub) return { data: [] } as any;
     const { rows } = await this.db.query(
       `select r.id,
@@ -37,7 +40,7 @@ export class RatingsController {
     @Param('sessionId') sessionId: string,
     @Body() body: { score?: number; comment?: string }
   ) {
-    if (!UUID_RE.test(sessionId)) throw new BadRequestException('sessionId must be a UUID');
+    this.validator.validateUUID(sessionId, 'sessionId');
     const actorId = this.rc.requireUuidUserId();
     const score = Number(body?.score);
     if (!Number.isInteger(score) || score < 1 || score > 5) {
@@ -57,7 +60,7 @@ export class RatingsController {
     }
 
     const row = await this.db.runInTx(async (q) => {
-      const { rows: actorRows } = await q<{ role: 'user' | 'vet' | 'admin' }>(
+      const { rows: actorRows } = await q<{ role: string }>(
         `select role from users where id = $1::uuid limit 1`,
         [actorId]
       );

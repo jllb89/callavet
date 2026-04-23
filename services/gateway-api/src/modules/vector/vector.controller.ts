@@ -1,22 +1,14 @@
 import { Body, Controller, Get, HttpCode, HttpException, HttpStatus, Post, Query, UseGuards } from '@nestjs/common';
 import { DbService } from '../db/db.service';
 import { AuthGuard } from '../auth/auth.guard';
-
-type VectorTarget = 'kb' | 'messages' | 'notes' | 'products' | 'services' | 'pets' | 'vets';
+import { VectorTargetService } from '../config/vector-target.service';
 
 @Controller('vector')
 export class VectorController {
-  constructor(private readonly db: DbService) {}
-
-  private targetDim: Record<VectorTarget, number> = {
-    kb: 1536,
-    messages: 1536,
-    notes: 1536,
-    products: 1536,
-    services: 1536,
-    pets: 1536,
-    vets: 1536,
-  };
+  constructor(
+    private readonly db: DbService,
+    private readonly vectorTargetService: VectorTargetService,
+  ) {}
 
   private normalizeEmbedding(arr: any, dim: number): number[] {
     const src = Array.isArray(arr) ? arr : [];
@@ -33,7 +25,7 @@ export class VectorController {
   @UseGuards(AuthGuard)
   @Post('search')
   @HttpCode(HttpStatus.OK)
-  async search(@Body() body: { target: VectorTarget; query_embedding: number[]; topK?: number; filter_ids?: string[] }) {
+  async search(@Body() body: { target: string; query_embedding: number[]; topK?: number; filter_ids?: string[] }) {
     try {
       // Ensure pool initialization completed before checking stub mode
       await this.db.ensureReady();
@@ -43,31 +35,18 @@ export class VectorController {
         throw new Error('invalid_request');
       }
 
-      // Map target -> table, embedding column, snippet expression
-      const map: Record<VectorTarget, { table: string; embCol: string; snippet: string }> = {
-        kb: { table: 'kb_articles', embCol: 'embedding', snippet: `left(coalesce(title,'') || ' ' || coalesce(content,''), 240)` },
-        messages: { table: 'messages', embCol: 'embedding', snippet: `left(coalesce(content,''), 240)` },
-        notes: { table: 'consultation_notes', embCol: 'embedding', snippet: `left(coalesce(summary_text,'') || ' ' || coalesce(plan_summary,''), 240)` },
-        products: { table: 'products', embCol: 'embedding', snippet: `left(coalesce(name,'') || ' ' || coalesce(description,''), 240)` },
-        services: { table: 'services', embCol: 'embedding', snippet: `left(coalesce(name,'') || ' ' || coalesce(description,''), 240)` },
-        pets: {
-          table: 'pets',
-          embCol: 'embedding',
-          snippet: `left(coalesce(name,'') || ' ' || coalesce(breed,'') || ' ' || coalesce(primary_activity,'') || ' ' || coalesce(discipline,'') || ' ' || coalesce(additional_notes,''), 240)`,
-        },
-        vets: { table: 'vets', embCol: 'embedding', snippet: `left(coalesce(bio,''), 240)` },
-      };
-      const cfg = map[target as VectorTarget];
+      // Get target config from VectorTargetService
+      const cfg = this.vectorTargetService.getConfig(target);
       if (!cfg) throw new Error('unsupported_target');
 
-  // Ensure embedding dimension matches table definition (pad/trim)
-  const dim = this.targetDim[target as VectorTarget] ?? 1536;
-  const norm = this.normalizeEmbedding(query_embedding, dim);
-  // pgvector text literal for the embedding (e.g., '[0.1, 0.2, ...]')
-  const vecLiteral = `[${norm.join(',')}]`;
+      // Ensure embedding dimension matches table definition (pad/trim)
+      const dim = cfg.dimension;
+      const norm = this.normalizeEmbedding(query_embedding, dim);
+      // pgvector text literal for the embedding (e.g., '[0.1, 0.2, ...]')
+      const vecLiteral = `[${norm.join(',')}]`;
 
       const params: any[] = [vecLiteral, topK];
-      let where = `${cfg.embCol} IS NOT NULL`;
+      let where = `${cfg.embedding_column} IS NOT NULL`;
       if (Array.isArray(filter_ids) && filter_ids.length > 0) {
         params.push(filter_ids);
         where += ` AND id = ANY($${params.length}::uuid[])`;
@@ -75,11 +54,11 @@ export class VectorController {
 
       const sql = `
         SELECT id,
-               (1.0 - (${cfg.embCol} <=> $1::vector)) AS score,
-               ${cfg.snippet} AS snippet
-          FROM ${cfg.table}
+               (1.0 - (${cfg.embedding_column} <=> $1::vector)) AS score,
+               ${cfg.snippet_expression} AS snippet
+          FROM ${cfg.table_name}
          WHERE ${where}
-         ORDER BY ${cfg.embCol} <=> $1::vector ASC
+         ORDER BY ${cfg.embedding_column} <=> $1::vector ASC
          LIMIT $2::int
       `;
 
@@ -141,30 +120,21 @@ export class VectorController {
       throw new HttpException('invalid_request', HttpStatus.BAD_REQUEST);
     }
 
-    return this.search({ target: target as VectorTarget, query_embedding: emb, topK, filter_ids });
+    return this.search({ target: target, query_embedding: emb, topK, filter_ids });
   }
 
   @UseGuards(AuthGuard)
   @Post('upsert')
-  async upsert(@Body() body: { target: VectorTarget; items: Array<{ id: string; embedding: number[]; payload?: Record<string, any> }> }) {
+  async upsert(@Body() body: { target: string; items: Array<{ id: string; embedding: number[]; payload?: Record<string, any> }> }) {
     try {
       await this.db.ensureReady();
       const { target, items } = body || ({} as any);
       if (!target || !Array.isArray(items) || items.length === 0) throw new Error('invalid_request');
 
-      const map: Record<VectorTarget, { table: string; embCol: string }> = {
-        kb: { table: 'kb_articles', embCol: 'embedding' },
-        messages: { table: 'messages', embCol: 'embedding' },
-        notes: { table: 'consultation_notes', embCol: 'embedding' },
-        products: { table: 'products', embCol: 'embedding' },
-        services: { table: 'services', embCol: 'embedding' },
-        pets: { table: 'pets', embCol: 'embedding' },
-        vets: { table: 'vets', embCol: 'embedding' },
-      };
-      const cfg = map[target as VectorTarget];
+      const cfg = this.vectorTargetService.getConfig(target);
       if (!cfg) throw new Error('unsupported_target');
 
-  if (this.db.isStub) return { ok: true, updated: items.length, mode: 'stub', reason: 'db_unavailable' };
+      if (this.db.isStub) return { ok: true, updated: items.length, mode: 'stub', reason: 'db_unavailable' };
 
       const result = await this.db.runInTx(async (q) => {
         const updatedIds: string[] = [];
@@ -174,11 +144,11 @@ export class VectorController {
             if (it?.id) skipped.push(it.id);
             continue;
           }
-          const dim = this.targetDim[target as VectorTarget] ?? 1536;
+          const dim = cfg.dimension;
           const norm = this.normalizeEmbedding(it.embedding, dim);
           const vecLiteral = `[${norm.join(',')}]`;
           const { rows } = await q<{ id: string }>(
-            `UPDATE ${cfg.table} SET ${cfg.embCol} = $2::vector WHERE id = $1::uuid RETURNING id`,
+            `UPDATE ${cfg.table_name} SET ${cfg.embedding_column} = $2::vector WHERE id = $1::uuid RETURNING id`,
             [it.id, vecLiteral]
           );
           if (rows.length > 0) updatedIds.push(rows[0].id);
