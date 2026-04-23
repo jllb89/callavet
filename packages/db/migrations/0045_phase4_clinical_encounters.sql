@@ -128,7 +128,7 @@ INSERT INTO public.clinical_encounters (session_id, appointment_id, pet_id, user
 SELECT
   s.id,
   a.id,
-  COALESCE(s.pet_id, a.pet_id, n.pet_id, i.pet_id) AS pet_id,
+  COALESCE(s.pet_id, n.pet_id, i.pet_id) AS pet_id,
   s.user_id,
   s.vet_id,
   CASE WHEN s.status = 'completed' THEN 'closed' ELSE 'open' END AS status,
@@ -150,7 +150,7 @@ LEFT JOIN LATERAL (
    ORDER BY ic.created_at ASC
    LIMIT 1
 ) i ON TRUE
-WHERE COALESCE(s.pet_id, a.pet_id, n.pet_id, i.pet_id) IS NOT NULL
+WHERE COALESCE(s.pet_id, n.pet_id, i.pet_id) IS NOT NULL
 ON CONFLICT (session_id) DO NOTHING;
 
 UPDATE public.consultation_notes cn
@@ -168,14 +168,13 @@ UPDATE public.image_cases ic
    AND ce.pet_id = ic.pet_id;
 
 UPDATE public.care_plans cp
-   SET encounter_id = ce.id
-  FROM LATERAL (
-    SELECT id
-      FROM public.clinical_encounters x
-     WHERE x.pet_id = cp.pet_id
-     ORDER BY x.created_at DESC
-     LIMIT 1
-  ) ce
+   SET encounter_id = (
+     SELECT x.id
+       FROM public.clinical_encounters x
+      WHERE x.pet_id = cp.pet_id
+      ORDER BY x.created_at DESC
+      LIMIT 1
+   )
  WHERE cp.encounter_id IS NULL;
 
 CREATE OR REPLACE FUNCTION public.ensure_clinical_encounter(p_session_id uuid, p_pet_id uuid DEFAULT NULL)
