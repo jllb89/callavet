@@ -1,6 +1,10 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule as NestConfig } from '@nestjs/config';
 import { z } from 'zod';
+import { DbModule } from '../db/db.module';
+import { ValidatorService } from './validator.service';
+import { EnumService } from './enum.service';
+import { VectorTargetService } from './vector-target.service';
 
 export const EnvSchema = z.object({
   NODE_ENV: z.enum(['development','staging','production']).default('development'),
@@ -19,9 +23,18 @@ function validateEnv(config: Record<string, unknown>) {
   return config;
 }
 
+/**
+ * Shared services:
+ * - ValidatorService: Centralized validation (UUID, email, phone, time)
+ * - EnumService: Dynamic enum loading from database CHECK constraints
+ * - VectorTargetService: Dynamic vector target configuration from database
+ */
 @Module({
   imports: [
-    NestConfig.forRoot({ isGlobal: true, validate: validateEnv })
+    NestConfig.forRoot({ isGlobal: true, validate: validateEnv }),
+    DbModule,
   ],
+  providers: [ValidatorService, EnumService, VectorTargetService],
+  exports: [ValidatorService, EnumService, VectorTargetService],
 })
 export class ConfigModule {}
