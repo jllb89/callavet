@@ -7,6 +7,7 @@ import { PlansController } from './plans.controller';
 import { EntitlementsController } from './entitlements.controller';
 import { DbModule } from '../db/db.module';
 import { AuthModule } from '../auth/auth.module';
+import { ConfigModule } from '../config/config.module';
 
-@Module({ imports: [DbModule, AuthModule], controllers: [SubscriptionsController, PlansController, EntitlementsController, AdminPricingController], providers: [PriceService, StripeSyncService] })
+@Module({ imports: [DbModule, AuthModule, ConfigModule], controllers: [SubscriptionsController, PlansController, EntitlementsController, AdminPricingController], providers: [PriceService, StripeSyncService] })
 export class SubscriptionsModule {}
