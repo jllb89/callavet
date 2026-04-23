@@ -66,3 +66,7 @@ services:
     envVars:
       - key: NODE_ENV
         value: staging
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false

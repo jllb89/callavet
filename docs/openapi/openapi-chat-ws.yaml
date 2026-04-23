@@ -3,38 +3,48 @@ info:
   title: Call-a-Vet Chat WebSocket
   version: 0.1.0
   description: >
-    JSON messages over WebSocket. Connect via HTTP GET upgrade to `/ws/chat`.
-    Auth with Supabase JWT in `Authorization: Bearer <token>` during upgrade.
+    Socket.IO namespace for realtime consult chat. Connect to namespace `/chat` on the chat-service host.
+    Authenticate with a Supabase JWT via `Authorization: Bearer <token>` during the upgrade when the client can set headers,
+    or send the same token as `auth.token` in the Socket.IO handshake. A client can auto-join by providing `sessionId`
+    in the handshake query/auth payload, or join later using `join` or `client.session.join`.
 servers:
-  - url: wss://ws.dev.callavet.mx
+  - url: wss://ws.dev.callavet.mx/chat
     description: Development
-  - url: wss://ws.staging.callavet.mx
+  - url: wss://ws.staging.callavet.mx/chat
     description: Staging
-  - url: wss://ws.callavet.mx
+  - url: wss://ws.callavet.mx/chat
     description: Production
+tags:
+  - name: Chat Realtime
+    description: Socket.IO consult chat transport and lifecycle events.
 paths:
-  /ws/chat:
+  /chat:
     get:
-      summary: WebSocket upgrade for chat
+      summary: Socket.IO namespace for chat consults
       description: >
-        On connect, server sends `system.welcome`. All messages are JSON objects with fields:
-        `type` (string), `ts` (ISO string), and a `data` payload shaped per event.
+        On successful room join, the server sends `system.welcome` followed by `server.session.synced`.
+        Clients may use the legacy event names (`join`, `leave`, `typing`, `message:new`) or the newer
+        spec-aligned names documented below. Websocket-originated messages are persisted into the same
+        `public.messages` records used by transcript retrieval.
+      tags: [Chat Realtime]
       parameters:
         - in: header
           name: Authorization
-          required: true
+          required: false
           schema: { type: string, example: "Bearer eyJhbGciOi..." }
         - in: query
           name: sessionId
-          required: true
+          required: false
           schema: { type: string, format: uuid }
         - in: query
-          name: kind
+          name: afterStreamOrder
           required: false
-          schema: { type: string, enum: [chat, video] }
+          schema: { type: integer, minimum: 0 }
       responses:
         "101":
           description: Switching Protocols
+        "200":
+          description: Socket.IO transport bootstrap or namespace metadata
         "401":
           description: Unauthorized
 
@@ -49,20 +59,28 @@ components:
         data: { type: object, additionalProperties: true }
 
     # -------- Client → Server events --------
-    client.message.send:
+    client.session.join:
       type: object
-      required: [sessionId, role, content]
+      required: [sessionId]
       properties:
         sessionId: { type: string, format: uuid }
-        role: { type: string, enum: [user, vet] }
+        afterStreamOrder: { type: integer, minimum: 0 }
+
+    client.session.leave:
+      type: object
+      required: [sessionId]
+      properties:
+        sessionId: { type: string, format: uuid }
+
+    client.message.send:
+      type: object
+      required: [sessionId, content]
+      properties:
+        sessionId: { type: string, format: uuid }
         content: { type: string, description: Plain text content }
-        attachments:
-          type: array
-          items:
-            type: object
-            properties:
-              url: { type: string, format: uri }
-              mime: { type: string }
+        clientKey:
+          type: string
+          description: Client-generated idempotency key unique within the session.
 
     client.message.edit:
       type: object
@@ -79,12 +97,27 @@ components:
         sessionId: { type: string, format: uuid }
         messageId: { type: string, format: uuid }
 
+    client.message.redact:
+      type: object
+      required: [sessionId, messageId]
+      properties:
+        sessionId: { type: string, format: uuid }
+        messageId: { type: string, format: uuid }
+        reason: { type: string }
+
     client.typing:
       type: object
       required: [sessionId, isTyping]
       properties:
         sessionId: { type: string, format: uuid }
         isTyping: { type: boolean }
+
+    client.delivery.receipt:
+      type: object
+      required: [sessionId, messageId]
+      properties:
+        sessionId: { type: string, format: uuid }
+        messageId: { type: string, format: uuid }
 
     client.read.receipt:
       type: object
@@ -93,42 +126,30 @@ components:
         sessionId: { type: string, format: uuid }
         messageId: { type: string, format: uuid }
 
-    client.video.signal:
-      type: object
-      required: [sessionId, signal]
-      properties:
-        sessionId: { type: string, format: uuid }
-        signal: { type: object, additionalProperties: true }
-
-    # Vector-only semantic retrieve (NO keyword search)
-    client.vector.retrieve:
-      type: object
-      required: [sessionId, target, query_embedding, topK]
-      properties:
-        sessionId: { type: string, format: uuid }
-        target:
-          type: string
-          enum: [messages, notes, kb]
-          description: Table/collection to NN-search.
-        query_embedding:
-          type: array
-          items: { type: number }
-          minItems: 32
-          description: Pre-computed embedding floats (e.g., 1536-dim OpenAI/Local).
-        topK: { type: integer, default: 8, maximum: 50 }
-        filter_ids:
-          type: array
-          items: { type: string, format: uuid }
-          description: Optional allow-list of ids to restrict search space.
-
     # -------- Server → Client events --------
     system.welcome:
       type: object
-      required: [sessionId, userId]
+      required: [sessionId, userId, kind, role, cursor]
       properties:
         sessionId: { type: string, format: uuid }
         userId: { type: string, format: uuid }
         kind: { type: string, enum: [chat, video] }
+        role: { type: string, enum: [user, vet, admin] }
+        status: { type: string }
+        cursor: { type: integer, minimum: 0 }
+
+    server.session.synced:
+      type: object
+      required: [sessionId, cursor, messages, receipts]
+      properties:
+        sessionId: { type: string, format: uuid }
+        cursor: { type: integer, minimum: 0 }
+        messages:
+          type: array
+          items: { $ref: "#/components/schemas/Message" }
+        receipts:
+          type: array
+          items: { $ref: "#/components/schemas/Receipt" }
 
     server.message.appended:
       type: object
@@ -144,46 +165,54 @@ components:
 
     server.message.deleted:
       type: object
-      required: [messageId]
+      required: [messageId, deletedAt]
       properties:
         messageId: { type: string, format: uuid }
+        deletedAt: { type: string, format: date-time }
+
+    server.message.redacted:
+      type: object
+      required: [messageId, redactedAt]
+      properties:
+        messageId: { type: string, format: uuid }
+        redactedAt: { type: string, format: date-time }
+        reason: { type: string }
+
+    server.message.delivery:
+      type: object
+      required: [messageId, userId, deliveredAt]
+      properties:
+        messageId: { type: string, format: uuid }
+        userId: { type: string, format: uuid }
+        deliveredAt: { type: string, format: date-time }
+        readAt: { type: string, format: date-time }
 
     server.typing:
       type: object
-      required: [actorId, isTyping]
+      required: [sessionId, actorId, isTyping]
       properties:
+        sessionId: { type: string, format: uuid }
         actorId: { type: string, format: uuid }
         isTyping: { type: boolean }
 
     server.read.receipt:
-      type: object
-      required: [messageId, readerId]
-      properties:
-        messageId: { type: string, format: uuid }
-        readerId: { type: string, format: uuid }
+      allOf:
+        - $ref: "#/components/schemas/server.message.delivery"
+        - type: object
+          required: [readerId, readAt]
+          properties:
+            readerId: { type: string, format: uuid }
+            readAt: { type: string, format: date-time }
 
-    server.video.signal:
+    presence:
       type: object
-      required: [signal]
+      required: [sessionId, userId]
       properties:
-        signal: { type: object, additionalProperties: true }
-
-    # Vector-only results
-    server.vector.results:
-      type: object
-      required: [target, topK, results]
-      properties:
-        target: { type: string, enum: [messages, notes, kb] }
-        topK: { type: integer }
-        results:
-          type: array
-          items:
-            type: object
-            properties:
-              id: { type: string, format: uuid }
-              score: { type: number, description: Cosine similarity (higher is nearer) }
-              snippet: { type: string }
-              metadata: { type: object, additionalProperties: true }
+        sessionId: { type: string, format: uuid }
+        userId: { type: string, format: uuid }
+        joined: { type: boolean }
+        left: { type: boolean }
+        role: { type: string, enum: [user, vet, admin] }
 
     # Common entities
     Message:
@@ -194,11 +223,18 @@ components:
         sender_id: { type: string, format: uuid }
         role: { type: string, enum: [user, vet, ai] }
         content: { type: string }
+        client_key: { type: string }
+        stream_order: { type: integer }
         created_at: { type: string, format: date-time }
-        attachments:
-          type: array
-          items:
-            type: object
-            properties:
-              url: { type: string, format: uri }
-              mime: { type: string }
+        edited_at: { type: string, format: date-time }
+        deleted_at: { type: string, format: date-time }
+        redacted_at: { type: string, format: date-time }
+        redaction_reason: { type: string }
+
+    Receipt:
+      type: object
+      properties:
+        message_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        delivered_at: { type: string, format: date-time }
+        read_at: { type: string, format: date-time }

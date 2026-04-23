@@ -66,7 +66,7 @@ Exit criteria:
 Target: 2 to 3 weeks
 
 Status:
-Implemented in-repo on 2026-04-23. Remaining proof step is a staging deploy plus rerunning the backend core smoke suite with the new vet-operations coverage.
+Closed on staging on 2026-04-23. The redeployed gateway passed a fresh all-green backend core smoke rerun covering subscriptions, sessions, messages, appointments, vets, session notes, and video. The Supabase CLI workflow was also normalized the same day with a native local `supabase/` project, local mirrored migration history through `0042`, and repaired staging remote history through `0041` using `SUPABASE_DIRECT_DATABASE_URL` for CLI commands.
 
 Goal:
 Make the vet side a real backend product instead of a schema plus partial scheduling support.
@@ -86,6 +86,9 @@ Exit criteria:
 
 ## Phase 2. Realtime Chat and Entitlement Coupling
 Target: 2 to 3 weeks
+
+Status:
+Started in-repo on 2026-04-23. The chat-service now verifies websocket JWTs, authorizes session joins against `chat_sessions`, persists websocket-originated messages into `public.messages`, records delivery and read receipts in `public.message_receipts`, supports idempotency with `client_key`, adds stable `stream_order` sequencing, and releases unused reserved entitlements when an empty room is explicitly left. Remaining proof step is to apply `0042_realtime_chat_backbone.sql`, deploy chat-service, and run a focused realtime smoke against staging.
 
 Goal:
 Move chat from prototype transport to a production-grade consult channel that is tied to session and entitlement state.
@@ -196,10 +199,11 @@ Reason:
 
 ## Suggested Execution Order for the Next 30 Days
 - Phase 0 staging validation completed on 2026-04-23; keep the backend core smoke suite green as a deployment gate.
-- Phase 1 is implemented in repo; deploy it and rerun staging smoke before treating it as closed.
+- Phase 1 closed on staging on 2026-04-23 with a fresh all-green backend core smoke rerun, including the new vet-operations coverage.
+- Supabase CLI is now normalized around the native `supabase/` project; use `SUPABASE_DIRECT_DATABASE_URL` for CLI migration commands, with local mirrored history currently spanning `0035` through `0042`.
 - Make a hard provider decision for video during Phase 1, even if Phase 3 implementation starts later.
 - Define the encounter and horse-history schema during Phase 1 so chat and video events can link into it cleanly.
-- Start Phase 2 immediately after the Phase 1 deploy proof is green.
+- Start Phase 2 staging proof by applying `0042_realtime_chat_backbone.sql`, deploying chat-service, and running a websocket smoke before widening Flutter chat work.
 - Do not add new Flutter chat or video work until Phase 2 contracts are stable.
 
 ## Related Files
@@ -211,5 +215,9 @@ Reason:
 - `services/gateway-api/src/modules/notes/notes.controller.ts`
 - `services/gateway-api/src/modules/video/video.controller.ts`
 - `services/chat-service/src/modules/chat/chat.gateway.ts`
+- `services/chat-service/src/modules/chat/chat.service.ts`
+- `packages/db/migrations/0042_realtime_chat_backbone.sql`
+- `supabase/migrations/0042_realtime_chat_backbone.sql`
+- `render.yaml`
 - `docs/openapi/openapi.yaml`
 - `docs/openapi/openapi-chat-ws.yaml`
