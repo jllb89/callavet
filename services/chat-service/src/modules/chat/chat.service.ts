@@ -91,10 +91,19 @@ export class ChatService {
     }
 
     const needsSsl = /[?&]sslmode=require/i.test(databaseUrl) || /supabase\.(co|com)/i.test(databaseUrl);
+    const connectTimeoutMs = this.readPositiveIntEnv('CHAT_DB_CONNECT_TIMEOUT_MS', 7000);
+    const queryTimeoutMs = this.readPositiveIntEnv('CHAT_DB_QUERY_TIMEOUT_MS', 10000);
     this.pool = new Pool({
       connectionString: databaseUrl,
       ssl: needsSsl ? { rejectUnauthorized: false } : undefined,
+      connectionTimeoutMillis: connectTimeoutMs,
+      query_timeout: queryTimeoutMs,
+      statement_timeout: queryTimeoutMs,
     });
+    this.pool.on('error', (error: Error) => {
+      this.logger.warn(`Postgres pool error: ${error.name}: ${error.message}`);
+    });
+    this.logger.log(`Realtime DB pool configured (connectTimeoutMs=${connectTimeoutMs}, queryTimeoutMs=${queryTimeoutMs})`);
   }
 
   authenticateSocket(socket: Socket): ChatActor {
@@ -587,6 +596,15 @@ export class ChatService {
       return value[0]?.toString().trim() || '';
     }
     return typeof value === 'string' ? value.trim() : '';
+  }
+
+  private readPositiveIntEnv(name: string, fallback: number): number {
+    const value = process.env[name]?.trim();
+    if (!value) {
+      return fallback;
+    }
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
   }
 }
 
