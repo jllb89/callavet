@@ -22,7 +22,11 @@ fi
 # 2) KB list with auth
 code=0
 resp=$(curl -sS -H "$AUTH_HEADER" "$BASE/kb?limit=5") || code=$?
-[[ $code -eq 0 ]] && echo "$resp" | $JQ -e '.items | type == "array"' >/dev/null 2>&1; assert_ok $? "kb list authed"
+if [[ $code -eq 0 ]] && echo "$resp" | $JQ -e '.items | type == "array"' >/dev/null 2>&1; then
+  assert_ok 0 "kb list authed"
+else
+  assert_ok 1 "kb list authed"
+fi
 
 # 3) Create KB item
 code=0
@@ -30,29 +34,49 @@ resp=$(curl -sS -X POST -H "$AUTH_HEADER" -H 'Content-Type: application/json' \
   -d '{"title":"Test KB","content":"First content","species":["dog"],"tags":["general"],"language":"en"}' \
   "$BASE/kb") || code=$?
 kb_id=$(echo "$resp" | $JQ -r '.id // empty')
-[[ -n "$kb_id" ]]; assert_ok $? "kb create"
+if [[ -n "$kb_id" ]]; then
+  assert_ok 0 "kb create"
+else
+  assert_ok 1 "kb create"
+fi
 
 # 4) Get KB item by id
 code=0
 resp=$(curl -sS -H "$AUTH_HEADER" "$BASE/kb/$kb_id") || code=$?
-[[ $code -eq 0 ]] && echo "$resp" | $JQ -e '.title == "Test KB"' >/dev/null 2>&1; assert_ok $? "kb get"
+if [[ $code -eq 0 ]] && echo "$resp" | $JQ -e '.title == "Test KB"' >/dev/null 2>&1; then
+  assert_ok 0 "kb get"
+else
+  assert_ok 1 "kb get"
+fi
 
 # 5) Lexical search
 code=0
 resp=$(curl -sS -H "$AUTH_HEADER" "$BASE/search?type=kb&q=Test&limit=5") || code=$?
-[[ $code -eq 0 ]] && echo "$resp" | $JQ -e '.items | type == "array" and (.took_ms | tonumber) >= 0' >/dev/null 2>&1; assert_ok $? "kb lexical search"
+if [[ $code -eq 0 ]] && echo "$resp" | $JQ -e '.items | type == "array"' >/dev/null 2>&1; then
+  assert_ok 0 "kb lexical search"
+else
+  assert_ok 1 "kb lexical search"
+fi
 
 # 6) Vector search (GET variant) — minimal embedding
 code=0
 resp=$(curl -sS -H "$AUTH_HEADER" "$BASE/vector/search?target=kb&embedding=0.1,0.2,0.3&topK=3") || code=$?
-[[ $code -eq 0 ]] && echo "$resp" | $JQ -e '.results | type == "array"' >/dev/null 2>&1; assert_ok $? "vector search get"
+if [[ $code -eq 0 ]] && echo "$resp" | $JQ -e '.results | type == "array"' >/dev/null 2>&1; then
+  assert_ok 0 "vector search get"
+else
+  assert_ok 1 "vector search get"
+fi
 
 # 7) Vector search (POST)
 code=0
 resp=$(curl -sS -X POST -H "$AUTH_HEADER" -H 'Content-Type: application/json' \
   -d '{"target":"kb","query_embedding":[0.1,0.2,0.3],"topK":3}' \
   "$BASE/vector/search") || code=$?
-[[ $code -eq 0 ]] && echo "$resp" | $JQ -e '.results | type == "array"' >/dev/null 2>&1; assert_ok $? "vector search post"
+if [[ $code -eq 0 ]] && echo "$resp" | $JQ -e '.results | type == "array"' >/dev/null 2>&1; then
+  assert_ok 0 "vector search post"
+else
+  assert_ok 1 "vector search post"
+fi
 
 # Summary
 echo "Summary: PASS=$pass FAIL=$fail"

@@ -25,7 +25,7 @@ INTERNAL_HEADER="x-internal-secret:${INTERNAL_STRIPE_EVENT_SECRET}"
 
 section() { printf "\n== %s ==\n" "$1"; }
 die() { printf "ERROR: %s\n" "$1" >&2; exit 1; }
-jqsafe() { jq -r "$1" 2>/dev/null || echo "" }
+jqsafe() { jq -r "$1" 2>/dev/null || echo ""; }
 
 # 1) Idempotency: replay same webhook event
 section "Webhook Idempotency: replay identical event"

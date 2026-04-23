@@ -3,12 +3,28 @@ set -euo pipefail
 
 : ${GATEWAY_BASE:?"Set GATEWAY_BASE (e.g., https://api.staging.callavet.mx)"}
 : ${TOKEN:?"Set TOKEN (Bearer JWT)"}
-: ${PLAN_ID:?"Set PLAN_ID (care_plans.id)"}
+: ${PLAN_ID:=}
+: ${PET_ID:=}
 
 hdr=(
   -H "Authorization: Bearer $TOKEN"
   -H "Content-Type: application/json"
 )
+
+if [[ -z "$PET_ID" ]]; then
+  PET_ID=$(curl -sS -H "Authorization: Bearer $TOKEN" "$GATEWAY_BASE/pets" | jq -r '.data[0].id // empty' 2>/dev/null || true)
+fi
+
+if [[ -z "$PLAN_ID" && -n "$PET_ID" ]]; then
+  PLAN_ID=$(curl -sS -X POST $hdr[@] \
+    --data '{"short_term":"Hydration","mid_term":"Diet","long_term":"Exercise"}' \
+    "$GATEWAY_BASE/pets/$PET_ID/care-plans" | jq -r '.id // empty' 2>/dev/null || true)
+fi
+
+if [[ -z "$PLAN_ID" ]]; then
+  print -- "ERROR: PLAN_ID is required (set PLAN_ID or ensure care plan creation works)"
+  exit 1
+fi
 
 print -- "[care-plan-items] Creating item on plan=$PLAN_ID"
 create_resp=$(curl -sS -X POST $hdr[@] \
