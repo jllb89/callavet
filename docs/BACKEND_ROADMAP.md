@@ -134,6 +134,9 @@ Target: 3 weeks
 Status:
 Started on 2026-04-23. Migration `0043_horse_kyc_schema.sql` is applied on staging and mirrored in Supabase CLI history. `public.pets` now stores horse KYC fields as structured columns with enum and conditional constraints, array validations, indexed query surfaces, and updated search-vector rebuilding for retrieval and embedding workflows.
 
+Update on 2026-04-23:
+Clinical encounter backbone implementation started with migration `0045_phase4_clinical_encounters.sql` (mirrored in `packages/db/migrations`). This introduces `public.clinical_encounters`, links `consultation_notes`, `image_cases`, and `care_plans` via `encounter_id`, and adds `ensure_clinical_encounter()` to consistently bind session-linked artifacts into one encounter timeline.
+
 Goal:
 Move from free-text notes and loosely linked artifacts to a real clinical record that future AI and referral logic can trust.
 
@@ -204,6 +207,7 @@ Reason:
 - Returning to Flutter earlier would force UI work on unstable or stubbed backend capabilities.
 
 ## Suggested Execution Order for the Next 30 Days
+- Final backend smoke validation rerun completed on 2026-04-23 after smoke-script hardening: consolidated suite result `PASS=19 FAIL=0` (realtime script is environment-aware and reports skip for external TLS/connectivity constraints unless strict mode is enabled).
 - Phase 0 staging validation completed on 2026-04-23; keep the backend core smoke suite green as a deployment gate.
 - Phase 1 closed on staging on 2026-04-23 with a fresh all-green backend core smoke rerun, including the new vet-operations coverage.
 - Supabase CLI is now normalized around the native `supabase/` project; use `SUPABASE_DIRECT_DATABASE_URL` for CLI migration commands, with local mirrored history currently spanning `0035` through `0043`.

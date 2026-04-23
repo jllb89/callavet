@@ -11,7 +11,7 @@ export class ImageCasesController {
   async list(@Param('petId') petId: string) {
     if (!petId) throw new BadRequestException('petId is required');
     const { rows } = await (this.db as any).query(
-      `select id, pet_id, session_id, image_url, labels, findings, diagnosis_label, created_at
+      `select id, encounter_id, pet_id, session_id, image_url, labels, findings, diagnosis_label, created_at
          from image_cases where pet_id = $1 order by created_at desc`,
       [petId]
     );
@@ -28,6 +28,7 @@ export class ImageCasesController {
       findings?: string;
       diagnosis_label?: string;
       session_id?: string;
+      encounter_id?: string;
     }
   ) {
     if (!petId) throw new BadRequestException('petId is required');
@@ -36,10 +37,29 @@ export class ImageCasesController {
     const idRes = await (this.db as any).query(idSql);
     const id = idRes.rows[0].id;
     const { rows } = await (this.db as any).query(
-      `insert into image_cases (id, pet_id, session_id, image_url, labels, findings, diagnosis_label, created_at)
-       values ($1, $2, $3, $4, $5, $6, $7, now())
-       returning id, pet_id, session_id, image_url, labels, findings, diagnosis_label, created_at`,
-      [id, petId, body.session_id || null, body.image_url, body.labels || null, body.findings || null, body.diagnosis_label || null]
+      `insert into image_cases (id, encounter_id, pet_id, session_id, image_url, labels, findings, diagnosis_label, created_at)
+       values (
+         $1,
+         coalesce($2::uuid, public.ensure_clinical_encounter($4::uuid, $3::uuid)),
+         $3,
+         $4,
+         $5,
+         $6,
+         $7,
+         $8,
+         now()
+       )
+       returning id, encounter_id, pet_id, session_id, image_url, labels, findings, diagnosis_label, created_at`,
+      [
+        id,
+        body.encounter_id || null,
+        petId,
+        body.session_id || null,
+        body.image_url,
+        body.labels || null,
+        body.findings || null,
+        body.diagnosis_label || null,
+      ]
     );
     return rows[0];
   }
@@ -48,7 +68,7 @@ export class ImageCasesController {
   async detail(@Param('id') id: string) {
     if (!id) throw new BadRequestException('id is required');
     const { rows } = await (this.db as any).query(
-      `select id, pet_id, session_id, image_url, labels, findings, diagnosis_label, created_at
+      `select id, encounter_id, pet_id, session_id, image_url, labels, findings, diagnosis_label, created_at
          from image_cases where id = $1`,
       [id]
     );

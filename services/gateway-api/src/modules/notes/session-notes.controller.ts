@@ -14,7 +14,7 @@ export class SessionNotesController {
   async listSessionNotes(@Param('sessionId') sessionId: string) {
     const items = await this.db.runInTx(async (q) => {
       const { rows } = await q(
-        `select id, session_id, vet_id, pet_id, summary_text, plan_summary, created_at
+        `select id, encounter_id, session_id, vet_id, pet_id, summary_text, plan_summary, created_at
            from consultation_notes
           where session_id = $1
             and (
@@ -73,9 +73,10 @@ export class SessionNotesController {
     try {
       const row = await this.db.runInTx(async (q) => {
         const { rows } = await q(
-          `insert into consultation_notes (id, session_id, vet_id, pet_id, summary_text, plan_summary, embedding, created_at)
+          `insert into consultation_notes (id, encounter_id, session_id, vet_id, pet_id, summary_text, plan_summary, embedding, created_at)
            values (
              gen_random_uuid(),
+             public.ensure_clinical_encounter($1, $2),
              $1,
              (select id from vets where id = auth.uid()),
              $2,
@@ -84,7 +85,7 @@ export class SessionNotesController {
              NULL,
              now()
            )
-           returning id, session_id, vet_id, pet_id, summary_text, plan_summary, created_at`,
+           returning id, encounter_id, session_id, vet_id, pet_id, summary_text, plan_summary, created_at`,
           [sessionId, pet_id, summaryText || null, planSummary || null]
         );
         if (process.env.DEV_DB_DEBUG === '1') {

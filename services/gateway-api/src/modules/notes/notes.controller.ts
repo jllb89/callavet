@@ -14,7 +14,7 @@ export class NotesController {
     const limit = Math.min(Math.max(Number(limitStr ?? '100'), 1), 200);
     const items = await this.db.runInTx(async (q) => {
       const { rows } = await q(
-        `select id, pet_id, created_by_ai, short_term, mid_term, long_term, created_at
+        `select id, encounter_id, pet_id, created_by_ai, short_term, mid_term, long_term, created_at
            from care_plans
           where pet_id = $1
             and (
@@ -37,16 +37,35 @@ export class NotesController {
   @Post('pets/:petId/care-plans')
   async createCarePlan(
     @Param('petId') petId: string,
-    @Body() body: { short_term?: string; mid_term?: string; long_term?: string; created_by_ai?: boolean }
+    @Body() body: {
+      short_term?: string;
+      mid_term?: string;
+      long_term?: string;
+      created_by_ai?: boolean;
+      session_id?: string;
+      encounter_id?: string;
+    }
   ) {
     const { short_term, mid_term, long_term } = body || {};
     const created_by_ai = !!(body && body.created_by_ai !== undefined ? body.created_by_ai : true);
+    const sessionId = body?.session_id || null;
+    const encounterId = body?.encounter_id || null;
     const row = await this.db.runInTx(async (q) => {
       const { rows } = await q(
-        `insert into care_plans (id, pet_id, created_by_ai, short_term, mid_term, long_term, embedding, created_at)
-         values (gen_random_uuid(), $1, $2, $3, $4, $5, NULL, now())
-         returning id, pet_id, created_by_ai, short_term, mid_term, long_term, created_at`,
-        [petId, created_by_ai, short_term || null, mid_term || null, long_term || null]
+        `insert into care_plans (id, encounter_id, pet_id, created_by_ai, short_term, mid_term, long_term, embedding, created_at)
+         values (
+           gen_random_uuid(),
+           coalesce($1::uuid, public.ensure_clinical_encounter($2::uuid, $3::uuid)),
+           $3,
+           $4,
+           $5,
+           $6,
+           $7,
+           NULL,
+           now()
+         )
+         returning id, encounter_id, pet_id, created_by_ai, short_term, mid_term, long_term, created_at`,
+        [encounterId, sessionId, petId, created_by_ai, short_term || null, mid_term || null, long_term || null]
       );
       if (process.env.DEV_DB_DEBUG === '1') {
         // eslint-disable-next-line no-console

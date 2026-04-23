@@ -26,9 +26,9 @@ export class FilesController {
   }
 
   // Server-side upload: accepts JSON with base64 content
-  // Body: { path: string, content: string, contentType?: string, petId?: string, sessionId?: string, labels?: string[], findings?: string, diagnosis_label?: string }
+  // Body: { path: string, content: string, contentType?: string, petId?: string, sessionId?: string, encounterId?: string, labels?: string[], findings?: string, diagnosis_label?: string }
   @Post('upload')
-  async upload(@Body() body: { path?: string; content?: string; contentType?: string; petId?: string; sessionId?: string; labels?: string[]; findings?: string; diagnosis_label?: string }) {
+  async upload(@Body() body: { path?: string; content?: string; contentType?: string; petId?: string; sessionId?: string; encounterId?: string; labels?: string[]; findings?: string; diagnosis_label?: string }) {
     if (!body?.path || !body?.content) {
       throw new BadRequestException('path and content are required');
     }
@@ -80,10 +80,21 @@ export class FilesController {
       const idRes = await (this.db as any).query(idSql);
       const id = idRes.rows[0].id;
       await (this.db as any).query(
-        `insert into image_cases (id, pet_id, session_id, image_url, labels, findings, diagnosis_label, created_at)
-         values ($1, $2, $3, $4, $5, $6, $7, now())`,
+        `insert into image_cases (id, encounter_id, pet_id, session_id, image_url, labels, findings, diagnosis_label, created_at)
+         values (
+           $1,
+           coalesce($2::uuid, public.ensure_clinical_encounter($4::uuid, $3::uuid)),
+           $3,
+           $4,
+           $5,
+           $6,
+           $7,
+           $8,
+           now()
+         )`,
         [
           id,
+          body.encounterId || null,
           body.petId,
           body.sessionId || null,
           body.path,
