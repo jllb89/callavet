@@ -454,7 +454,12 @@ export class AdminController {
               s.created_at,
               (select count(*)::int from messages m where m.session_id = s.id) as messages_count,
               (select count(*)::int from consultation_notes n where n.session_id = s.id) as notes_count,
-              (select count(*)::int from care_plans cp where cp.session_id = s.id) as care_plans_count
+              (
+                select count(*)::int
+                  from care_plans cp
+                  join clinical_encounters ce on ce.id = cp.encounter_id
+                 where ce.session_id = s.id
+              ) as care_plans_count
          from chat_sessions s
         where ($1::timestamptz is null or s.created_at >= $1::timestamptz)
           and ($2::timestamptz is null or s.created_at <= $2::timestamptz)
