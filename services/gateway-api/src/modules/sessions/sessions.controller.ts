@@ -1,7 +1,9 @@
-import { Body, Controller, Get, HttpException, HttpStatus, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, HttpException, HttpStatus, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { DbService } from '../db/db.service';
 import { AuthGuard } from '../auth/auth.guard';
 import { RequestContext } from '../auth/request-context.service';
+import { EndpointRateLimitGuard } from '../rate-limit/endpoint-rate-limit.guard';
+import { RateLimit } from '../rate-limit/rate-limit.decorator';
 
 @Controller('sessions')
 @UseGuards(AuthGuard)
@@ -88,11 +90,16 @@ export class SessionsController {
   }
 
   @Post('start')
+  @UseGuards(EndpointRateLimitGuard)
+  @RateLimit({ key: 'sessions.start', limit: 6, windowMs: 60_000 })
   async start(@Body() body: { userId?: string; kind?: 'chat'|'video'; mode?: 'chat'|'video'; type?: 'chat'|'video'; sessionId?: string }) {
     try {
       // Support `kind`, `mode`, or `type` field from clients; default chat
       const incoming = (body.kind || body.mode || body.type || 'chat')?.toString().toLowerCase();
       const kind: 'chat'|'video' = incoming === 'video' ? 'video' : 'chat';
+      if (body.sessionId && !/^[0-9a-fA-F-]{36}$/.test(body.sessionId)) {
+        throw new BadRequestException('sessionId must be a UUID when provided');
+      }
       if (this.db.isStub) {
         const sessionId = body.sessionId || `sess_${Date.now()}`;
         return { ok: true, mode: 'stub', sessionId, kind };

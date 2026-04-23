@@ -36,6 +36,7 @@ This repo includes a `render.yaml` to deploy 3 services on Render:
 
 ## Health & smoke
 - Health: https://staging.call-a-vet.app/health
+- DB diagnostics: https://staging.call-a-vet.app/_db/status
 - OpenAPI: https://staging.call-a-vet.app/openapi.yaml
 - Start session (dev header override):
 
@@ -49,4 +50,5 @@ curl -sS -X POST https://staging.call-a-vet.app/sessions/start \
 Notes
 - Render sets PORT and expects the app to bind to it. Gateway and services read PORT if present.
 - For private Stripe keys, store them as Render environment variables (not in repo).
+- If `/_db/status` returns `Tenant or user not found`, the Render `DATABASE_URL` is usually using the wrong Supabase host or username shape. For the pooler, the username must be `postgres.<project-ref>`.
 - Auto-deploy on push to `main` is enabled via render.yaml (autoDeploy: true).

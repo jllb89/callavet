@@ -1,5 +1,6 @@
 import { CallHandler, ExecutionContext, Injectable, NestInterceptor } from '@nestjs/common';
-import { Observable } from 'rxjs';
+import { Observable, finalize } from 'rxjs';
+import { randomUUID } from 'node:crypto';
 import { RequestContext, JwtClaims } from './request-context.service';
 import { DbService } from '../db/db.service';
 
@@ -7,9 +8,24 @@ import { DbService } from '../db/db.service';
 export class AuthClaimsInterceptor implements NestInterceptor {
   constructor(private readonly rc: RequestContext, private readonly db: DbService) {}
 
+  private extractRequestId(value: unknown): string {
+    if (typeof value === 'string' && value.trim()) return value.trim().slice(0, 128);
+    if (Array.isArray(value) && typeof value[0] === 'string' && value[0].trim()) {
+      return value[0].trim().slice(0, 128);
+    }
+    return randomUUID();
+  }
+
   intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
     const req = context.switchToHttp().getRequest<any>();
+    const res = context.switchToHttp().getResponse<any>();
     const claims: JwtClaims | undefined = req?.authClaims;
+    const requestId = this.extractRequestId(req?.headers?.['x-request-id']);
+    const startedAt = Date.now();
+    req.requestId = requestId;
+    if (typeof res?.setHeader === 'function') {
+      res.setHeader('x-request-id', requestId);
+    }
     // Lightweight session provisioning / heartbeat update
     if (claims?.sub) {
       const ua = (req.headers['user-agent'] || '').toString().slice(0, 512);
@@ -47,7 +63,24 @@ export class AuthClaimsInterceptor implements NestInterceptor {
       })();
     }
     let stream!: Observable<any>;
-    this.rc.runWithClaims(claims, () => { stream = next.handle(); });
+    this.rc.runWithState({ requestId, claims }, () => {
+      stream = next.handle().pipe(
+        finalize(() => {
+          const durationMs = Date.now() - startedAt;
+          const logLine = {
+            scope: 'http',
+            requestId,
+            method: req?.method || 'UNKNOWN',
+            path: req?.originalUrl || req?.url || '/',
+            statusCode: res?.statusCode || 200,
+            userId: claims?.sub || null,
+            durationMs,
+          };
+          // eslint-disable-next-line no-console
+          console.log(JSON.stringify(logLine));
+        })
+      );
+    });
     return stream;
   }
 }

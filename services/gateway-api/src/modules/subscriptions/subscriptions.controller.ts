@@ -27,16 +27,9 @@ export class SubscriptionsController {
       auto_renew?: boolean;
       signed_payload?: string;
       payload?: any;
-    },
-    @Req() req: any
-  ) {
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    let claimsSub: string | null = (this.rc.claims && (this.rc.claims as any).sub) || null;
-    if (!claimsSub && req?.authClaims?.sub) claimsSub = req.authClaims.sub;
-    const userId = claimsSub && uuidRegex.test(claimsSub) ? claimsSub : null;
-    if (!userId) {
-      throw new HttpException({ ok: false, reason: 'unauthenticated' }, HttpStatus.UNAUTHORIZED);
     }
+  ) {
+    const userId = this.rc.requireUuidUserId();
 
     const originalTransactionId = (body?.original_transaction_id || '').trim();
     const transactionId = (body?.transaction_id || '').trim();
@@ -216,26 +209,10 @@ export class SubscriptionsController {
 
   // New Stripe Checkout Session endpoint enforcing metadata.user_id
   @Post('stripe/checkout')
-  async stripeCheckout(@Body() body: { plan_code?: string; success_url?: string; cancel_url?: string }, @Req() req: any) {
+  async stripeCheckout(@Body() body: { plan_code?: string; success_url?: string; cancel_url?: string }) {
     const planCode = (body?.plan_code || '').trim();
     if (!planCode) throw new HttpException({ ok: false, reason: 'plan_code_required' }, HttpStatus.BAD_REQUEST);
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    // Primary: ALS request context
-    let claimsSub: string | null = (this.rc.claims && (this.rc.claims as any).sub) || null;
-    // Fallback: guard-attached authClaims
-    if (!claimsSub && req?.authClaims?.sub) claimsSub = req.authClaims.sub;
-    // Fallback: header x-user-id (dev only)
-    if (!claimsSub && req?.headers?.['x-user-id']) {
-      const raw = Array.isArray(req.headers['x-user-id']) ? req.headers['x-user-id'][0] : req.headers['x-user-id'];
-      const val = (raw || '').toString().trim();
-      if (uuidRegex.test(val)) claimsSub = val;
-    }
-    // Optional env override for local smoke
-    if (!claimsSub && process.env.DEV_TEST_USER_ID && uuidRegex.test(process.env.DEV_TEST_USER_ID)) {
-      claimsSub = process.env.DEV_TEST_USER_ID;
-    }
-    const userId = claimsSub && uuidRegex.test(claimsSub) ? claimsSub : null;
-    if (!userId) throw new HttpException({ ok: false, reason: 'unauthenticated', detail: 'claims.sub missing or invalid UUID', dbg: { rcClaims: this.rc.claims || null, authClaims: req?.authClaims || null } }, HttpStatus.UNAUTHORIZED);
+    const userId = this.rc.requireUuidUserId();
     // Determine billing period + currency from plan row (avoid hardcoded currency)
     const planMeta = await this.db.query<any>(
       `select id, code, currency, billing_period
@@ -335,32 +312,67 @@ export class SubscriptionsController {
 
   @Post('portal')
   async portal() {
-    // Placeholder: backend returns a pending_frontend status so UI can build Stripe portal link.
-    // If STRIPE_PORTAL_BASE_URL env is set, include it; otherwise null.
-    const base = process.env.STRIPE_PORTAL_BASE_URL || null;
-    return {
-      ok: true,
-      action: 'portal',
-      status: 'pending_frontend',
-      stripePortalUrl: base ? `${base}?session=create` : null,
-      reason: 'frontend_todo',
-      message: 'Portal integration to be finished in frontend.'
-    };
+    const userId = this.rc.requireUuidUserId();
+    const sk = process.env.STRIPE_SECRET_KEY || '';
+    if (!sk) {
+      throw new HttpException({ ok: false, reason: 'stripe_secret_missing' }, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+    if (this.db.isStub) {
+      throw new HttpException({ ok: false, reason: 'db_unavailable' }, HttpStatus.SERVICE_UNAVAILABLE);
+    }
+
+    const customerId = await this.db.runInTx(async (q) => {
+      const { rows } = await q<{ stripe_customer_id: string | null }>(
+        `with latest_stripe_subscription as (
+           select provider_customer_id
+             from user_subscriptions
+            where user_id = auth.uid()
+              and provider = 'stripe'
+              and provider_customer_id is not null
+            order by updated_at desc nulls last
+            limit 1
+         )
+         select coalesce(bp.stripe_customer_id, sc.stripe_customer_id, lss.provider_customer_id) as stripe_customer_id
+           from (select auth.uid() as user_id) current_user
+           left join billing_profiles bp on bp.user_id = current_user.user_id
+           left join stripe_customers sc on sc.user_id = current_user.user_id
+           left join latest_stripe_subscription lss on true
+          limit 1`
+      );
+      return rows[0]?.stripe_customer_id?.trim() || null;
+    });
+
+    if (!customerId) {
+      throw new HttpException({ ok: false, reason: 'no_stripe_customer', userId }, HttpStatus.BAD_REQUEST);
+    }
+
+    try {
+      const Stripe = require('stripe');
+      const stripe = new Stripe(sk, { apiVersion: '2024-06-20' });
+      const returnUrl =
+        process.env.STRIPE_PORTAL_RETURN_URL ||
+        process.env.CHECKOUT_CANCEL_URL ||
+        'http://localhost:3000/account/billing';
+      const session = await stripe.billingPortal.sessions.create({
+        customer: customerId,
+        return_url: returnUrl,
+      });
+
+      return { ok: true, url: session.url };
+    } catch (e: any) {
+      throw new HttpException({ ok: false, reason: 'portal_failed', error: e?.message || String(e) }, HttpStatus.BAD_REQUEST);
+    }
   }
 
   // ---- Overage (one-off purchase when quota exhausted) ----
   // Creates a one-off Stripe Checkout Session for overage unit (chat/video).
   @Post('overage/checkout')
-  async overageCheckout(@Body() body: { code: string; quantity?: number; original_session_id?: string; currency?: string; success_url?: string; cancel_url?: string }, @Req() req: any) {
+  async overageCheckout(@Body() body: { code: string; quantity?: number; original_session_id?: string; currency?: string; success_url?: string; cancel_url?: string }) {
     const code = (body?.code || '').trim();
     if (!code) throw new HttpException({ ok: false, reason: 'code_required' }, HttpStatus.BAD_REQUEST);
     const quantity = body?.quantity && body.quantity > 0 ? Math.floor(body.quantity) : 1;
     const currency = (body?.currency || 'mxn').toLowerCase();
-    // Resolve user id
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    let userId: string | null = (this.rc.claims && (this.rc.claims as any).sub) || null;
-    if (!userId && req?.authClaims?.sub) userId = req.authClaims.sub;
-    if (!userId || !uuidRegex.test(userId)) throw new HttpException({ ok: false, reason: 'unauthenticated' }, HttpStatus.UNAUTHORIZED);
+    const userId = this.rc.requireUuidUserId();
     // Lookup catalog item
     const itemRow = await this.db.query<any>(
       `select id, code, name, currency, amount_cents, metadata from overage_items where is_active and lower(code)=lower($1) and lower(currency)=lower($2) limit 1`,

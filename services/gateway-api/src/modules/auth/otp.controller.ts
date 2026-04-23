@@ -7,8 +7,12 @@ import {
   Post,
   Req,
   UnauthorizedException,
+  UseGuards,
 } from '@nestjs/common';
 import { DbService } from '../db/db.service';
+import { RequestContext } from './request-context.service';
+import { EndpointRateLimitGuard } from '../rate-limit/endpoint-rate-limit.guard';
+import { RateLimit } from '../rate-limit/rate-limit.decorator';
 
 type OtpChannel = 'sms' | 'email';
 
@@ -38,7 +42,7 @@ type EmailConfirmBody = {
 
 @Controller('auth/otp')
 export class OtpController {
-  constructor(private readonly db: DbService) {}
+  constructor(private readonly db: DbService, private readonly rc: RequestContext) {}
 
   private getSupabaseAuthConfig() {
     const supabaseUrl = (process.env.SUPABASE_URL || '').trim();
@@ -182,6 +186,8 @@ export class OtpController {
   }
 
   @Post('send')
+  @UseGuards(EndpointRateLimitGuard)
+  @RateLimit({ key: 'auth.otp.send', limit: 5, windowMs: 60_000, scope: 'ip' })
   async sendOtp(@Body() body: SendOtpBody, @Req() req: any) {
     const channel = body.channel;
     if (channel !== 'sms' && channel !== 'email') {
@@ -318,16 +324,15 @@ export class OtpController {
   }
 
   @Post('email/confirm-request')
+  @UseGuards(EndpointRateLimitGuard)
+  @RateLimit({ key: 'auth.otp.email-confirm', limit: 3, windowMs: 60_000, scope: 'user' })
   async requestEmailConfirmation(@Body() body: EmailConfirmBody, @Req() req: any) {
     const authz = (req?.headers?.authorization || '').toString();
     if (!authz.startsWith('Bearer ')) {
       throw new UnauthorizedException('Missing bearer token');
     }
 
-    const claimsSub = req?.authClaims?.sub?.toString?.();
-    if (!claimsSub) {
-      throw new UnauthorizedException('Missing authenticated user claims');
-    }
+    const claimsSub = this.rc.requireUuidUserId();
 
     const normalized = this.normalizeEmail(body.email || '');
     const email = normalized.email;

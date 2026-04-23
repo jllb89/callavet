@@ -1,7 +1,9 @@
-import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpException, HttpStatus, Param, Post, UseGuards } from '@nestjs/common';
 import { DbService } from '../db/db.service';
 import { AuthGuard } from '../auth/auth.guard';
 import { RequestContext } from '../auth/request-context.service';
+import { EndpointRateLimitGuard } from '../rate-limit/endpoint-rate-limit.guard';
+import { RateLimit } from '../rate-limit/rate-limit.decorator';
 
 @UseGuards(AuthGuard)
 @Controller('sessions')
@@ -39,11 +41,20 @@ export class SessionNotesController {
   }
 
   @Post(':sessionId/notes')
+  @UseGuards(EndpointRateLimitGuard)
+  @RateLimit({ key: 'sessions.notes.create', limit: 10, windowMs: 300_000 })
   async createSessionNote(
     @Param('sessionId') sessionId: string,
     @Body() body: { summary_text?: string; plan_summary?: string; pet_id?: string }
   ) {
-    const { summary_text, plan_summary } = body || {};
+    const summaryText = (body?.summary_text || '').toString().trim();
+    const planSummary = (body?.plan_summary || '').toString().trim();
+    if (!summaryText && !planSummary) {
+      throw new HttpException('summary_text_or_plan_summary_required', HttpStatus.BAD_REQUEST);
+    }
+    if (summaryText.length > 8000 || planSummary.length > 8000) {
+      throw new HttpException('note_too_long', HttpStatus.BAD_REQUEST);
+    }
     let pet_id = (body || {}).pet_id || null;
     // Derive pet_id from session if not provided
     if (!pet_id) {
@@ -74,7 +85,7 @@ export class SessionNotesController {
              now()
            )
            returning id, session_id, vet_id, pet_id, summary_text, plan_summary, created_at`,
-          [sessionId, pet_id, summary_text || null, plan_summary || null]
+          [sessionId, pet_id, summaryText || null, planSummary || null]
         );
         if (process.env.DEV_DB_DEBUG === '1') {
           // eslint-disable-next-line no-console

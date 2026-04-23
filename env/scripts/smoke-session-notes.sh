@@ -10,9 +10,14 @@ hdr=(
   -H "Content-Type: application/json"
 )
 
+payload='{"summary_text":"Quick SOAP summary","plan_summary":"Hydration, rest, monitor appetite"}'
+if [[ -n "${PET_ID:-}" ]]; then
+  payload=$(printf '{"summary_text":"Quick SOAP summary","plan_summary":"Hydration, rest, monitor appetite","pet_id":"%s"}' "$PET_ID")
+fi
+
 print -- "[session-notes] Posting note to session=$SESSION_ID"
 post_resp=$(curl -sS -X POST $hdr[@] \
-  --data '{"summary_text":"Quick SOAP summary","plan_summary":"Hydration, rest, monitor appetite"}' \
+  --data "$payload" \
   "$GATEWAY_BASE/sessions/$SESSION_ID/notes")
 print -- "$post_resp" | jq . 2>/dev/null || print -- "$post_resp"
 

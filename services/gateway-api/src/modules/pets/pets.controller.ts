@@ -1,4 +1,5 @@
 import { Body, Controller, Delete, Get, HttpCode, HttpException, HttpStatus, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { AuthGuard } from '../auth/auth.guard';
 import { DbService } from '../db/db.service';
 import { RequestContext } from '../auth/request-context.service';
@@ -7,6 +8,24 @@ import { RequestContext } from '../auth/request-context.service';
 @UseGuards(AuthGuard)
 export class PetsController {
   constructor(private readonly db: DbService, private readonly rc: RequestContext) {}
+  private supabase?: SupabaseClient;
+
+  private getClient(): SupabaseClient {
+    if (this.supabase) return this.supabase;
+    const url = process.env.SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!url || !key) {
+      throw new HttpException('Supabase env missing: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY', HttpStatus.BAD_REQUEST);
+    }
+    this.supabase = createClient(url, key);
+    return this.supabase;
+  }
+
+  private bucket(): string {
+    const name = process.env.SUPABASE_STORAGE_BUCKET;
+    if (!name) throw new HttpException('SUPABASE_STORAGE_BUCKET not set', HttpStatus.BAD_REQUEST);
+    return name;
+  }
 
   @Get()
   async list() {
@@ -43,9 +62,7 @@ export class PetsController {
   @HttpCode(HttpStatus.CREATED)
   async create(@Body() body: any) {
     if (!body?.name || !body?.species) throw new HttpException('name and species required', 400);
-    const claims = this.rc.claims || {};
-    const userId = claims.sub;
-    if (!userId) throw new HttpException('Unauthorized', 401);
+    const userId = this.rc.requireUuidUserId();
     const { rows } = await this.db.runInTx(async (q) => {
       const r = await q(
         `insert into pets (id, user_id, name, species, breed, birthdate, sex, weight_kg, medical_notes)
@@ -106,10 +123,30 @@ export class PetsController {
     return;
   }
 
-  // POST /pets/:id/files/signed-url (stub integration with storage)
   @Post(':id/files/signed-url')
   async petSignedUrl(@Param('id') id: string, @Body() body: any) {
-    const path = body?.path || `pets/${id}/${Date.now()}-${Math.random().toString(36).slice(2)}.bin`;
-    return { path, url: `https://storage.supabase.fake/upload/${encodeURIComponent(path)}`, expires_in: 3600 };
+    const path = (body?.path || `pets/${id}/${Date.now()}-${Math.random().toString(36).slice(2)}.bin`).toString().trim();
+    if (!path.startsWith(`pets/${id}/`)) {
+      throw new HttpException('path must stay within the pet prefix', HttpStatus.BAD_REQUEST);
+    }
+
+    const bucket = this.bucket();
+    const storage = this.getClient().storage.from(bucket) as any;
+    if (typeof storage.createSignedUploadUrl !== 'function') {
+      throw new HttpException('signed_upload_unsupported', HttpStatus.NOT_IMPLEMENTED);
+    }
+
+    const { data, error } = await storage.createSignedUploadUrl(path);
+    if (error) {
+      throw new HttpException(`signed_upload_failed: ${error.message}`, HttpStatus.BAD_REQUEST);
+    }
+
+    return {
+      path,
+      url: data?.signedUrl,
+      token: data?.token,
+      expires_in: 7200,
+      method: 'PUT',
+    };
   }
 }

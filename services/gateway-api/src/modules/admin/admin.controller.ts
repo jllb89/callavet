@@ -71,14 +71,64 @@ export class AdminController {
   @Post('credits/grant')
   async grantCredits(
     @Headers('x-admin-secret') secret: string,
-    @Body() body: { userId: string; code: string; delta: number }
+    @Body() body: { userId?: string; user_id?: string; code?: string; delta?: number; credits?: number; type?: 'chat'|'video'; expires_at?: string }
   ) {
     assertAdmin(secret);
-    if (!body?.userId || !body?.code || typeof body?.delta !== 'number') {
-      throw new BadRequestException('userId, code, delta required');
+    const userId = (body?.userId || body?.user_id || '').trim();
+    const code = ((body?.code || '').trim() || (body?.type === 'video' ? 'video_unit' : body?.type === 'chat' ? 'chat_unit' : '')).trim();
+    const delta = typeof body?.delta === 'number' ? Math.trunc(body.delta) : typeof body?.credits === 'number' ? Math.trunc(body.credits) : NaN;
+    if (!userId || !code || !Number.isFinite(delta) || delta === 0) {
+      throw new BadRequestException('userId/user_id, code or type, and non-zero delta/credits required');
     }
-    // TODO: implement real credits ledger update
-    return { ok: true, code: body.code, delta: body.delta, remaining: null, stub: true };
+
+    const result = await this.db.runInTx(async (q) => {
+      const { rows: itemRows } = await q<{ id: string }>(
+        `select id from overage_items where lower(code)=lower($1) limit 1`,
+        [code]
+      );
+      if (!itemRows[0]) return { itemNotFound: true } as any;
+      const itemId = itemRows[0].id;
+
+      const { rows: creditRows } = await q<{ id: string; remaining_units: number }>(
+        `select id, remaining_units
+           from overage_credits
+          where user_id = $1::uuid
+            and overage_item_id = $2::uuid
+          limit 1
+          for update`,
+        [userId, itemId]
+      );
+
+      if (creditRows[0]) {
+        const { rows: updated } = await q<{ remaining_units: number }>(
+          `update overage_credits
+              set remaining_units = greatest(remaining_units + $2, 0),
+                  expires_at = coalesce($3::timestamptz, expires_at),
+                  updated_at = now()
+            where id = $1::uuid
+            returning remaining_units`,
+          [creditRows[0].id, delta, body?.expires_at || null]
+        );
+        return { remaining: updated[0]?.remaining_units ?? 0 };
+      }
+
+      if (delta < 0) {
+        return { missingCreditRow: true } as any;
+      }
+
+      const { rows: inserted } = await q<{ remaining_units: number }>(
+        `insert into overage_credits (id, user_id, overage_item_id, remaining_units, expires_at, created_at, updated_at)
+         values (gen_random_uuid(), $1::uuid, $2::uuid, $3, $4::timestamptz, now(), now())
+         returning remaining_units`,
+        [userId, itemId, delta, body?.expires_at || null]
+      );
+      return { remaining: inserted[0]?.remaining_units ?? 0 };
+    });
+
+    if ((result as any).itemNotFound) throw new BadRequestException('item_not_found');
+    if ((result as any).missingCreditRow) throw new BadRequestException('no_existing_credit_row');
+
+    return { ok: true, userId, code, delta, remaining: (result as any).remaining };
   }
 
   @Post('refunds')
@@ -94,7 +144,7 @@ export class AdminController {
     const reason = (body.reason || '').trim();
     // Dev fallback: allow stubbed response if no Stripe key or obvious test id
     if (!sk || pid.startsWith('test_') || pid === 'test_payment_id') {
-      return { ok: true, stub: true, paymentId: pid, amount: amt ?? null, reason: reason || null };
+      return { ok: true, mode: 'dev_fallback', paymentId: pid, amount: amt ?? null, reason: reason || null };
     }
     try {
       // Lazy require to avoid import at module load
@@ -136,36 +186,142 @@ export class AdminController {
   ) {
     assertAdmin(secret);
     if (!vetId) throw new BadRequestException('vetId required');
-    // TODO: update vets table set approved=true where id=vetId
-    return { ok: true, vetId, approved: true, stub: true };
+    const { rows } = await (this.db as any).query(
+      `update vets
+          set is_approved = true,
+              updated_at = now()
+        where id = $1::uuid
+        returning id, license_number, country, bio, years_experience, is_approved, specialties, languages`,
+      [vetId]
+    );
+    if (!rows.length) throw new BadRequestException('not_found');
+    return rows[0];
   }
 
   @Post('plans')
   async upsertPlan(
     @Headers('x-admin-secret') secret: string,
-    @Body() body: { code: string; name: string; price_cents?: number; currency?: string }
+    @Body() body: {
+      code: string;
+      name: string;
+      description?: string;
+      price_cents?: number;
+      currency?: string;
+      billing_period?: 'month'|'year';
+      included_chats?: number;
+      included_videos?: number;
+      pets_included_default?: number;
+      tax_rate?: number;
+      is_active?: boolean;
+    }
   ) {
     assertAdmin(secret);
     if (!body?.code || !body?.name) throw new BadRequestException('code, name required');
-    // TODO: insert/update subscription_plans
-    return { ok: true, plan: { code: body.code, name: body.name, price_cents: body.price_cents ?? null, currency: body.currency ?? 'usd' }, stub: true };
-  }
 
-  @Post('coupons')
-  async createCoupon(
-    @Headers('x-admin-secret') secret: string,
-    @Body() body: { code: string; percent_off?: number; amount_off_cents?: number }
-  ) {
-    assertAdmin(secret);
-    if (!body?.code) throw new BadRequestException('code required');
-    // TODO: insert coupon row and optionally sync to Stripe
-    return { ok: true, coupon: { code: body.code, percent_off: body.percent_off ?? null, amount_off_cents: body.amount_off_cents ?? null }, stub: true };
+    const result = await this.db.runInTx(async (q) => {
+      const { rows: existing } = await q<any>(
+        `select id
+           from subscription_plans
+          where lower(code) = lower($1)
+          limit 1
+          for update`,
+        [body.code]
+      );
+
+      if (existing[0]) {
+        const { rows } = await q<any>(
+          `update subscription_plans
+              set name = $2,
+                  description = coalesce($3, description),
+                  price_cents = coalesce($4, price_cents),
+                  currency = coalesce($5, currency),
+                  billing_period = coalesce($6, billing_period),
+                  included_chats = coalesce($7, included_chats),
+                  included_videos = coalesce($8, included_videos),
+                  pets_included_default = coalesce($9, pets_included_default),
+                  tax_rate = coalesce($10, tax_rate),
+                  is_active = coalesce($11, is_active),
+                  updated_at = now()
+            where id = $1::uuid
+            returning *`,
+          [
+            existing[0].id,
+            body.name,
+            body.description ?? null,
+            body.price_cents ?? null,
+            body.currency ?? null,
+            body.billing_period ?? null,
+            body.included_chats ?? null,
+            body.included_videos ?? null,
+            body.pets_included_default ?? null,
+            body.tax_rate ?? null,
+            body.is_active ?? null,
+          ]
+        );
+        return rows[0];
+      }
+
+      if (typeof body.price_cents !== 'number') {
+        throw new BadRequestException('price_cents required when creating a new plan');
+      }
+
+      const { rows } = await q<any>(
+        `insert into subscription_plans (
+           id, code, name, description, price_cents, currency, billing_period,
+           included_chats, included_videos, pets_included_default, tax_rate, is_active,
+           created_at, updated_at
+         ) values (
+           gen_random_uuid(), $1, $2, $3, $4, $5, $6,
+           $7, $8, $9, $10, $11,
+           now(), now()
+         )
+         returning *`,
+        [
+          body.code,
+          body.name,
+          body.description ?? null,
+          body.price_cents,
+          body.currency ?? 'MXN',
+          body.billing_period ?? 'month',
+          body.included_chats ?? 0,
+          body.included_videos ?? 0,
+          body.pets_included_default ?? 1,
+          body.tax_rate ?? 0.16,
+          body.is_active ?? true,
+        ]
+      );
+      return rows[0];
+    });
+
+    return result;
   }
 
   @Get('analytics/usage')
   async analyticsUsage(@Headers('x-admin-secret') secret: string) {
     assertAdmin(secret);
-    // TODO: aggregate queries for usage KPIs
-    return { ok: true, metrics: { users: null, activeSubscriptions: null, sessionsThisMonth: null }, stub: true };
+    const [users, activeSubscriptions, sessionsThisMonth] = await Promise.all([
+      (this.db as any).query(`select count(*)::int as count from users where deleted_at is null`),
+      (this.db as any).query(
+        `select count(*)::int as count
+           from user_subscriptions
+          where status in ('trialing','active')
+            and coalesce(current_period_end, now()) > now()`
+      ),
+      (this.db as any).query(
+        `select count(*)::int as count
+           from chat_sessions
+          where created_at >= date_trunc('month', now())`
+      ),
+    ]);
+
+    return {
+      ok: true,
+      metrics: {
+        users: users.rows[0]?.count ?? 0,
+        activeSubscriptions: activeSubscriptions.rows[0]?.count ?? 0,
+        sessionsThisMonth: sessionsThisMonth.rows[0]?.count ?? 0,
+      },
+      generatedAt: new Date().toISOString(),
+    };
   }
 }

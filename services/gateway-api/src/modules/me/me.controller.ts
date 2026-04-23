@@ -43,9 +43,7 @@ export class MeController {
   constructor(private readonly db: DbService, private readonly rc: RequestContext) {}
 
   private ensureAuthSub(): string {
-    const sub = this.rc.claims?.sub;
-    if (!sub) throw new (require('@nestjs/common').UnauthorizedException)('missing sub');
-    return sub;
+    return this.rc.requireUuidUserId();
   }
 
   @Get()

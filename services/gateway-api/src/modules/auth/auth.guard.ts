@@ -67,6 +67,14 @@ export class AuthGuard implements CanActivate {
       }
     }
 
+    if (!claims && process.env.DEV_TEST_USER_ID) {
+      const val = process.env.DEV_TEST_USER_ID.trim().toLowerCase();
+      const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+      if (uuidRe.test(val)) {
+        claims = { sub: val, role: 'authenticated' } as any;
+      }
+    }
+
     // Optional local admin override for testing
     if (req?.headers['x-admin']) {
       const raw = Array.isArray(req.headers['x-admin']) ? req.headers['x-admin'][0] : req.headers['x-admin'];

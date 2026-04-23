@@ -23,10 +23,13 @@ import { ImageCasesModule } from './image-cases/image-cases.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { AdminModule } from './admin/admin.module';
 import { AppointmentsModule } from './appointments/appointments.module';
+import { RateLimitModule } from './rate-limit/rate-limit.module';
+import { VideoModule } from './video/video.module';
 
 @Module({
   imports: [
     ConfigModule,
+    RateLimitModule,
     DbModule,
     HealthModule,
     MetaModule,
@@ -50,6 +53,7 @@ import { AppointmentsModule } from './appointments/appointments.module';
   NotificationsModule,
   AdminModule,
   AppointmentsModule,
+  VideoModule,
   ],
 })
 export class AppModule {}

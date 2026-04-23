@@ -1,6 +1,8 @@
 import { Body, Controller, Get, HttpException, HttpStatus, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '../auth/auth.guard';
 import { DbService } from '../db/db.service';
+import { EndpointRateLimitGuard } from '../rate-limit/endpoint-rate-limit.guard';
+import { RateLimit } from '../rate-limit/rate-limit.decorator';
 
 @Controller('sessions')
 @UseGuards(AuthGuard)
@@ -59,13 +61,18 @@ export class SessionMessagesController {
   }
 
   @Post(':sessionId/messages')
+  @UseGuards(EndpointRateLimitGuard)
+  @RateLimit({ key: 'sessions.messages.create', limit: 30, windowMs: 60_000 })
   async create(@Param('sessionId') sessionId: string, @Body() body: { role?: string; content?: string }) {
     try {
       const roleRaw = (body?.role || 'user').toString().toLowerCase();
       const role = ['user','vet','ai'].includes(roleRaw) ? roleRaw : 'user';
-      const content = (body?.content || '').toString();
-      if (!content.trim()) {
+      const content = (body?.content || '').toString().trim();
+      if (!content) {
         throw new HttpException('content_required', HttpStatus.BAD_REQUEST);
+      }
+      if (content.length > 4000) {
+        throw new HttpException('content_too_long', HttpStatus.BAD_REQUEST);
       }
       if (this.db.isStub) {
         return {

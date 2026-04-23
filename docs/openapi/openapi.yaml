@@ -71,6 +71,7 @@ components:
         - plan_not_found
         - already_has_active_subscription
         - no_active_subscription
+        - stripe_subscription_active_use_stripe_flow
         - cannot_resume_not_canceled
         - change_plan_same_plan
         - code_required
@@ -473,74 +474,6 @@ paths:
       parameters: [ { $ref: "#/components/parameters/petId" } ]
       requestBody: { $ref: "#/components/requestBodies/SignedUrl" }
       responses: { "200": { $ref: "#/components/responses/SignedUrl" } }
-
-  /vets:
-    get:
-      tags: [Vets]
-      summary: Public vet directory with filters
-      parameters:
-        - in: query
-          name: country
-          schema:
-            type: string
-        - in: query
-          name: specialties
-          schema:
-            type: string
-        - in: query
-          name: languages
-          schema:
-            type: string
-      responses: { "200": { $ref: "#/components/responses/ListVets" } }
-
-  /vets/{vetId}:
-    get:
-      tags: [Vets]
-      summary: Public vet profile
-      parameters: [ { $ref: "#/components/parameters/vetId" } ]
-      responses: { "200": { $ref: "#/components/responses/Vet" } }
-
-  /me/vet:
-    get:
-      tags: [Vets]
-      summary: Get my vet profile
-      security: [{ bearerAuth: [] }]
-      responses: { "200": { $ref: "#/components/responses/Vet" } }
-    put:
-      tags: [Vets]
-      summary: Upsert my vet profile
-      security: [{ bearerAuth: [] }]
-      requestBody: { $ref: "#/components/requestBodies/VetUpsert" }
-      responses: { "200": { $ref: "#/components/responses/Vet" } }
-
-  /me/vet/availability:
-    get:
-      tags: [Vets, Appointments]
-      summary: List weekly slots
-      security: [{ bearerAuth: [] }]
-      responses: { "200": { $ref: "#/components/responses/VetAvailability" } }
-    put:
-      tags: [Vets, Appointments]
-      summary: Replace weekly template
-      security: [{ bearerAuth: [] }]
-      requestBody: { $ref: "#/components/requestBodies/VetAvailability" }
-      responses: { "200": { $ref: "#/components/responses/VetAvailability" } }
-
-  /me/vet/availability/overrides:
-    post:
-      tags: [Vets, Appointments]
-      summary: Add an availability override
-      security: [{ bearerAuth: [] }]
-      requestBody: { $ref: "#/components/requestBodies/VetOverride" }
-      responses: { "201": { $ref: "#/components/responses/VetOverride" } }
-
-  /me/vet/availability/overrides/{id}:
-    delete:
-      tags: [Vets, Appointments]
-      summary: Delete an availability override
-      security: [{ bearerAuth: [] }]
-      parameters: [ { in: path, name: id, required: true, schema: { type: string, format: uuid } } ]
-      responses: { "204": { description: No Content } }
 
   /centers/near:
     get:
@@ -2127,22 +2060,6 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Ok" }
 
-  /sessions/{sessionId}/ratings:
-    post:
-      tags: [Ratings]
-      summary: Rate a session
-      security: [{ bearerAuth: [] }]
-      parameters: [ { $ref: "#/components/parameters/sessionId" } ]
-      requestBody: { $ref: "#/components/requestBodies/RatingCreate" }
-      responses: { "201": { $ref: "#/components/responses/Rating" } }
-
-  /vets/{vetId}/ratings:
-    get:
-      tags: [Ratings]
-      summary: Public aggregate ratings
-      parameters: [ { $ref: "#/components/parameters/vetId" } ]
-      responses: { "200": { $ref: "#/components/responses/ListRatings" } }
-
   /notifications/test:
     post:
       tags: [Notifications]
@@ -2257,10 +2174,22 @@ paths:
   /admin/credits/grant:
     post:
       tags: [Admin]
-      summary: Grant comp credits/entitlements
+      summary: Grant or revoke overage credits
       security: [{ bearerAuth: [] }]
       requestBody: { $ref: "#/components/requestBodies/GrantCredits" }
-      responses: { "200": { $ref: "#/components/responses/Ok" } }
+      responses:
+        "200":
+          description: Credits adjusted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  userId: { type: string, format: uuid }
+                  code: { type: string }
+                  delta: { type: integer }
+                  remaining: { type: integer }
 
   /admin/refunds:
     post:
@@ -2286,23 +2215,27 @@ paths:
       requestBody: { $ref: "#/components/requestBodies/PlanUpsert" }
       responses: { "200": { $ref: "#/components/responses/Plan" } }
 
-  /admin/coupons:
-    post:
-      tags: [Admin]
-      summary: Create coupon (optional)
-      security: [{ bearerAuth: [] }]
-      requestBody:
-        content:
-          application/json:
-            schema: { type: object, properties: { code: { type: string }, percent_off: { type: number } }, required: [code] }
-      responses: { "201": { $ref: "#/components/responses/Ok" } }
-
   /admin/analytics/usage:
     get:
       tags: [Admin]
       summary: Usage analytics
       security: [{ bearerAuth: [] }]
-      responses: { "200": { $ref: "#/components/responses/Ok" } }
+      responses:
+        "200":
+          description: Usage analytics snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  generatedAt: { type: string, format: date-time }
+                  metrics:
+                    type: object
+                    properties:
+                      users: { type: integer }
+                      activeSubscriptions: { type: integer }
+                      sessionsThisMonth: { type: integer }
 
   /webhooks/stripe:
     post:
@@ -2405,7 +2338,6 @@ components:
             properties:
               path: { type: string }
               contentType: { type: string }
-            required: [path, contentType]
     VetUpsert:
       content:
         application/json:
@@ -2657,11 +2589,15 @@ components:
           schema:
             type: object
             properties:
-              user_id: { type: string, format: uuid }
-              credits: { type: integer, minimum: 1 }
-              type: { type: string, enum: [chat, video] }
+              userId: { type: string, format: uuid }
+              user_id: { type: string, format: uuid, description: Legacy alias for userId }
+              code: { type: string, description: Overage item code such as chat_unit or video_unit }
+              delta: { type: integer, description: Positive to grant, negative to revoke }
+              credits: { type: integer, description: Legacy alias for delta }
+              type: { type: string, enum: [chat, video], description: Legacy alias to map into chat_unit or video_unit }
+              expires_at: { type: string, format: date-time, nullable: true }
               note: { type: string }
-            required: [user_id, credits]
+            required: [userId, delta]
     Refund:
       content:
         application/json:
@@ -2834,7 +2770,11 @@ components:
           schema:
             type: object
             properties:
+              path: { type: string }
               url: { type: string, format: uri }
+              token: { type: string, nullable: true }
+              expires_in: { type: integer, nullable: true }
+              expiresIn: { type: integer, nullable: true }
               method: { type: string }
               headers: { type: object, additionalProperties: true }
     ListUsers:
