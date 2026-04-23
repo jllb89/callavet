@@ -2,9 +2,8 @@ import { Body, Controller, Get, HttpException, HttpStatus, Param, Patch, Post, Q
 import { DbService } from '../db/db.service';
 import { AuthGuard } from '../auth/auth.guard';
 import { RequestContext } from '../auth/request-context.service';
-
-type ActorRole = 'user' | 'vet' | 'admin';
-const UUID_RE = /^[0-9a-fA-F-]{36}$/;
+import { ValidatorService } from '../config/validator.service';
+import { EnumService } from '../config/enum.service';
 
 function appointmentDurationMinutes(start: any, end: any): number {
   const startAt = new Date(start).getTime();
@@ -16,7 +15,12 @@ function appointmentDurationMinutes(start: any, end: any): number {
 @Controller()
 @UseGuards(AuthGuard)
 export class AppointmentsController {
-  constructor(private readonly db: DbService, private readonly rc: RequestContext) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly rc: RequestContext,
+    private readonly validator: ValidatorService,
+    private readonly enumService: EnumService,
+  ) {}
 
   @Get('appointments')
   async list(
@@ -49,9 +53,9 @@ export class AppointmentsController {
     try {
       if (!body?.vetId || !body?.startsAt) throw new HttpException('vetId_and_startsAt_required', HttpStatus.BAD_REQUEST);
       if (!body?.specialtyId) throw new HttpException('specialty_required', HttpStatus.BAD_REQUEST);
-      if (!UUID_RE.test(body.vetId)) throw new HttpException('vetId_must_be_uuid', HttpStatus.BAD_REQUEST);
-      if (!UUID_RE.test(body.specialtyId)) throw new HttpException('specialtyId_must_be_uuid', HttpStatus.BAD_REQUEST);
-      if (body.petId && !UUID_RE.test(body.petId)) throw new HttpException('petId_must_be_uuid', HttpStatus.BAD_REQUEST);
+      this.validator.validateUUID(body.vetId, 'vetId');
+      this.validator.validateUUID(body.specialtyId, 'specialtyId');
+      if (body.petId) this.validator.validateUUID(body.petId, 'petId');
       if (this.db.isStub) {
         return {
           id: `appt_${Date.now()}`,
@@ -98,10 +102,13 @@ export class AppointmentsController {
 
         // Simple conflict check: ensure vet is free in the requested window
         const duration = body.durationMin || 30;
+        const activeStatuses = this.enumService.getValuesAsArray('appointments', 'status').filter(s => 
+          ['scheduled','active','confirmed'].includes(s)
+        ).join(`','`);
         const { rows: conflicts } = await q(
           `select id from appointments
             where vet_id = $1
-              and status in ('scheduled','active','confirmed')
+              and status = ANY(ARRAY['scheduled','active','confirmed']::text[])
               and tstzrange(starts_at, ends_at) && tstzrange($2::timestamptz, ($2::timestamptz + make_interval(mins => $3)))
             limit 1`,
           [body.vetId, body.startsAt, duration]
@@ -131,7 +138,7 @@ export class AppointmentsController {
       if (this.db.isStub) return { id, status: body.status || 'scheduled' } as any;
       const actorId = this.rc.requireUuidUserId();
       const row = await this.db.runInTx(async (q) => {
-        const { rows: actorRows } = await q<{ role: ActorRole }>(
+        const { rows: actorRows } = await q<{ role: string }>(
           `select role from users where id = $1::uuid limit 1`,
           [actorId]
         );
@@ -175,7 +182,7 @@ export class AppointmentsController {
                from appointments
               where vet_id = $1::uuid
                 and id <> $2::uuid
-                and status in ('scheduled', 'confirmed', 'active')
+                and status = ANY(ARRAY['scheduled', 'confirmed', 'active']::text[])
                 and tstzrange(starts_at, ends_at) && tstzrange($3::timestamptz, $4::timestamptz)
               limit 1`,
             [appointment.vet_id, id, startsAt, endsAt]
@@ -308,7 +315,7 @@ export class AppointmentsController {
              select tstzrange(starts_at, ends_at) as appt_range
                from appointments
               where vet_id = (select vet_id from params)
-                and status in ('scheduled','active','confirmed')
+                and status = ANY(ARRAY['scheduled','active','confirmed']::text[])
            )
            select slot_start, slot_end
              from slots s
