@@ -13,6 +13,7 @@ import { DbService } from '../db/db.service';
 import { RequestContext } from './request-context.service';
 import { EndpointRateLimitGuard } from '../rate-limit/endpoint-rate-limit.guard';
 import { RateLimit } from '../rate-limit/rate-limit.decorator';
+import { ValidatorService } from '../config/validator.service';
 
 type OtpChannel = 'sms' | 'email';
 
@@ -42,7 +43,11 @@ type EmailConfirmBody = {
 
 @Controller('auth/otp')
 export class OtpController {
-  constructor(private readonly db: DbService, private readonly rc: RequestContext) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly rc: RequestContext,
+    private readonly validator: ValidatorService,
+  ) {}
 
   private getSupabaseAuthConfig() {
     const supabaseUrl = (process.env.SUPABASE_URL || '').trim();
@@ -77,24 +82,13 @@ export class OtpController {
   }
 
   private normalizePhone(input: string): { e164: string; identifier: string } {
-    const compact = input.replace(/[^0-9+]/g, '');
-    if (!compact) {
-      throw new BadRequestException('phone is required');
-    }
-    const e164 = compact.startsWith('+')
-      ? compact
-      : `+${compact.replace(/[^0-9]/g, '')}`;
+    const e164 = this.validator.validatePhoneE164(input, 'phone');
     const digits = e164.replace(/[^0-9]/g, '');
-    if (digits.length < 8 || digits.length > 15) {
-      throw new BadRequestException('phone must be valid E.164');
-    }
     return { e164, identifier: `sms:${digits}` };
   }
 
   private normalizeEmail(input: string): { email: string; identifier: string } {
-    const email = input.trim().toLowerCase();
-    const ok = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email);
-    if (!ok) throw new BadRequestException('email format is invalid');
+    const email = this.validator.validateEmail(input, 'email');
     return { email, identifier: `email:${email}` };
   }
 

@@ -2,6 +2,7 @@ import { Body, Controller, Get, HttpException, Param, Patch, Post, Query, UseGua
 import { DbService } from '../db/db.service';
 import { RequestContext } from '../auth/request-context.service';
 import { AuthGuard } from '../auth/auth.guard';
+import { ValidatorService } from '../config/validator.service';
 
 type CreateKbDto = {
   title: string;
@@ -13,7 +14,11 @@ type CreateKbDto = {
 
 @Controller()
 export class KbController {
-  constructor(private readonly db: DbService, private readonly rc: RequestContext) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly rc: RequestContext,
+    private readonly validator: ValidatorService,
+  ) {}
 
   // GET /kb - list articles (published for public; authors/admin see drafts)
   @UseGuards(AuthGuard)
@@ -77,7 +82,7 @@ export class KbController {
   @UseGuards(AuthGuard)
   @Get('/kb/:id')
   async getKb(@Param('id') idOrSlug: string) {
-    const isUuid = /^[0-9a-fA-F-]{36}$/.test(idOrSlug);
+    const isUuid = this.validator.isValidUUID(idOrSlug);
     const { rows } = await this.db.runInTx(async (q) => {
       const r = await q(
       `SELECT id, slug, title, content, language, status, tags, species, author_user_id, published_at, updated_at

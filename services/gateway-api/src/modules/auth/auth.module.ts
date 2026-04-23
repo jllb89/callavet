@@ -4,11 +4,12 @@ import { AuthGuard } from './auth.guard';
 import { RequestContext } from './request-context.service';
 import { AuthClaimsInterceptor } from './auth.interceptor';
 import { DbModule } from '../db/db.module';
+import { ConfigModule } from '../config/config.module';
 import { OtpController } from './otp.controller';
 
 @Global()
 @Module({
-	imports: [forwardRef(() => DbModule)],
+	imports: [forwardRef(() => DbModule), ConfigModule],
 	controllers: [OtpController],
 	providers: [
 		AuthGuard,
