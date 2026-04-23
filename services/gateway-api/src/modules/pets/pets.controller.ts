@@ -3,145 +3,91 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { AuthGuard } from '../auth/auth.guard';
 import { DbService } from '../db/db.service';
 import { RequestContext } from '../auth/request-context.service';
-
-const PET_SELECT_SQL = `
-  id::text as id,
-  user_id::text as user_id,
-  name,
-  species,
-  sex,
-  age_range,
-  weight_range,
-  location_country,
-  location_state_region,
-  breed,
-  warmblood_subbreed,
-  other_breed_text,
-  primary_activity,
-  discipline,
-  other_discipline_text,
-  training_intensity,
-  terrain,
-  other_terrain_text,
-  observed_last_6_months,
-  known_conditions,
-  current_treatments_or_supplements,
-  last_vet_check,
-  vaccines_up_to_date,
-  deworming_status,
-  additional_notes,
-  created_at
-`;
-
-const SEX_VALUES = new Set(['male', 'female', 'gelding']);
-const AGE_RANGE_VALUES = new Set(['foal_0_2', 'young_3_5', 'adult_6_15', 'senior_16_plus']);
-const WEIGHT_RANGE_VALUES = new Set(['lt_400', '400_500', '500_600', 'gt_600']);
-const BREED_VALUES = new Set(['quarter_horse', 'thoroughbred', 'pre', 'arabian', 'criollo', 'appaloosa', 'paint_horse', 'warmblood', 'mixed', 'other']);
-const WARMBLOOD_SUBBREED_VALUES = new Set(['holsteiner', 'hanoverian', 'kwpn', 'oldenburg', 'selle_francais', 'westphalian', 'trakehner', 'other']);
-const PRIMARY_ACTIVITY_VALUES = new Set(['competition', 'regular_training', 'rehabilitation_recovery', 'retired', 'recreational']);
-const DISCIPLINE_VALUES = new Set(['jumping', 'dressage', 'polo', 'endurance', 'barrel_racing', 'reining', 'charreada', 'ranch_work', 'recreational', 'other']);
-const TRAINING_INTENSITY_VALUES = new Set(['1_2_per_week', '3_4_per_week', '5_plus_per_week']);
-const TERRAIN_VALUES = new Set(['sand', 'grass', 'dirt', 'mixed', 'other']);
-const OBSERVED_VALUES = new Set(['mild_lameness', 'stiffness', 'performance_drop', 'appetite_changes', 'none']);
-const KNOWN_CONDITIONS_VALUES = new Set(['digestive', 'locomotor', 'respiratory', 'skin', 'none']);
-const LAST_VET_CHECK_VALUES = new Set(['lt_3_months', '3_6_months', 'gt_6_months', 'dont_remember']);
-const VACCINE_VALUES = new Set(['yes', 'no', 'not_sure']);
-const DEWORMING_VALUES = new Set(['regular', 'irregular', 'not_sure']);
-
-type PetPayload = {
-  name?: string;
-  species?: string;
-  sex?: string;
-  age_range?: string;
-  weight_range?: string;
-  location_country?: string;
-  location_state_region?: string;
-  breed?: string;
-  warmblood_subbreed?: string | null;
-  other_breed_text?: string | null;
-  primary_activity?: string;
-  discipline?: string;
-  other_discipline_text?: string | null;
-  training_intensity?: string;
-  terrain?: string;
-  other_terrain_text?: string | null;
-  observed_last_6_months?: string[];
-  known_conditions?: string[];
-  current_treatments_or_supplements?: string | null;
-  last_vet_check?: string;
-  vaccines_up_to_date?: string;
-  deworming_status?: string;
-  additional_notes?: string | null;
-};
+import { SchemaService } from './schema.service';
 
 @Controller('pets')
 @UseGuards(AuthGuard)
 export class PetsController {
-  constructor(private readonly db: DbService, private readonly rc: RequestContext) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly rc: RequestContext,
+    private readonly schema: SchemaService,
+  ) {}
   private supabase?: SupabaseClient;
 
   private normalizeString(input: unknown): string {
     return typeof input === 'string' ? input.trim() : '';
   }
 
-  private parseOptionalString(input: unknown, field: string, maxLength: number): string | null {
-    if (input === undefined || input === null) return null;
-    const value = this.normalizeString(input);
-    if (!value) return null;
-    if (value.length > maxLength) {
-      throw new HttpException(`${field} too long`, HttpStatus.BAD_REQUEST);
-    }
-    return value;
-  }
+  private parseValue(input: unknown, fieldName: string, mode: 'create' | 'patch'): any {
+    const schema = this.schema.getPetSchema();
+    const field = schema.fields.get(fieldName);
+    if (!field) throw new HttpException(`unknown field: ${fieldName}`, HttpStatus.BAD_REQUEST);
 
-  private parseRequiredString(input: unknown, field: string, maxLength = 100): string {
-    const value = this.normalizeString(input);
-    if (!value) {
-      throw new HttpException(`${field} required`, HttpStatus.BAD_REQUEST);
-    }
-    if (value.length > maxLength) {
-      throw new HttpException(`${field} too long`, HttpStatus.BAD_REQUEST);
-    }
-    return value;
-  }
+    const isRequired = mode === 'create' && field.required;
 
-  private parseEnum(input: unknown, field: string, allowed: Set<string>, required: boolean): string | undefined {
+    // Handle undefined/null
     if (input === undefined || input === null) {
-      if (required) throw new HttpException(`${field} required`, HttpStatus.BAD_REQUEST);
+      if (isRequired) throw new HttpException(`${fieldName} required`, HttpStatus.BAD_REQUEST);
       return undefined;
     }
-    const value = this.normalizeString(input);
-    if (!value) {
-      if (required) throw new HttpException(`${field} required`, HttpStatus.BAD_REQUEST);
-      return undefined;
-    }
-    if (!allowed.has(value)) {
-      throw new HttpException(`${field} invalid`, HttpStatus.BAD_REQUEST);
-    }
-    return value;
-  }
 
-  private parseEnumArray(input: unknown, field: string, allowed: Set<string>, required: boolean): string[] | undefined {
-    if (input === undefined || input === null) {
-      if (required) throw new HttpException(`${field} required`, HttpStatus.BAD_REQUEST);
+    // Handle special location fields from nested object
+    if (fieldName === 'location_country' || fieldName === 'location_state_region') {
+      // These are handled specially in parsePayload
       return undefined;
     }
-    if (!Array.isArray(input)) {
-      throw new HttpException(`${field} must be an array`, HttpStatus.BAD_REQUEST);
-    }
-    const dedup = [...new Set(input.map((value) => this.normalizeString(value)).filter((value) => !!value))];
-    if (dedup.length === 0) {
-      throw new HttpException(`${field} requires at least one item`, HttpStatus.BAD_REQUEST);
-    }
-    for (const value of dedup) {
-      if (!allowed.has(value)) {
-        throw new HttpException(`${field} contains invalid value`, HttpStatus.BAD_REQUEST);
+
+    // String fields
+    if (field.type === 'string') {
+      const value = this.normalizeString(input);
+      if (!value) {
+        if (isRequired) throw new HttpException(`${fieldName} required`, HttpStatus.BAD_REQUEST);
+        return undefined;
       }
+      if (field.maxLength && value.length > field.maxLength) {
+        throw new HttpException(`${fieldName} too long`, HttpStatus.BAD_REQUEST);
+      }
+      return value;
     }
-    if (dedup.includes('none') && dedup.length > 1) {
-      throw new HttpException(`${field} cannot combine 'none' with other values`, HttpStatus.BAD_REQUEST);
+
+    // Enum fields
+    if (field.type === 'enum') {
+      const value = this.normalizeString(input);
+      if (!value) {
+        if (isRequired) throw new HttpException(`${fieldName} required`, HttpStatus.BAD_REQUEST);
+        return undefined;
+      }
+      if (!field.enumValues?.has(value)) {
+        throw new HttpException(`${fieldName} invalid value`, HttpStatus.BAD_REQUEST);
+      }
+      return value;
     }
-    return dedup;
+
+    // Array fields
+    if (field.type === 'array') {
+      if (!Array.isArray(input)) {
+        throw new HttpException(`${fieldName} must be an array`, HttpStatus.BAD_REQUEST);
+      }
+      const dedup = [...new Set(input.map((v) => this.normalizeString(v)).filter((v) => !!v))];
+      if (dedup.length === 0) {
+        if (isRequired) throw new HttpException(`${fieldName} requires at least one item`, HttpStatus.BAD_REQUEST);
+        return undefined;
+      }
+      if (field.arrayEnumValues) {
+        for (const v of dedup) {
+          if (!field.arrayEnumValues.has(v)) {
+            throw new HttpException(`${fieldName} contains invalid value: ${v}`, HttpStatus.BAD_REQUEST);
+          }
+        }
+      }
+      if (dedup.includes('none') && dedup.length > 1) {
+        throw new HttpException(`${fieldName} cannot combine 'none' with other values`, HttpStatus.BAD_REQUEST);
+      }
+      return dedup;
+    }
+
+    return input;
   }
 
   private normalizeSpecies(input: unknown, required: boolean): string | undefined {
@@ -161,106 +107,85 @@ export class PetsController {
     return 'horse';
   }
 
-  private parsePayload(body: any, mode: 'create' | 'patch'): PetPayload {
-    const required = mode === 'create';
-    const payload: PetPayload = {};
-    const allowed = new Set([
-      'name', 'species', 'sex', 'age_range', 'weight_range', 'location_country', 'location_state_region', 'location', 'breed',
-      'warmblood_subbreed', 'other_breed_text', 'primary_activity', 'discipline', 'other_discipline_text', 'training_intensity',
-      'terrain', 'other_terrain_text', 'observed_last_6_months', 'known_conditions', 'current_treatments_or_supplements',
-      'last_vet_check', 'vaccines_up_to_date', 'deworming_status', 'additional_notes',
-    ]);
+  private parsePayload(body: any, mode: 'create' | 'patch'): Record<string, any> {
+    const schema = this.schema.getPetSchema();
+    const payload: Record<string, any> = {};
+    const allowedFields = new Set(Array.from(schema.fields.keys()).concat(['location']));
 
     for (const key of Object.keys(body || {})) {
-      if (!allowed.has(key)) {
+      if (!allowedFields.has(key)) {
         throw new HttpException(`unsupported field: ${key}`, HttpStatus.BAD_REQUEST);
       }
     }
 
-    if (required || body?.name !== undefined) payload.name = this.parseRequiredString(body?.name, 'name', 100);
-
-    const species = this.normalizeSpecies(body?.species, required);
-    if (species !== undefined) payload.species = species;
-
-    const sex = this.parseEnum(body?.sex, 'sex', SEX_VALUES, required);
-    if (sex !== undefined) payload.sex = sex;
-
-    const ageRange = this.parseEnum(body?.age_range, 'age_range', AGE_RANGE_VALUES, required);
-    if (ageRange !== undefined) payload.age_range = ageRange;
-
-    const weightRange = this.parseEnum(body?.weight_range, 'weight_range', WEIGHT_RANGE_VALUES, required);
-    if (weightRange !== undefined) payload.weight_range = weightRange;
-
-    const locationCountry = body?.location?.country ?? body?.location_country;
-    const locationState = body?.location?.state_region ?? body?.location_state_region;
-    if (required || locationCountry !== undefined) payload.location_country = this.parseRequiredString(locationCountry, 'location.country', 100);
-    if (required || locationState !== undefined) payload.location_state_region = this.parseRequiredString(locationState, 'location.state_region', 100);
-
-    const breed = this.parseEnum(body?.breed, 'breed', BREED_VALUES, required);
-    if (breed !== undefined) payload.breed = breed;
-
-    if (required || body?.warmblood_subbreed !== undefined) {
-      if (body?.warmblood_subbreed === null) {
-        payload.warmblood_subbreed = null;
+    // Handle name separately (always required on create)
+    if (mode === 'create' || body?.name !== undefined) {
+      const field = schema.fields.get('name');
+      const value = this.normalizeString(body?.name);
+      if (!value) {
+        if (mode === 'create') throw new HttpException('name required', HttpStatus.BAD_REQUEST);
       } else {
-        const value = this.parseEnum(body?.warmblood_subbreed, 'warmblood_subbreed', WARMBLOOD_SUBBREED_VALUES, false);
-        payload.warmblood_subbreed = value ?? null;
+        if (field?.maxLength && value.length > field.maxLength) {
+          throw new HttpException('name too long', HttpStatus.BAD_REQUEST);
+        }
+        payload.name = value;
       }
     }
 
-    if (required || body?.other_breed_text !== undefined) {
-      payload.other_breed_text = this.parseOptionalString(body?.other_breed_text, 'other_breed_text', 100);
+    // Handle species separately
+    const species = this.normalizeSpecies(body?.species, mode === 'create');
+    if (species !== undefined) payload.species = species;
+
+    // Handle location fields from nested object or flat fields
+    const locationCountry = body?.location?.country ?? body?.location_country;
+    const locationState = body?.location?.state_region ?? body?.location_state_region;
+    if (mode === 'create' || locationCountry !== undefined) {
+      const value = this.normalizeString(locationCountry);
+      if (!value) {
+        if (mode === 'create') throw new HttpException('location.country required', HttpStatus.BAD_REQUEST);
+      } else {
+        const field = schema.fields.get('location_country');
+        if (field?.maxLength && value.length > field.maxLength) {
+          throw new HttpException('location.country too long', HttpStatus.BAD_REQUEST);
+        }
+        payload.location_country = value;
+      }
+    }
+    if (mode === 'create' || locationState !== undefined) {
+      const value = this.normalizeString(locationState);
+      if (!value) {
+        if (mode === 'create') throw new HttpException('location.state_region required', HttpStatus.BAD_REQUEST);
+      } else {
+        const field = schema.fields.get('location_state_region');
+        if (field?.maxLength && value.length > field.maxLength) {
+          throw new HttpException('location.state_region too long', HttpStatus.BAD_REQUEST);
+        }
+        payload.location_state_region = value;
+      }
     }
 
-    const primaryActivity = this.parseEnum(body?.primary_activity, 'primary_activity', PRIMARY_ACTIVITY_VALUES, required);
-    if (primaryActivity !== undefined) payload.primary_activity = primaryActivity;
+    // Parse all other fields dynamically from schema
+    for (const [fieldName, field] of schema.fields) {
+      // Skip already-processed fields
+      if (['name', 'species', 'location_country', 'location_state_region', 'id', 'user_id', 'created_at'].includes(fieldName)) {
+        continue;
+      }
 
-    const discipline = this.parseEnum(body?.discipline, 'discipline', DISCIPLINE_VALUES, required);
-    if (discipline !== undefined) payload.discipline = discipline;
-
-    if (required || body?.other_discipline_text !== undefined) {
-      payload.other_discipline_text = this.parseOptionalString(body?.other_discipline_text, 'other_discipline_text', 100);
+      if (body?.[fieldName] !== undefined) {
+        const value = this.parseValue(body[fieldName], fieldName, mode);
+        if (value !== undefined) {
+          payload[fieldName] = value;
+        }
+      } else if (mode === 'create' && field.required) {
+        throw new HttpException(`${fieldName} required`, HttpStatus.BAD_REQUEST);
+      }
     }
 
-    const trainingIntensity = this.parseEnum(body?.training_intensity, 'training_intensity', TRAINING_INTENSITY_VALUES, required);
-    if (trainingIntensity !== undefined) payload.training_intensity = trainingIntensity;
-
-    const terrain = this.parseEnum(body?.terrain, 'terrain', TERRAIN_VALUES, required);
-    if (terrain !== undefined) payload.terrain = terrain;
-
-    if (required || body?.other_terrain_text !== undefined) {
-      payload.other_terrain_text = this.parseOptionalString(body?.other_terrain_text, 'other_terrain_text', 100);
-    }
-
-    const observed = this.parseEnumArray(body?.observed_last_6_months, 'observed_last_6_months', OBSERVED_VALUES, required);
-    if (observed !== undefined) payload.observed_last_6_months = observed;
-
-    const known = this.parseEnumArray(body?.known_conditions, 'known_conditions', KNOWN_CONDITIONS_VALUES, required);
-    if (known !== undefined) payload.known_conditions = known;
-
-    if (required || body?.current_treatments_or_supplements !== undefined) {
-      payload.current_treatments_or_supplements = this.parseOptionalString(body?.current_treatments_or_supplements, 'current_treatments_or_supplements', 500);
-    }
-
-    const lastVetCheck = this.parseEnum(body?.last_vet_check, 'last_vet_check', LAST_VET_CHECK_VALUES, required);
-    if (lastVetCheck !== undefined) payload.last_vet_check = lastVetCheck;
-
-    const vaccines = this.parseEnum(body?.vaccines_up_to_date, 'vaccines_up_to_date', VACCINE_VALUES, required);
-    if (vaccines !== undefined) payload.vaccines_up_to_date = vaccines;
-
-    const deworming = this.parseEnum(body?.deworming_status, 'deworming_status', DEWORMING_VALUES, required);
-    if (deworming !== undefined) payload.deworming_status = deworming;
-
-    if (required || body?.additional_notes !== undefined) {
-      payload.additional_notes = this.parseOptionalString(body?.additional_notes, 'additional_notes', 1000);
-    }
-
-    // Conditional dependencies from KYC schema.
-    const effectiveBreed = payload.breed;
-    if (effectiveBreed === 'warmblood' && !payload.warmblood_subbreed) {
+    // Check conditional dependencies
+    if (payload.breed === 'warmblood' && !payload.warmblood_subbreed) {
       throw new HttpException('warmblood_subbreed required when breed=warmblood', HttpStatus.BAD_REQUEST);
     }
-    if (effectiveBreed === 'other' && !payload.other_breed_text) {
+    if (payload.breed === 'other' && !payload.other_breed_text) {
       throw new HttpException('other_breed_text required when breed=other', HttpStatus.BAD_REQUEST);
     }
     if (payload.discipline === 'other' && !payload.other_discipline_text) {
@@ -304,9 +229,10 @@ export class PetsController {
   async list() {
     if (this.db.isStub) return { data: [] } as any;
     const userId = this.rc.requireUuidUserId();
+    const schema = this.schema.getPetSchema();
     const { rows } = await this.db.runInTx(async (q) => {
       const r = await q(
-        `select ${PET_SELECT_SQL}
+        `select ${schema.selectSql}
            from pets
           where user_id = $1::uuid
           order by created_at desc
@@ -321,9 +247,10 @@ export class PetsController {
   @Get(':id')
   async detail(@Param('id') id: string) {
     const userId = this.rc.requireUuidUserId();
+    const schema = this.schema.getPetSchema();
     const { rows } = await this.db.runInTx(async (q) => {
       const r = await q(
-        `select ${PET_SELECT_SQL}
+        `select ${schema.selectSql}
            from pets
           where id = $1::uuid and user_id = $2::uuid
           limit 1`,
@@ -340,47 +267,30 @@ export class PetsController {
   async create(@Body() body: any) {
     const payload = this.parsePayload(body, 'create');
     const userId = this.rc.requireUuidUserId();
+    const schema = this.schema.getPetSchema();
+
+    // Build INSERT dynamically from payload
+    const fields = ['id', 'user_id', ...Object.keys(payload)];
+    const values = ['gen_random_uuid()', '$1::uuid', ...Object.keys(payload).map((_, i) => `$${i + 2}`)];
+    const castMap: Record<string, string> = {
+      observed_last_6_months: '::text[]',
+      known_conditions: '::text[]',
+    };
+    const castedValues = values.map((v, i) => {
+      if (i < 2) return v; // id and user_id
+      const fieldName = fields[i];
+      const cast = castMap[fieldName] || '';
+      return `${v}${cast}`;
+    });
+
+    const args = [userId, ...Object.keys(payload).map((k) => payload[k])];
+
     const { rows } = await this.db.runInTx(async (q) => {
       const r = await q(
-        `insert into pets (
-            id, user_id, name, species, sex, age_range, weight_range, location_country, location_state_region,
-            breed, warmblood_subbreed, other_breed_text, primary_activity, discipline, other_discipline_text,
-            training_intensity, terrain, other_terrain_text, observed_last_6_months, known_conditions,
-            current_treatments_or_supplements, last_vet_check, vaccines_up_to_date, deworming_status, additional_notes
-          )
-         values (
-            gen_random_uuid(), $1::uuid, $2, $3, $4, $5, $6, $7, $8,
-            $9, $10, $11, $12, $13, $14,
-            $15, $16, $17, $18::text[], $19::text[],
-            $20, $21, $22, $23, $24
-         )
-         returning ${PET_SELECT_SQL}`,
-        [
-          userId,
-          payload.name,
-          payload.species,
-          payload.sex,
-          payload.age_range,
-          payload.weight_range,
-          payload.location_country,
-          payload.location_state_region,
-          payload.breed,
-          payload.warmblood_subbreed ?? null,
-          payload.other_breed_text ?? null,
-          payload.primary_activity,
-          payload.discipline,
-          payload.other_discipline_text ?? null,
-          payload.training_intensity,
-          payload.terrain,
-          payload.other_terrain_text ?? null,
-          payload.observed_last_6_months,
-          payload.known_conditions,
-          payload.current_treatments_or_supplements ?? null,
-          payload.last_vet_check,
-          payload.vaccines_up_to_date,
-          payload.deworming_status,
-          payload.additional_notes ?? null,
-        ]
+        `insert into pets (${fields.join(', ')})
+         values (${castedValues.join(', ')})
+         returning ${schema.selectSql}`,
+        args
       );
       return r;
     });
@@ -391,45 +301,27 @@ export class PetsController {
   async patch(@Param('id') id: string, @Body() body: any) {
     const userId = this.rc.requireUuidUserId();
     const payload = this.parsePayload(body, 'patch');
-    const fieldSpec: Array<{ key: keyof PetPayload; cast?: string }> = [
-      { key: 'name' },
-      { key: 'species' },
-      { key: 'sex' },
-      { key: 'age_range' },
-      { key: 'weight_range' },
-      { key: 'location_country' },
-      { key: 'location_state_region' },
-      { key: 'breed' },
-      { key: 'warmblood_subbreed' },
-      { key: 'other_breed_text' },
-      { key: 'primary_activity' },
-      { key: 'discipline' },
-      { key: 'other_discipline_text' },
-      { key: 'training_intensity' },
-      { key: 'terrain' },
-      { key: 'other_terrain_text' },
-      { key: 'observed_last_6_months', cast: '::text[]' },
-      { key: 'known_conditions', cast: '::text[]' },
-      { key: 'current_treatments_or_supplements' },
-      { key: 'last_vet_check' },
-      { key: 'vaccines_up_to_date' },
-      { key: 'deworming_status' },
-      { key: 'additional_notes' },
-    ];
+    const schema = this.schema.getPetSchema();
+
+    // Build UPDATE dynamically from payload
+    const castMap: Record<string, string> = {
+      observed_last_6_months: '::text[]',
+      known_conditions: '::text[]',
+    };
     const sets: string[] = [];
     const args: any[] = [];
-    for (const spec of fieldSpec) {
-      if ((payload as any)[spec.key] !== undefined) {
-        args.push((payload as any)[spec.key]);
-        sets.push(`${spec.key} = $${args.length}${spec.cast || ''}`);
-      }
+    for (const [key, value] of Object.entries(payload)) {
+      args.push(value);
+      const cast = castMap[key] || '';
+      sets.push(`${key} = $${args.length}${cast}`);
     }
     if (!sets.length) throw new HttpException('no fields', 400);
     args.push(id, userId);
+
     const { rows } = await this.db.runInTx(async (q) => {
       const r = await q(
         `update pets set ${sets.join(', ')} where id = $${args.length - 1}::uuid and user_id = $${args.length}::uuid
-         returning ${PET_SELECT_SQL}`,
+         returning ${schema.selectSql}`,
         args
       );
       return r;
