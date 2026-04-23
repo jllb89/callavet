@@ -50,10 +50,16 @@ export class SchemaService implements OnModuleInit {
 
     const { rows: constraints } = await this.db.runInTx(async (q) => {
       return q(
-        `select constraint_name, constraint_definition
-           from information_schema.table_constraints
-          join information_schema.constraint_column_usage using (constraint_name, table_schema, table_name)
-          where table_schema = 'public' and table_name = 'pets' and constraint_type = 'CHECK'`,
+        `select tc.constraint_name,
+                cc.check_clause as constraint_definition
+           from information_schema.table_constraints tc
+           join information_schema.check_constraints cc
+             on cc.constraint_catalog = tc.constraint_catalog
+            and cc.constraint_schema = tc.constraint_schema
+            and cc.constraint_name = tc.constraint_name
+          where tc.table_schema = 'public'
+            and tc.table_name = 'pets'
+            and tc.constraint_type = 'CHECK'`,
         [],
       );
     });
