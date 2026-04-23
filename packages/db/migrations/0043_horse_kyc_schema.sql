@@ -83,6 +83,12 @@ ALTER TABLE public.pets ADD COLUMN IF NOT EXISTS deworming_status text
 ALTER TABLE public.pets ADD COLUMN IF NOT EXISTS additional_notes text
   CHECK (additional_notes IS NULL OR length(additional_notes) <= 1000);
 
+-- Replace legacy generated search_tsv/triggers that depend on medical_notes.
+DROP TRIGGER IF EXISTS trg_pets_search_tsv ON public.pets;
+ALTER TABLE public.pets DROP COLUMN IF EXISTS search_tsv;
+ALTER TABLE public.pets ADD COLUMN IF NOT EXISTS search_tsv tsvector;
+CREATE INDEX IF NOT EXISTS pets_tsv_gin ON public.pets USING GIN (search_tsv);
+
 -- Drop old unstructured columns
 ALTER TABLE public.pets DROP COLUMN IF EXISTS birthdate;
 ALTER TABLE public.pets DROP COLUMN IF EXISTS weight_kg;
@@ -133,10 +139,9 @@ ALTER TABLE public.pets ADD CONSTRAINT known_conditions_valid_values
 CREATE OR REPLACE FUNCTION rebuild_pet_search_vector()
 RETURNS TRIGGER
 LANGUAGE plpgsql
-STABLE
 AS $$
 BEGIN
-  NEW.search_tsv := es_en_tsv(
+  NEW.search_tsv := public.es_en_tsv(
     coalesce(NEW.name, '') || ' ' ||
     coalesce(NEW.breed, '') || ' ' ||
     coalesce(NEW.primary_activity, '') || ' ' ||
@@ -155,7 +160,7 @@ FOR EACH ROW
 EXECUTE FUNCTION rebuild_pet_search_vector();
 
 -- Regenerate search vectors for existing pets
-UPDATE public.pets SET search_tsv = es_en_tsv(
+UPDATE public.pets SET search_tsv = public.es_en_tsv(
   coalesce(name, '') || ' ' ||
   coalesce(breed, '') || ' ' ||
   coalesce(primary_activity, '') || ' ' ||
