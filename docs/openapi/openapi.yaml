@@ -2299,6 +2299,44 @@ paths:
                   statusCode: { type: integer }
                   sandbox: { type: boolean }
 
+  /notifications/events:
+    post:
+      tags: [Notifications]
+      summary: Enqueue or send a notification event
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [eventType]
+              properties:
+                eventType: { type: string, example: note.ready }
+                userId: { type: string, format: uuid }
+                channel: { type: string, enum: [email, sms, whatsapp, push, system], default: email }
+                to: { type: string, description: Destination (email/phone/token depending on channel) }
+                templateId: { type: string }
+                variables: { type: object, additionalProperties: true }
+                subject: { type: string }
+                message: { type: string }
+                sandbox: { type: boolean }
+      responses:
+        "200":
+          description: Event status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  id: { type: string, format: uuid }
+                  status: { type: string, enum: [queued, sent, failed] }
+                  channel: { type: string }
+                  provider: { type: string, nullable: true }
+                  providerId: { type: string, nullable: true }
+                  reason: { type: string, nullable: true }
+
   /files/upload:
     post:
       tags: [Files]
@@ -2431,6 +2469,178 @@ paths:
                       users: { type: integer }
                       activeSubscriptions: { type: integer }
                       sessionsThisMonth: { type: integer }
+
+  /admin/notifications/events:
+    get:
+      tags: [Admin]
+      summary: List notification delivery events
+      security: [{ bearerAuth: [] }, { adminSecret: [] }]
+      parameters:
+        - in: query
+          name: status
+          schema: { type: string, enum: [queued, sent, failed, skipped] }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: Notification events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string, format: uuid }
+                        user_id: { type: string, format: uuid, nullable: true }
+                        event_type: { type: string }
+                        channel: { type: string }
+                        destination: { type: string, nullable: true }
+                        status: { type: string }
+                        provider: { type: string, nullable: true }
+                        provider_message_id: { type: string, nullable: true }
+                        error_text: { type: string, nullable: true }
+                        created_at: { type: string, format: date-time }
+                        sent_at: { type: string, format: date-time, nullable: true }
+
+  /admin/audit/logs:
+    get:
+      tags: [Admin]
+      summary: List admin audit logs
+      security: [{ bearerAuth: [] }, { adminSecret: [] }]
+      parameters:
+        - in: query
+          name: action
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: Admin audit logs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string, format: uuid }
+                        actor_user_id: { type: string, format: uuid, nullable: true }
+                        action: { type: string }
+                        target_type: { type: string, nullable: true }
+                        target_id: { type: string, nullable: true }
+                        metadata: { type: object, additionalProperties: true }
+                        created_at: { type: string, format: date-time }
+
+  /admin/export/sessions:
+    get:
+      tags: [Admin]
+      summary: Export session operational dataset
+      security: [{ bearerAuth: [] }, { adminSecret: [] }]
+      parameters:
+        - in: query
+          name: from
+          schema: { type: string, format: date-time }
+        - in: query
+          name: to
+          schema: { type: string, format: date-time }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 5000, default: 1000 }
+      responses:
+        "200":
+          description: Session export result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  exportedAt: { type: string, format: date-time }
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+
+  /admin/export/notes:
+    get:
+      tags: [Admin]
+      summary: Export notes operational dataset
+      security: [{ bearerAuth: [] }, { adminSecret: [] }]
+      parameters:
+        - in: query
+          name: from
+          schema: { type: string, format: date-time }
+        - in: query
+          name: to
+          schema: { type: string, format: date-time }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 5000, default: 1000 }
+      responses:
+        "200":
+          description: Notes export result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  exportedAt: { type: string, format: date-time }
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+
+  /admin/ops/dashboard:
+    get:
+      tags: [Admin]
+      summary: Ops metrics and alerts snapshot
+      security: [{ bearerAuth: [] }, { adminSecret: [] }]
+      responses:
+        "200":
+          description: Dashboard metrics and alert state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  generatedAt: { type: string, format: date-time }
+                  metrics:
+                    type: object
+                    properties:
+                      sessions24h: { type: integer }
+                      messages24h: { type: integer }
+                      notifications24h: { type: integer }
+                      failedNotifications24h: { type: integer }
+                      pendingNotifications: { type: integer }
+                      refunds24h: { type: integer }
+                  alerts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        key: { type: string }
+                        severity: { type: string, enum: [ok, warning, critical] }
+                        value: { type: integer }
+                        threshold: { type: integer }
 
   /webhooks/stripe:
     post:

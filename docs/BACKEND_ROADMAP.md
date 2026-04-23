@@ -132,7 +132,7 @@ Exit criteria:
 Target: 3 weeks
 
 Status:
-Started on 2026-04-23. Migration `0043_horse_kyc_schema.sql` is applied on staging and mirrored in Supabase CLI history. `public.pets` now stores horse KYC fields as structured columns with enum and conditional constraints, array validations, indexed query surfaces, and updated search-vector rebuilding for retrieval and embedding workflows.
+Closed on staging on 2026-04-23. Migration `0043_horse_kyc_schema.sql` and follow-up migrations `0045_phase4_clinical_encounters.sql` and `0046_phase4_clinical_record_hardening.sql` are applied on staging and mirrored in Supabase CLI history. The post-redeploy Phase 4 deployment gate smoke (`env/scripts/smoke-phase4-clinical-record.sh`) passed on staging with `PASS=11 FAIL=0`.
 
 Update on 2026-04-23:
 Clinical encounter backbone implementation started with migration `0045_phase4_clinical_encounters.sql` (mirrored in `packages/db/migrations`). This introduces `public.clinical_encounters`, links `consultation_notes`, `image_cases`, and `care_plans` via `encounter_id`, and adds `ensure_clinical_encounter()` to consistently bind session-linked artifacts into one encounter timeline.
@@ -144,11 +144,11 @@ Goal:
 Move from free-text notes and loosely linked artifacts to a real clinical record that future AI and referral logic can trust.
 
 Deliverables:
-- Add a structured horse health profile covering conditions, medications, allergies, vaccines, injuries, procedures, and key history.
-- Add an encounter record model linked to appointment, session, video room, files, and image cases.
-- Expand consultation notes into structured assessment, diagnosis, plan, and follow-up fields.
-- Rework care plans so they are clinician-owned artifacts with explicit approval and fulfillment workflows.
-- Tighten access control across pets, encounters, notes, files, and image cases.
+- [x] Add a structured horse health profile covering conditions, medications, allergies, vaccines, injuries, procedures, and key history.
+- [x] Add an encounter record model linked to appointment, session, video room, files, and image cases.
+- [x] Expand consultation notes into structured assessment, diagnosis, plan, and follow-up fields.
+- [x] Rework care plans so they are clinician-owned artifacts with explicit approval and fulfillment workflows.
+- [x] Tighten access control across pets, encounters, notes, files, and image cases.
 
 Exit criteria:
 - Each consult creates a structured record that can be queried by future consults and AI tools.
@@ -157,6 +157,9 @@ Exit criteria:
 
 ## Phase 5. AI Triage, Referral, and Drafting Layer
 Target: 3 to 4 weeks
+
+Status:
+Deferred on 2026-04-23 by product priority while Phase 6 operations hardening is executed first.
 
 Goal:
 Add AI only after the transport, record, and entitlement layers are trustworthy.
@@ -176,6 +179,12 @@ Exit criteria:
 
 ## Phase 6. Notifications, Admin Operations, and Go-Live Hardening
 Target: 2 weeks
+
+Status:
+Active on 2026-04-23 as the next implementation phase after Phase 4 closure; Phase 5 is intentionally deferred for now.
+
+Update on 2026-04-23 (implementation pass 1):
+Migration `0047_phase6_notifications_admin_ops.sql` was added (mirrored in `packages/db/migrations`) to introduce `public.notification_events` and `public.admin_audit_logs`. Gateway now supports event-driven notifications through `/notifications/events`, and admin operational tooling was expanded with `/admin/notifications/events`, `/admin/audit/logs`, `/admin/export/sessions`, `/admin/export/notes`, and `/admin/ops/dashboard`. Smoke scripts were updated to cover these new Phase 6 surfaces.
 
 Goal:
 Bring non-billing operations up to the same production standard as billing support flows.
@@ -215,12 +224,14 @@ Reason:
 - Phase 0 staging validation completed on 2026-04-23; keep the backend core smoke suite green as a deployment gate.
 - Phase 1 closed on staging on 2026-04-23 with a fresh all-green backend core smoke rerun, including the new vet-operations coverage.
 - Supabase CLI is now normalized around the native `supabase/` project; use `SUPABASE_DIRECT_DATABASE_URL` for CLI migration commands, with local mirrored history currently spanning `0035` through `0043`.
+- Supabase CLI is now normalized around the native `supabase/` project; apply `0047_phase6_notifications_admin_ops.sql` next and keep local mirrored history aligned through `0047`.
 - Make a hard provider decision for video during Phase 1, even if Phase 3 implementation starts later.
 - Define the encounter and horse-history schema during Phase 1 so chat and video events can link into it cleanly.
 - Phase 2 staging proof is complete; keep `env/scripts/smoke-realtime-phase2.mjs` green as a gate for chat-service deploys.
-- Phase 3 is intentionally deferred; prioritize Phase 4 structured clinical record rollout before resuming video infrastructure work.
-- Do not add new Flutter medical-record features until Phase 4 contracts are stable.
-- Keep `env/scripts/smoke-phase4-clinical-record.sh` green as the deployment gate for clinical-record changes (health profile, structured notes, encounter timeline linking).
+- Phase 3 remains intentionally deferred; resume video infrastructure after Phase 6 hardening.
+- Phase 4 is now closed on staging; keep `env/scripts/smoke-phase4-clinical-record.sh` green as an ongoing deployment gate for clinical-record changes.
+- Phase 6 is now the active priority: notifications, admin operations completion, operational dashboards/alerts, and runbooks.
+- Phase 5 (AI triage/referral/drafting) is intentionally deferred until after Phase 6 completion.
 
 ## Related Files
 - `services/gateway-api/src/modules/subscriptions/subscriptions.controller.ts`

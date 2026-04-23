@@ -48,11 +48,26 @@ plan_payload='{"code":"chat_unit","name":"Chat Unit","price_cents":299,"currency
 plan=$(curl -sS -X POST $hdr[@] -H "Content-Type: application/json" --data "$plan_payload" "$GATEWAY_BASE/admin/plans")
 print -- "$plan" | jq . 2>/dev/null || print -- "$plan"
 
-print -- "[admin] Create coupon (stub)"
-coupon_payload='{"code":"PROMO10","percent_off":10}'
-coupon=$(curl -sS -X POST $hdr[@] -H "Content-Type: application/json" --data "$coupon_payload" "$GATEWAY_BASE/admin/coupons")
-print -- "$coupon" | jq . 2>/dev/null || print -- "$coupon"
-
 print -- "[admin] Analytics usage (stub)"
 analytics=$(curl -sS -X GET $hdr[@] "$GATEWAY_BASE/admin/analytics/usage")
 print -- "$analytics" | jq . 2>/dev/null || print -- "$analytics"
+
+print -- "[admin] Notification events"
+events=$(curl -sS -X GET $hdr[@] "$GATEWAY_BASE/admin/notifications/events?limit=5")
+print -- "$events" | jq . 2>/dev/null || print -- "$events"
+
+print -- "[admin] Audit logs"
+audit=$(curl -sS -X GET $hdr[@] "$GATEWAY_BASE/admin/audit/logs?limit=5")
+print -- "$audit" | jq . 2>/dev/null || print -- "$audit"
+
+print -- "[admin] Export sessions"
+exp_sessions=$(curl -sS -X GET $hdr[@] "$GATEWAY_BASE/admin/export/sessions?limit=5")
+print -- "$exp_sessions" | jq . 2>/dev/null || print -- "$exp_sessions"
+
+print -- "[admin] Export notes"
+exp_notes=$(curl -sS -X GET $hdr[@] "$GATEWAY_BASE/admin/export/notes?limit=5")
+print -- "$exp_notes" | jq . 2>/dev/null || print -- "$exp_notes"
+
+print -- "[admin] Ops dashboard"
+ops=$(curl -sS -X GET $hdr[@] "$GATEWAY_BASE/admin/ops/dashboard")
+print -- "$ops" | jq . 2>/dev/null || print -- "$ops"

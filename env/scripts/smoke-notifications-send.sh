@@ -30,4 +30,10 @@ if [[ -z "${SENDGRID_API_KEY:-}" ]]; then
   print -- "[notifications] Warning: SENDGRID_API_KEY not set in env; endpoint will 500 on real gateway unless configured in Render."
 fi
 print -- "$resp" | jq . 2>/dev/null || print -- "$resp"
+
+print -- "[notifications] Sending template event via /notifications/events"
+event_payload=$(printf '{"eventType":"note.ready","channel":"email","to":"%s","variables":{"petName":"Canela"},"sandbox":%s}' "$to_addr" "$sandbox_flag")
+event_resp=$(curl -sS -X POST $hdr[@] --data "$event_payload" "$GATEWAY_BASE/notifications/events")
+print -- "$event_resp" | jq . 2>/dev/null || print -- "$event_resp"
+
 print -- "[notifications] Done"

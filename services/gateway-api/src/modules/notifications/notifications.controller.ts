@@ -28,4 +28,19 @@ export class NotificationsController {
     const res = await this.notifications.sendEmail(body);
     return res;
   }
+
+  @Post('events')
+  async sendEvent(@Body() body: {
+    eventType: string;
+    userId?: string;
+    channel?: 'email' | 'sms' | 'whatsapp' | 'push' | 'system';
+    to?: string;
+    templateId?: string;
+    variables?: Record<string, any>;
+    subject?: string;
+    message?: string;
+    sandbox?: boolean;
+  }) {
+    return this.notifications.sendEvent(body);
+  }
 }

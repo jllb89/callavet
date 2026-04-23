@@ -1,5 +1,6 @@
 import { BadRequestException, Body, Controller, ForbiddenException, Get, Headers, Param, Post, Query } from '@nestjs/common';
 import { DbService } from '../db/db.service';
+import { RequestContext } from '../auth/request-context.service';
 
 function assertAdmin(secretHeader?: string) {
   const expected = process.env.ADMIN_PRICING_SYNC_SECRET || process.env.ADMIN_SECRET || '';
@@ -10,7 +11,37 @@ function assertAdmin(secretHeader?: string) {
 
 @Controller('admin')
 export class AdminController {
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly rc: RequestContext,
+  ) {}
+
+  private async logAdminAction(action: string, targetType?: string | null, targetId?: string | null, metadata?: Record<string, any>) {
+    try {
+      await this.db.query(
+        `insert into admin_audit_logs (
+           id,
+           actor_user_id,
+           action,
+           target_type,
+           target_id,
+           metadata,
+           created_at
+         ) values (
+           gen_random_uuid(),
+           $1::uuid,
+           $2,
+           $3,
+           $4,
+           coalesce($5::jsonb, '{}'::jsonb),
+           now()
+         )`,
+        [this.rc.userId || null, action, targetType || null, targetId || null, JSON.stringify(metadata || {})]
+      );
+    } catch {
+      // Audit logging must never break admin operations.
+    }
+  }
 
   @Get('users')
   async listUsers(
@@ -33,6 +64,7 @@ export class AdminController {
                   order by created_at desc
                   limit ${limit} offset ${offset}`;
     const { rows } = await (this.db as any).query(sql, params);
+    await this.logAdminAction('admin.users.list', 'users', null, { q: q || null, limit, offset, count: rows.length });
     return { data: rows };
   }
 
@@ -45,6 +77,7 @@ export class AdminController {
       [userId]
     );
     if (!rows.length) throw new BadRequestException('not_found');
+    await this.logAdminAction('admin.users.detail', 'users', userId);
     return rows[0];
   }
 
@@ -65,6 +98,7 @@ export class AdminController {
        order by s.current_period_end desc nulls last, s.created_at desc
        limit ${limit} offset ${offset}`;
     const { rows } = await (this.db as any).query(sql);
+    await this.logAdminAction('admin.subscriptions.list', 'subscriptions', null, { limit, offset, count: rows.length });
     return { data: rows };
   }
 
@@ -128,6 +162,12 @@ export class AdminController {
     if ((result as any).itemNotFound) throw new BadRequestException('item_not_found');
     if ((result as any).missingCreditRow) throw new BadRequestException('no_existing_credit_row');
 
+    await this.logAdminAction('admin.credits.grant', 'overage_credits', userId, {
+      code,
+      delta,
+      remaining: (result as any).remaining,
+    });
+
     return { ok: true, userId, code, delta, remaining: (result as any).remaining };
   }
 
@@ -144,6 +184,11 @@ export class AdminController {
     const reason = (body.reason || '').trim();
     // Dev fallback: allow stubbed response if no Stripe key or obvious test id
     if (!sk || pid.startsWith('test_') || pid === 'test_payment_id') {
+      await this.logAdminAction('admin.refunds.create', 'payments', pid, {
+        mode: 'dev_fallback',
+        amount: amt ?? null,
+        reason: reason || null,
+      });
       return { ok: true, mode: 'dev_fallback', paymentId: pid, amount: amt ?? null, reason: reason || null };
     }
     try {
@@ -166,6 +211,12 @@ export class AdminController {
       const headers: any = {};
       if (body.requestId) headers['Idempotency-Key'] = `admin-refund:${body.requestId}`;
       const refund = await stripe.refunds.create(params, { idempotencyKey: headers['Idempotency-Key'] });
+      await this.logAdminAction('admin.refunds.create', 'payments', pid, {
+        mode: 'stripe',
+        refund_id: refund.id,
+        amount: refund.amount,
+        currency: refund.currency,
+      });
       return {
         ok: true,
         refund_id: refund.id,
@@ -195,6 +246,7 @@ export class AdminController {
       [vetId]
     );
     if (!rows.length) throw new BadRequestException('not_found');
+    await this.logAdminAction('admin.vets.approve', 'vets', vetId);
     return rows[0];
   }
 
@@ -293,6 +345,11 @@ export class AdminController {
       return rows[0];
     });
 
+    await this.logAdminAction('admin.plans.upsert', 'subscription_plans', (result as any)?.id || null, {
+      code: body.code,
+      name: body.name,
+    });
+
     return result;
   }
 
@@ -323,5 +380,183 @@ export class AdminController {
       },
       generatedAt: new Date().toISOString(),
     };
+  }
+
+  @Get('notifications/events')
+  async listNotificationEvents(
+    @Headers('x-admin-secret') secret: string,
+    @Query('status') status?: string,
+    @Query('limit') limitStr?: string,
+    @Query('offset') offsetStr?: string,
+  ) {
+    assertAdmin(secret);
+    const limit = Math.min(Math.max(parseInt(limitStr || '50', 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(offsetStr || '0', 10) || 0, 0);
+    const where = status ? 'where status = $1' : '';
+    const args = status ? [status] : [];
+    const { rows } = await this.db.query(
+      `select id, user_id, event_type, channel, destination, status, provider, provider_message_id, error_text, created_at, sent_at
+         from notification_events
+         ${where}
+        order by created_at desc
+        limit ${limit} offset ${offset}`,
+      args,
+    );
+    await this.logAdminAction('admin.notifications.events.list', 'notification_events', null, {
+      status: status || null,
+      limit,
+      offset,
+      count: rows.length,
+    });
+    return { data: rows };
+  }
+
+  @Get('audit/logs')
+  async listAuditLogs(
+    @Headers('x-admin-secret') secret: string,
+    @Query('action') action?: string,
+    @Query('limit') limitStr?: string,
+    @Query('offset') offsetStr?: string,
+  ) {
+    assertAdmin(secret);
+    const limit = Math.min(Math.max(parseInt(limitStr || '100', 10) || 100, 1), 500);
+    const offset = Math.max(parseInt(offsetStr || '0', 10) || 0, 0);
+    const where = action ? 'where action = $1' : '';
+    const args = action ? [action] : [];
+    const { rows } = await this.db.query(
+      `select id, actor_user_id, action, target_type, target_id, metadata, created_at
+         from admin_audit_logs
+         ${where}
+        order by created_at desc
+        limit ${limit} offset ${offset}`,
+      args,
+    );
+    return { data: rows };
+  }
+
+  @Get('export/sessions')
+  async exportSessions(
+    @Headers('x-admin-secret') secret: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('limit') limitStr?: string,
+  ) {
+    assertAdmin(secret);
+    const limit = Math.min(Math.max(parseInt(limitStr || '1000', 10) || 1000, 1), 5000);
+    const { rows } = await this.db.query(
+      `select s.id,
+              s.owner_user_id,
+              s.vet_user_id,
+              s.status,
+              s.kind,
+              s.started_at,
+              s.ended_at,
+              s.created_at,
+              (select count(*)::int from messages m where m.session_id = s.id) as messages_count,
+              (select count(*)::int from consultation_notes n where n.session_id = s.id) as notes_count,
+              (select count(*)::int from care_plans cp where cp.session_id = s.id) as care_plans_count
+         from chat_sessions s
+        where ($1::timestamptz is null or s.created_at >= $1::timestamptz)
+          and ($2::timestamptz is null or s.created_at <= $2::timestamptz)
+        order by s.created_at desc
+        limit ${limit}`,
+      [from || null, to || null],
+    );
+    await this.logAdminAction('admin.export.sessions', 'chat_sessions', null, {
+      from: from || null,
+      to: to || null,
+      count: rows.length,
+      limit,
+    });
+    return { ok: true, exportedAt: new Date().toISOString(), data: rows };
+  }
+
+  @Get('export/notes')
+  async exportNotes(
+    @Headers('x-admin-secret') secret: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('limit') limitStr?: string,
+  ) {
+    assertAdmin(secret);
+    const limit = Math.min(Math.max(parseInt(limitStr || '1000', 10) || 1000, 1), 5000);
+    const { rows } = await this.db.query(
+      `select n.id,
+              n.session_id,
+              n.author_user_id,
+              n.pet_id,
+              n.severity,
+              n.summary_text,
+              n.assessment_text,
+              n.diagnosis_text,
+              n.plan_summary,
+              n.next_follow_up_at,
+              n.created_at
+         from consultation_notes n
+        where ($1::timestamptz is null or n.created_at >= $1::timestamptz)
+          and ($2::timestamptz is null or n.created_at <= $2::timestamptz)
+        order by n.created_at desc
+        limit ${limit}`,
+      [from || null, to || null],
+    );
+    await this.logAdminAction('admin.export.notes', 'consultation_notes', null, {
+      from: from || null,
+      to: to || null,
+      count: rows.length,
+      limit,
+    });
+    return { ok: true, exportedAt: new Date().toISOString(), data: rows };
+  }
+
+  @Get('ops/dashboard')
+  async opsDashboard(@Headers('x-admin-secret') secret: string) {
+    assertAdmin(secret);
+    const [sessions24h, messages24h, notifications24h, failedNotifications24h, pendingNotifications, refunds24h] = await Promise.all([
+      this.db.query<{ count: number }>(
+        `select count(*)::int as count from chat_sessions where created_at >= now() - interval '24 hours'`
+      ),
+      this.db.query<{ count: number }>(
+        `select count(*)::int as count from messages where created_at >= now() - interval '24 hours'`
+      ),
+      this.db.query<{ count: number }>(
+        `select count(*)::int as count from notification_events where created_at >= now() - interval '24 hours'`
+      ),
+      this.db.query<{ count: number }>(
+        `select count(*)::int as count from notification_events where status = 'failed' and created_at >= now() - interval '24 hours'`
+      ),
+      this.db.query<{ count: number }>(
+        `select count(*)::int as count from notification_events where status = 'queued'`
+      ),
+      this.db.query<{ count: number }>(
+        `select count(*)::int as count from admin_audit_logs where action = 'admin.refunds.create' and created_at >= now() - interval '24 hours'`
+      ),
+    ]);
+
+    const metrics = {
+      sessions24h: sessions24h.rows[0]?.count ?? 0,
+      messages24h: messages24h.rows[0]?.count ?? 0,
+      notifications24h: notifications24h.rows[0]?.count ?? 0,
+      failedNotifications24h: failedNotifications24h.rows[0]?.count ?? 0,
+      pendingNotifications: pendingNotifications.rows[0]?.count ?? 0,
+      refunds24h: refunds24h.rows[0]?.count ?? 0,
+    };
+
+    const alerts = [
+      {
+        key: 'notifications.failed.rate',
+        severity: metrics.failedNotifications24h > 25 ? 'critical' : metrics.failedNotifications24h > 5 ? 'warning' : 'ok',
+        value: metrics.failedNotifications24h,
+        threshold: 5,
+      },
+      {
+        key: 'notifications.queue.depth',
+        severity: metrics.pendingNotifications > 100 ? 'warning' : 'ok',
+        value: metrics.pendingNotifications,
+        threshold: 100,
+      },
+    ];
+
+    await this.logAdminAction('admin.ops.dashboard.read', 'ops', null, { metrics, alerts });
+    return { ok: true, generatedAt: new Date().toISOString(), metrics, alerts };
   }
 }
