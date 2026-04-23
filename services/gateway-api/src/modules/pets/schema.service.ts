@@ -24,6 +24,7 @@ export class SchemaService implements OnModuleInit {
   constructor(private readonly db: DbService) {}
 
   async onModuleInit() {
+    await this.db.ensureReady();
     if (!this.db.isStub) {
       this.petSchema = await this.loadPetSchema();
     }

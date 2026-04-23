@@ -32,6 +32,7 @@ export class VectorTargetService implements OnModuleInit {
   constructor(private readonly db: DbService) {}
 
   async onModuleInit() {
+    await this.db.ensureReady();
     if (!this.db.isStub) {
       await this.loadAllTargets();
       this.isReady = true;
