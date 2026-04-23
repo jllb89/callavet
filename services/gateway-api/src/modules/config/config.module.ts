@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { ConfigModule as NestConfig } from '@nestjs/config';
 import { z } from 'zod';
 import { DbModule } from '../db/db.module';
@@ -32,7 +32,7 @@ function validateEnv(config: Record<string, unknown>) {
 @Module({
   imports: [
     NestConfig.forRoot({ isGlobal: true, validate: validateEnv }),
-    DbModule,
+    forwardRef(() => DbModule),
   ],
   providers: [ValidatorService, EnumService, VectorTargetService],
   exports: [ValidatorService, EnumService, VectorTargetService],

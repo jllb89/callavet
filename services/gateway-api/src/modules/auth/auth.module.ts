@@ -9,7 +9,7 @@ import { OtpController } from './otp.controller';
 
 @Global()
 @Module({
-	imports: [forwardRef(() => DbModule), ConfigModule],
+	imports: [forwardRef(() => DbModule), forwardRef(() => ConfigModule)],
 	controllers: [OtpController],
 	providers: [
 		AuthGuard,
