@@ -21,15 +21,14 @@ This document sequences the backend work required so the rest of the platform re
 - Subscriptions, billing, pricing, and entitlement reservation/consumption.
 - OTP auth hardening and post-login routing dependencies.
 - Basic DB and OpenAPI discipline around the subscription surface.
+- Vet discovery, specialties, availability management, referral intake and assignment, ratings, and explicit appointment transitions.
 
 ### Partial now
 - Sessions and HTTP message flows.
-- Appointments and availability.
 - Session notes, care plans, and image cases.
 - Knowledge base and vector retrieval plumbing.
 
 ### Weak or missing now
-- Dedicated vet operations backend.
 - Production-grade realtime chat transport.
 - Real video infrastructure.
 - Structured horse medical record and encounter model.
@@ -66,16 +65,19 @@ Exit criteria:
 ## Phase 1. Vet Operations Backbone
 Target: 2 to 3 weeks
 
+Status:
+Implemented in-repo on 2026-04-23. Remaining proof step is a staging deploy plus rerunning the backend core smoke suite with the new vet-operations coverage.
+
 Goal:
 Make the vet side a real backend product instead of a schema plus partial scheduling support.
 
 Deliverables:
-- Add a dedicated vets module for list, detail, status, approval, specialties, and profile retrieval.
-- Implement availability management endpoints, not just slot reading.
-- Expand appointment lifecycle to a real state machine with explicit transitions.
-- Add vet-facing queues for upcoming appointments, active consults, pending notes, and referral intake.
-- Add referral and assignment primitives so cases can move from intake to a selected vet.
-- Implement ratings or remove them from the public contract until ready.
+- [x] Add a dedicated vets module for list, detail, status, approval, specialties, and profile retrieval.
+- [x] Implement availability management endpoints, not just slot reading.
+- [x] Expand appointment lifecycle to a real state machine with explicit transitions.
+- [x] Add vet-facing queues for upcoming appointments, active consults, pending notes, and referral intake.
+- [x] Add referral and assignment primitives so cases can move from intake to a selected vet.
+- [x] Implement ratings instead of leaving them as contract-only placeholders.
 
 Exit criteria:
 - Vet discovery and vet detail endpoints are real and documented.
@@ -194,9 +196,10 @@ Reason:
 
 ## Suggested Execution Order for the Next 30 Days
 - Phase 0 staging validation completed on 2026-04-23; keep the backend core smoke suite green as a deployment gate.
-- Start Phase 1 immediately after contract cleanup.
+- Phase 1 is implemented in repo; deploy it and rerun staging smoke before treating it as closed.
 - Make a hard provider decision for video during Phase 1, even if Phase 3 implementation starts later.
 - Define the encounter and horse-history schema during Phase 1 so chat and video events can link into it cleanly.
+- Start Phase 2 immediately after the Phase 1 deploy proof is green.
 - Do not add new Flutter chat or video work until Phase 2 contracts are stable.
 
 ## Related Files

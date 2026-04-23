@@ -1710,6 +1710,132 @@ paths:
       parameters: [ { in: path, name: id, required: true, schema: { type: string, format: uuid } } ]
       responses: { "200": { $ref: "#/components/responses/ImageCase" } }
 
+  /vets:
+    get:
+      tags: [Vets]
+      summary: List vets
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: specialtyId
+          schema: { type: string, format: uuid }
+        - in: query
+          name: includeUnapproved
+          schema: { type: boolean }
+      responses: { "200": { $ref: "#/components/responses/ListVets" } }
+
+  /vets/specialties:
+    get:
+      tags: [Vets]
+      summary: List vet specialties
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/ListSpecialties" } }
+
+  /vets/me/profile:
+    get:
+      tags: [Vets]
+      summary: Get my vet profile
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/Vet" } }
+    patch:
+      tags: [Vets]
+      summary: Update my vet profile
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/VetProfilePatch" }
+      responses: { "200": { $ref: "#/components/responses/Vet" } }
+
+  /vets/me/status:
+    get:
+      tags: [Vets]
+      summary: Get my vet status
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/VetStatus" } }
+
+  /vets/me/availability:
+    get:
+      tags: [Vets]
+      summary: Get my availability template
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/VetAvailability" } }
+    put:
+      tags: [Vets]
+      summary: Replace my availability template
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/VetAvailabilityUpsert" }
+      responses: { "200": { $ref: "#/components/responses/VetAvailability" } }
+
+  /vets/me/queue:
+    get:
+      tags: [Vets]
+      summary: Get my vet operations queue
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/VetQueue" } }
+
+  /vets/referrals:
+    get:
+      tags: [Vets]
+      summary: List referrals scoped to the current actor
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: status
+          schema: { type: string, enum: [intake, assigned, accepted, completed, canceled] }
+      responses: { "200": { $ref: "#/components/responses/ListReferrals" } }
+    post:
+      tags: [Vets]
+      summary: Create referral intake
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/VetReferralCreate" }
+      responses: { "201": { $ref: "#/components/responses/VetReferral" } }
+
+  /vets/referrals/{referralId}:
+    patch:
+      tags: [Vets]
+      summary: Assign or advance a referral
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: referralId
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody: { $ref: "#/components/requestBodies/VetReferralPatch" }
+      responses: { "200": { $ref: "#/components/responses/VetReferral" } }
+
+  /vets/{vetId}:
+    get:
+      tags: [Vets]
+      summary: Get vet detail
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/vetId" } ]
+      responses: { "200": { $ref: "#/components/responses/Vet" } }
+
+  /vets/{vetId}/approve:
+    post:
+      tags: [Vets]
+      summary: Approve a vet profile
+      security: [{ bearerAuth: [] }, { adminSecret: [] }]
+      parameters: [ { $ref: "#/components/parameters/vetId" } ]
+      responses: { "200": { $ref: "#/components/responses/Vet" } }
+
+  /vets/{vetId}/status:
+    get:
+      tags: [Vets]
+      summary: Get vet status rollup
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/vetId" } ]
+      responses: { "200": { $ref: "#/components/responses/VetStatus" } }
+
+  /vets/{vetId}/availability:
+    get:
+      tags: [Vets]
+      summary: Get a vet availability template
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/vetId" } ]
+      responses: { "200": { $ref: "#/components/responses/VetAvailability" } }
+
   /appointments:
     get:
       tags: [Appointments]
@@ -1732,25 +1858,55 @@ paths:
       requestBody: { $ref: "#/components/requestBodies/AppointmentPatch" }
       responses: { "200": { $ref: "#/components/responses/Appointment" } }
 
+  /appointments/{id}/transitions:
+    post:
+      tags: [Appointments]
+      summary: Execute an explicit appointment transition
+      security: [{ bearerAuth: [] }]
+      parameters: [ { in: path, name: id, required: true, schema: { type: string, format: uuid } } ]
+      requestBody: { $ref: "#/components/requestBodies/AppointmentTransition" }
+      responses: { "200": { $ref: "#/components/responses/Appointment" } }
+
   /vets/{vetId}/availability/slots:
     get:
       tags: [Appointments]
       summary: Generated slots (template + overrides)
+      security: [{ bearerAuth: [] }]
       parameters:
         - { $ref: "#/components/parameters/vetId" }
         - in: query
-          name: from
-          required: true
+          name: since
           schema:
             type: string
             format: date-time
         - in: query
-          name: to
-          required: true
+          name: until
           schema:
             type: string
             format: date-time
+        - in: query
+          name: durationMin
+          schema:
+            type: integer
+            default: 30
       responses: { "200": { $ref: "#/components/responses/ListSlots" } }
+
+  /vets/{vetId}/ratings:
+    get:
+      tags: [Ratings]
+      summary: List ratings for a vet
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/vetId" } ]
+      responses: { "200": { $ref: "#/components/responses/ListRatings" } }
+
+  /sessions/{sessionId}/ratings:
+    post:
+      tags: [Ratings]
+      summary: Create or update the session owner's rating for the assigned vet
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/sessionId" } ]
+      requestBody: { $ref: "#/components/requestBodies/RatingCreate" }
+      responses: { "200": { $ref: "#/components/responses/Rating" } }
 
   /kb:
     get:
@@ -1830,7 +1986,7 @@ paths:
     get:
       tags: [Knowledge Base & Search]
       summary: Vector search (GET convenience)
-      description: GET variant for quick testing in browsers. Accepts same semantics as POST but embedding passed via one of: embedding|e|query_embedding|vec.
+      description: "GET variant for quick testing in browsers. Accepts same semantics as POST but embedding passed via one of: embedding|e|query_embedding|vec."
       parameters:
         - in: query
           name: target
@@ -2342,10 +2498,39 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/VetInput" }
+    VetProfilePatch:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              license_number: { type: string }
+              country: { type: string }
+              bio: { type: string }
+              years_experience: { type: integer }
+              specialties: { type: array, items: { type: string, format: uuid } }
+              languages: { type: array, items: { type: string } }
     VetAvailability:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/VetAvailability" }
+    VetAvailabilityUpsert:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              template:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    weekday: { type: integer, minimum: 0, maximum: 6 }
+                    start_time: { type: string, pattern: "^\\d{2}:\\d{2}$" }
+                    end_time: { type: string, pattern: "^\\d{2}:\\d{2}$" }
+                    timezone: { type: string }
+                  required: [weekday, start_time, end_time]
+            required: [template]
     VetOverride:
       content:
         application/json:
@@ -2494,17 +2679,55 @@ components:
           schema:
             type: object
             properties:
-              vet_id: { type: string, format: uuid }
-              pet_id: { type: string, format: uuid }
-              starts_at: { type: string, format: date-time }
-            required: [vet_id, pet_id, starts_at]
+              vetId: { type: string, format: uuid }
+              petId: { type: string, format: uuid }
+              startsAt: { type: string, format: date-time }
+              durationMin: { type: integer, default: 30 }
+              specialtyId: { type: string, format: uuid }
+            required: [vetId, startsAt, specialtyId]
     AppointmentPatch:
       content:
         application/json:
           schema:
             type: object
             properties:
-              status: { type: string, enum: [scheduled, active, completed, no_show, canceled] }
+              status: { type: string, enum: [scheduled, confirmed, active, completed, no_show, canceled] }
+              startsAt: { type: string, format: date-time }
+              endsAt: { type: string, format: date-time }
+              durationMin: { type: integer }
+    AppointmentTransition:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              to: { type: string, enum: [confirmed, active, completed, no_show, canceled] }
+              status: { type: string, enum: [confirmed, active, completed, no_show, canceled] }
+            oneOf:
+              - required: [to]
+              - required: [status]
+    VetReferralCreate:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              petId: { type: string, format: uuid }
+              specialtyId: { type: string, format: uuid }
+              assignedVetId: { type: string, format: uuid }
+              priority: { type: string, enum: [routine, urgent], default: routine }
+              notes: { type: string }
+            required: [petId]
+    VetReferralPatch:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              assignedVetId: { type: string, format: uuid }
+              appointmentId: { type: string, format: uuid }
+              status: { type: string, enum: [intake, assigned, accepted, completed, canceled] }
+              notes: { type: string }
     KBUpsert:
       content:
         application/json:
@@ -2702,6 +2925,24 @@ components:
     VetOverride:
       description: Vet availability override
       content: { application/json: { schema: { $ref: "#/components/schemas/VetOverride" } } }
+    ListVets:
+      description: Vets
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Vet" } } } } } }
+    ListSpecialties:
+      description: Vet specialties
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/VetSpecialty" } } } } } }
+    VetStatus:
+      description: Vet operational status
+      content: { application/json: { schema: { $ref: "#/components/schemas/VetStatus" } } }
+    VetQueue:
+      description: Vet operational queue
+      content: { application/json: { schema: { $ref: "#/components/schemas/VetQueue" } } }
+    VetReferral:
+      description: Vet referral
+      content: { application/json: { schema: { $ref: "#/components/schemas/VetReferral" } } }
+    ListReferrals:
+      description: Vet referrals
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/VetReferral" } } } } } }
     EntitlementReserve:
       description: Reservation created
       content: { application/json: { schema: { type: object, additionalProperties: true } } }
@@ -2837,12 +3078,31 @@ components:
     VetInput:
       type: object
       properties:
+        full_name: { type: string }
         license_number: { type: string }
         country: { type: string }
         bio: { type: string }
         years_experience: { type: integer }
         specialties: { type: array, items: { type: string, format: uuid } }
         languages: { type: array, items: { type: string } }
+        rating_average: { type: number }
+        rating_count: { type: integer }
+    VetSpecialty:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string, nullable: true }
+    VetClinicAffiliation:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        address: { type: string, nullable: true }
+        phone: { type: string, nullable: true }
+        website: { type: string, format: uri, nullable: true }
+        is_partner: { type: boolean }
+        role: { type: string, nullable: true }
     Vet:
       allOf:
         - $ref: "#/components/schemas/VetInput"
@@ -2850,6 +3110,14 @@ components:
           properties:
             id: { type: string, format: uuid }
             is_approved: { type: boolean }
+            specialty_details:
+              type: array
+              items: { $ref: "#/components/schemas/VetSpecialty" }
+            clinics:
+              type: array
+              items: { $ref: "#/components/schemas/VetClinicAffiliation" }
+            email: { type: string, format: email, nullable: true }
+            phone: { type: string, nullable: true }
     Center:
       type: object
       properties:
@@ -2997,7 +3265,7 @@ components:
         user_id: { type: string, format: uuid }
         starts_at: { type: string, format: date-time }
         ends_at: { type: string, format: date-time, nullable: true }
-        status: { type: string }
+        status: { type: string, enum: [scheduled, confirmed, active, completed, no_show, canceled] }
     Slot:
       type: object
       properties:
@@ -3021,6 +3289,18 @@ components:
         user_id: { type: string, format: uuid }
         score: { type: integer, minimum: 1, maximum: 5 }
         comment: { type: string }
+        user_name: { type: string, nullable: true }
+    VetStatus:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        is_approved: { type: boolean }
+        rating_average: { type: number }
+        rating_count: { type: integer }
+        upcoming_appointments: { type: integer }
+        active_consults: { type: integer }
+        pending_notes: { type: integer }
+        open_referrals: { type: integer }
     VetAvailability:
       type: object
       properties:
@@ -3032,6 +3312,7 @@ components:
               weekday: { type: integer, minimum: 0, maximum: 6 }
               start_time: { type: string, pattern: "^\\d{2}:\\d{2}$" }
               end_time: { type: string, pattern: "^\\d{2}:\\d{2}$" }
+              timezone: { type: string, nullable: true }
         overrides:
           type: array
           items: { $ref: "#/components/schemas/VetOverride" }
@@ -3043,5 +3324,42 @@ components:
         start: { type: string, format: date-time }
         end: { type: string, format: date-time }
         closed: { type: boolean }
+    VetQueue:
+      type: object
+      properties:
+        upcomingAppointments:
+          type: array
+          items: { $ref: "#/components/schemas/Appointment" }
+        activeConsults:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        pendingNotes:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        referrals:
+          type: array
+          items: { $ref: "#/components/schemas/VetReferral" }
+    VetReferral:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        pet_id: { type: string, format: uuid }
+        pet_name: { type: string, nullable: true }
+        user_id: { type: string, format: uuid }
+        user_name: { type: string, nullable: true }
+        specialty_id: { type: string, format: uuid, nullable: true }
+        specialty_name: { type: string, nullable: true }
+        assigned_vet_id: { type: string, format: uuid, nullable: true }
+        assigned_vet_name: { type: string, nullable: true }
+        appointment_id: { type: string, format: uuid, nullable: true }
+        priority: { type: string, enum: [routine, urgent] }
+        status: { type: string, enum: [intake, assigned, accepted, completed, canceled] }
+        notes: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
 
   examples: {}

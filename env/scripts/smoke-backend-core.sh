@@ -10,6 +10,8 @@ set +a
 GATEWAY_BASE="${GATEWAY_BASE:-${SERVER_URL:-}}"
 BEARER_TOKEN="${SB_ACCESS_TOKEN:-${TOKEN:-}}"
 USER_ID="${USER_ID:-00000000-0000-0000-0000-000000000002}"
+VET_ID="${VET_ID:-00000000-0000-0000-0000-000000000003}"
+VET_USER_ID="${VET_USER_ID:-$VET_ID}"
 
 base64url() {
   printf '%s' "$1" | base64 | tr -d '\n=' | tr '+/' '-_'
@@ -103,6 +105,8 @@ export TOKEN
 export USER_ID
 export PET_ID
 export SESSION_ID
+export VET_ID
+export VET_USER_ID
 
 run_step() {
   local label="$1"
@@ -120,6 +124,7 @@ run_step "subscriptions smoke" "$ROOT_DIR/smoke-subscriptions.sh"
 run_step "sessions smoke" "$ROOT_DIR/smoke-sessions.sh"
 run_step "messages smoke" "$ROOT_DIR/smoke-messages.sh"
 run_step "appointments smoke" "$ROOT_DIR/smoke-appointments.sh"
+run_step "vets smoke" "$ROOT_DIR/smoke-vets.sh"
 run_step "session notes smoke" "$ROOT_DIR/smoke-session-notes.sh"
 run_step "video smoke" "$ROOT_DIR/smoke-video.sh"
 

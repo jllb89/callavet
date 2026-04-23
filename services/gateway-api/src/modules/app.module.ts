@@ -25,6 +25,7 @@ import { AdminModule } from './admin/admin.module';
 import { AppointmentsModule } from './appointments/appointments.module';
 import { RateLimitModule } from './rate-limit/rate-limit.module';
 import { VideoModule } from './video/video.module';
+import { VetsModule } from './vets/vets.module';
 
 @Module({
   imports: [
@@ -53,6 +54,7 @@ import { VideoModule } from './video/video.module';
   NotificationsModule,
   AdminModule,
   AppointmentsModule,
+  VetsModule,
   VideoModule,
   ],
 })

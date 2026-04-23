@@ -12,3 +12,6 @@ if [[ -f "$ROOT_DIR/.env.staging" ]]; then
 	source "$ROOT_DIR/.env.staging"
 	set +a
 fi
+
+export VET_ID="${VET_ID:-00000000-0000-0000-0000-000000000003}"
+export VET_USER_ID="${VET_USER_ID:-$VET_ID}"

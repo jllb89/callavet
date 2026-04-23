@@ -3,6 +3,16 @@ import { DbService } from '../db/db.service';
 import { AuthGuard } from '../auth/auth.guard';
 import { RequestContext } from '../auth/request-context.service';
 
+type ActorRole = 'user' | 'vet' | 'admin';
+const UUID_RE = /^[0-9a-fA-F-]{36}$/;
+
+function appointmentDurationMinutes(start: any, end: any): number {
+  const startAt = new Date(start).getTime();
+  const endAt = new Date(end).getTime();
+  const diff = Math.round((endAt - startAt) / 60000);
+  return diff > 0 ? diff : 30;
+}
+
 @Controller()
 @UseGuards(AuthGuard)
 export class AppointmentsController {
@@ -39,9 +49,13 @@ export class AppointmentsController {
     try {
       if (!body?.vetId || !body?.startsAt) throw new HttpException('vetId_and_startsAt_required', HttpStatus.BAD_REQUEST);
       if (!body?.specialtyId) throw new HttpException('specialty_required', HttpStatus.BAD_REQUEST);
+      if (!UUID_RE.test(body.vetId)) throw new HttpException('vetId_must_be_uuid', HttpStatus.BAD_REQUEST);
+      if (!UUID_RE.test(body.specialtyId)) throw new HttpException('specialtyId_must_be_uuid', HttpStatus.BAD_REQUEST);
+      if (body.petId && !UUID_RE.test(body.petId)) throw new HttpException('petId_must_be_uuid', HttpStatus.BAD_REQUEST);
       if (this.db.isStub) {
         return {
           id: `appt_${Date.now()}`,
+          session_id: body.petId ? `sess_${Date.now()}` : null,
           user_id: (this.rc.claims && (this.rc.claims as any).sub) || 'user_stub',
           vet_id: body.vetId,
           status: 'scheduled',
@@ -50,12 +64,38 @@ export class AppointmentsController {
         } as any;
       }
       const row = await this.db.runInTx(async (q) => {
-        // Validate vet covers requested specialty: check vets.specialties contains provided id
-        const { rows: vetRows } = await q<{ ok: boolean }>(
-          `select array_position(specialties, $1::uuid) is not null as ok from vets where id = $2::uuid limit 1`,
+        // Validate vet approval and requested specialty coverage.
+        const { rows: vetRows } = await q<{ ok: boolean; is_approved: boolean }>(
+          `select array_position(specialties, $1::uuid) is not null as ok,
+                  is_approved
+             from vets
+            where id = $2::uuid
+            limit 1`,
           [body.specialtyId, body.vetId]
         );
         if (!vetRows[0]?.ok) throw new HttpException('vet_missing_specialty', HttpStatus.BAD_REQUEST);
+        if (!vetRows[0]?.is_approved) throw new HttpException('vet_not_approved', HttpStatus.BAD_REQUEST);
+
+        let sessionId: string | null = null;
+        if (body.petId) {
+          const { rows: petRows } = await q<{ id: string }>(
+            `select id
+               from pets
+              where id = $1::uuid
+                and user_id = auth.uid()
+              limit 1`,
+            [body.petId]
+          );
+          if (!petRows[0]) throw new HttpException('pet_not_found_for_user', HttpStatus.BAD_REQUEST);
+          const { rows: sessionRows } = await q<{ id: string }>(
+            `insert into chat_sessions (id, user_id, vet_id, pet_id, status, mode, created_at, updated_at)
+             values (gen_random_uuid(), auth.uid(), $1::uuid, $2::uuid, 'scheduled', 'video', now(), now())
+             returning id`,
+            [body.vetId, body.petId]
+          );
+          sessionId = sessionRows[0]?.id || null;
+        }
+
         // Simple conflict check: ensure vet is free in the requested window
         const duration = body.durationMin || 30;
         const { rows: conflicts } = await q(
@@ -68,10 +108,10 @@ export class AppointmentsController {
         );
         if (conflicts[0]) throw new HttpException('vet_conflict', HttpStatus.CONFLICT);
         const { rows } = await q(
-          `insert into appointments (id, user_id, vet_id, status, starts_at, ends_at)
-           values (gen_random_uuid(), auth.uid(), $1::uuid, 'scheduled', $2::timestamptz, ($2::timestamptz + make_interval(mins => $3)))
-           returning id, user_id, vet_id, status, starts_at, ends_at`,
-          [body.vetId, body.startsAt, duration]
+          `insert into appointments (id, session_id, user_id, vet_id, status, starts_at, ends_at)
+           values (gen_random_uuid(), $1::uuid, auth.uid(), $2::uuid, 'scheduled', $3::timestamptz, ($3::timestamptz + make_interval(mins => $4)))
+           returning id, session_id, user_id, vet_id, status, starts_at, ends_at`,
+          [sessionId, body.vetId, body.startsAt, duration]
         );
         return rows[0];
       });
@@ -89,23 +129,123 @@ export class AppointmentsController {
   ) {
     try {
       if (this.db.isStub) return { id, status: body.status || 'scheduled' } as any;
-      const updateFields: string[] = [];
-      const values: any[] = [id];
-      let idx = 2;
-      if (body.status) { updateFields.push(`status = $${idx++}`); values.push(String(body.status).toLowerCase()); }
-      if (body.startsAt) { updateFields.push(`starts_at = $${idx++}::timestamptz`); values.push(body.startsAt); }
-      if (body.endsAt) { updateFields.push(`ends_at = $${idx++}::timestamptz`); values.push(body.endsAt); }
-      if (typeof body.durationMin === 'number' && body.startsAt) { updateFields.push(`ends_at = ($${idx-1}::timestamptz + make_interval(mins => $${idx++}))`); values.push(body.durationMin); }
-      if (!updateFields.length) throw new HttpException('no_fields', HttpStatus.BAD_REQUEST);
-      const setSql = updateFields.join(', ');
+      const actorId = this.rc.requireUuidUserId();
       const row = await this.db.runInTx(async (q) => {
-        const { rows } = await q(
+        const { rows: actorRows } = await q<{ role: ActorRole }>(
+          `select role from users where id = $1::uuid limit 1`,
+          [actorId]
+        );
+        const actorRole = actorRows[0]?.role;
+        if (!actorRole) throw new HttpException('actor_not_found', HttpStatus.FORBIDDEN);
+
+        const { rows: appointmentRows } = await q<any>(
+          `select id, session_id, user_id, vet_id, status, starts_at, ends_at
+             from appointments
+            where id = $1::uuid
+            limit 1`,
+          [id]
+        );
+        const appointment = appointmentRows[0];
+        if (!appointment) return null;
+        const isAdmin = actorRole === 'admin';
+        const isOwner = appointment.user_id === actorId;
+        const isVet = appointment.vet_id === actorId;
+        if (!isAdmin && !isOwner && !isVet) return null;
+
+        const requestedStatus = body.status ? String(body.status).toLowerCase() : null;
+        let nextStatus = appointment.status;
+        let startsAt = body.startsAt ? new Date(body.startsAt).toISOString() : new Date(appointment.starts_at).toISOString();
+        let endsAt = body.endsAt ? new Date(body.endsAt).toISOString() : new Date(appointment.ends_at).toISOString();
+
+        if (body.startsAt || body.endsAt || typeof body.durationMin === 'number') {
+          if (!['scheduled', 'confirmed'].includes(appointment.status) && !isAdmin) {
+            throw new HttpException('reschedule_requires_scheduled_or_confirmed_status', HttpStatus.BAD_REQUEST);
+          }
+          const duration = typeof body.durationMin === 'number'
+            ? body.durationMin
+            : body.endsAt
+              ? appointmentDurationMinutes(body.startsAt || appointment.starts_at, body.endsAt)
+              : appointmentDurationMinutes(appointment.starts_at, appointment.ends_at);
+          startsAt = body.startsAt ? new Date(body.startsAt).toISOString() : new Date(appointment.starts_at).toISOString();
+          endsAt = body.endsAt
+            ? new Date(body.endsAt).toISOString()
+            : new Date(new Date(startsAt).getTime() + (duration * 60 * 1000)).toISOString();
+          const { rows: conflicts } = await q<{ id: string }>(
+            `select id
+               from appointments
+              where vet_id = $1::uuid
+                and id <> $2::uuid
+                and status in ('scheduled', 'confirmed', 'active')
+                and tstzrange(starts_at, ends_at) && tstzrange($3::timestamptz, $4::timestamptz)
+              limit 1`,
+            [appointment.vet_id, id, startsAt, endsAt]
+          );
+          if (conflicts[0]) throw new HttpException('vet_conflict', HttpStatus.CONFLICT);
+        }
+
+        if (requestedStatus) {
+          const allowed = new Set<string>();
+          if (isAdmin || isVet) {
+            if (appointment.status === 'scheduled') ['confirmed', 'active', 'canceled'].forEach((value) => allowed.add(value));
+            if (appointment.status === 'confirmed') ['active', 'canceled'].forEach((value) => allowed.add(value));
+            if (appointment.status === 'active') ['completed', 'no_show', 'canceled'].forEach((value) => allowed.add(value));
+          }
+          if (isAdmin || isOwner) {
+            if (appointment.status === 'scheduled' || appointment.status === 'confirmed') {
+              allowed.add('canceled');
+            }
+          }
+          if (!allowed.has(requestedStatus)) {
+            throw new HttpException('invalid_appointment_transition', HttpStatus.BAD_REQUEST);
+          }
+          nextStatus = requestedStatus;
+        }
+
+        let sessionId = appointment.session_id || null;
+        if (nextStatus === 'active') {
+          if (!sessionId) {
+            const { rows: sessionRows } = await q<{ id: string }>(
+              `insert into chat_sessions (id, user_id, vet_id, status, mode, started_at, created_at, updated_at)
+               values (gen_random_uuid(), $1::uuid, $2::uuid, 'active', 'video', now(), now(), now())
+               returning id`,
+              [appointment.user_id, appointment.vet_id]
+            );
+            sessionId = sessionRows[0]?.id || null;
+          } else {
+            await q(
+              `update chat_sessions
+                  set vet_id = $2::uuid,
+                      status = 'active',
+                      mode = coalesce(mode, 'video'),
+                      started_at = coalesce(started_at, now()),
+                      updated_at = now()
+                where id = $1::uuid`,
+              [sessionId, appointment.vet_id]
+            );
+          }
+        }
+
+        if (['completed', 'canceled', 'no_show'].includes(nextStatus) && sessionId) {
+          const sessionStatus = nextStatus === 'completed' ? 'completed' : 'canceled';
+          await q(
+            `update chat_sessions
+                set status = $2,
+                    ended_at = coalesce(ended_at, now()),
+                    updated_at = now()
+              where id = $1::uuid`,
+            [sessionId, sessionStatus]
+          );
+        }
+
+        const { rows } = await q<any>(
           `update appointments
-              set ${setSql}
-            where id = $1
-              and (user_id = auth.uid() or vet_id = auth.uid())
-            returning id, user_id, vet_id, status, starts_at, ends_at`,
-          values
+              set session_id = $2::uuid,
+                  status = $3,
+                  starts_at = $4::timestamptz,
+                  ends_at = $5::timestamptz
+            where id = $1::uuid
+            returning id, session_id, user_id, vet_id, status, starts_at, ends_at`,
+          [id, sessionId, nextStatus, startsAt, endsAt]
         );
         return rows[0];
       });
@@ -115,6 +255,14 @@ export class AppointmentsController {
       if (e instanceof HttpException) throw e;
       throw new HttpException(e?.message || 'appointments_patch_failed', HttpStatus.BAD_REQUEST);
     }
+  }
+
+  @Post('appointments/:id/transitions')
+  async transition(
+    @Param('id') id: string,
+    @Body() body: { status?: string; to?: string }
+  ) {
+    return this.patch(id, { status: body?.to || body?.status });
   }
 
   @Get('vets/:vetId/availability/slots')
