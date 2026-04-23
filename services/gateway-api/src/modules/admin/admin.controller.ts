@@ -445,10 +445,10 @@ export class AdminController {
     const limit = Math.min(Math.max(parseInt(limitStr || '1000', 10) || 1000, 1), 5000);
     const { rows } = await this.db.query(
       `select s.id,
-              s.owner_user_id,
-              s.vet_user_id,
+              s.user_id,
+              s.vet_id,
               s.status,
-              s.kind,
+              s.mode,
               s.started_at,
               s.ended_at,
               s.created_at,
@@ -483,7 +483,7 @@ export class AdminController {
     const { rows } = await this.db.query(
       `select n.id,
               n.session_id,
-              n.author_user_id,
+              n.vet_id,
               n.pet_id,
               n.severity,
               n.summary_text,
