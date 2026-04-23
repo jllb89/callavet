@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Pool } from 'pg';
 import jwt from 'jsonwebtoken';
 import type { Socket } from 'socket.io';
+import { URL } from 'url';
 
 export type ActorRole = 'user' | 'vet' | 'admin';
 
@@ -84,13 +85,14 @@ export class ChatService {
   private readonly pool?: Pool;
 
   constructor() {
-    const databaseUrl = process.env.DATABASE_URL?.trim();
-    if (!databaseUrl) {
+    const rawDatabaseUrl = process.env.DATABASE_URL?.trim();
+    if (!rawDatabaseUrl) {
       this.logger.warn('DATABASE_URL missing; realtime chat persistence is disabled');
       return;
     }
 
-    const needsSsl = /[?&]sslmode=require/i.test(databaseUrl) || /supabase\.(co|com)/i.test(databaseUrl);
+    const databaseUrl = this.sanitizeDatabaseUrl(rawDatabaseUrl);
+    const needsSsl = /supabase\.(co|com)/i.test(databaseUrl) || /[?&]ssl=true/i.test(databaseUrl);
     const connectTimeoutMs = this.readPositiveIntEnv('CHAT_DB_CONNECT_TIMEOUT_MS', 7000);
     const queryTimeoutMs = this.readPositiveIntEnv('CHAT_DB_QUERY_TIMEOUT_MS', 10000);
     this.pool = new Pool({
@@ -104,6 +106,21 @@ export class ChatService {
       this.logger.warn(`Postgres pool error: ${error.name}: ${error.message}`);
     });
     this.logger.log(`Realtime DB pool configured (connectTimeoutMs=${connectTimeoutMs}, queryTimeoutMs=${queryTimeoutMs})`);
+  }
+
+  private sanitizeDatabaseUrl(value: string): string {
+    try {
+      const url = new URL(value);
+      const sslMode = url.searchParams.get('sslmode')?.toLowerCase();
+      if (sslMode) {
+        // Let pg use the explicit ssl object from Pool config.
+        url.searchParams.delete('sslmode');
+        this.logger.log(`DATABASE_URL sslmode=${sslMode} stripped for explicit SSL config`);
+      }
+      return url.toString();
+    } catch {
+      return value;
+    }
   }
 
   authenticateSocket(socket: Socket): ChatActor {
