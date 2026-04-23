@@ -15,8 +15,8 @@ import {
 import { AuthGuard } from '../auth/auth.guard';
 import { DbService } from '../db/db.service';
 import { RequestContext } from '../auth/request-context.service';
-
-type ActorRole = 'user' | 'vet' | 'admin';
+import { ValidatorService } from '../config/validator.service';
+import { EnumService } from '../config/enum.service';
 
 type AvailabilityRow = {
   weekday: number;
@@ -25,43 +25,14 @@ type AvailabilityRow = {
   timezone: string | null;
 };
 
-const UUID_RE = /^[0-9a-fA-F-]{36}$/;
-const TIME_RE = /^\d{2}:\d{2}(?::\d{2})?$/;
-
-function assertUuid(value: string, field: string) {
-  if (!UUID_RE.test(value)) {
-    throw new BadRequestException(`${field} must be a UUID`);
-  }
-}
-
-function normalizeUuidArray(values: unknown, field: string): string[] {
-  if (values == null) return [];
-  if (!Array.isArray(values)) throw new BadRequestException(`${field} must be an array`);
-  const unique = new Set<string>();
-  for (const raw of values) {
-    const value = String(raw || '').trim();
-    if (!UUID_RE.test(value)) throw new BadRequestException(`${field} entries must be UUIDs`);
-    unique.add(value);
-  }
-  return [...unique];
-}
-
-function normalizeStringArray(values: unknown, field: string): string[] {
-  if (values == null) return [];
-  if (!Array.isArray(values)) throw new BadRequestException(`${field} must be an array`);
-  const normalized = values
-    .map((value) => String(value || '').trim())
-    .filter(Boolean);
-  return [...new Set(normalized)];
-}
-
-function normalizeTime(value: unknown, field: string): string {
-  const text = String(value || '').trim();
-  if (!TIME_RE.test(text)) throw new BadRequestException(`${field} must be HH:MM or HH:MM:SS`);
-  return text.length === 5 ? `${text}:00` : text;
-}
-
-function normalizeAvailabilityPayload(payload: any): AvailabilityRow[] {
+/**
+ * Internal helpers that use injected services
+ * (Replaced hardcoded regex constants and validation functions)
+ */
+function normalizeAvailabilityPayload(
+  payload: any,
+  validator: ValidatorService,
+): AvailabilityRow[] {
   const rows = Array.isArray(payload) ? payload : Array.isArray(payload?.template) ? payload.template : null;
   if (!rows) throw new BadRequestException('template must be an array');
   const normalized = rows.map((entry: any, index: number) => {
@@ -69,8 +40,8 @@ function normalizeAvailabilityPayload(payload: any): AvailabilityRow[] {
     if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6) {
       throw new BadRequestException(`template[${index}].weekday must be an integer between 0 and 6`);
     }
-    const start_time = normalizeTime(entry?.start_time ?? entry?.startTime, `template[${index}].start_time`);
-    const end_time = normalizeTime(entry?.end_time ?? entry?.endTime, `template[${index}].end_time`);
+    const start_time = validator.validateTime(entry?.start_time ?? entry?.startTime, `template[${index}].start_time`);
+    const end_time = validator.validateTime(entry?.end_time ?? entry?.endTime, `template[${index}].end_time`);
     if (start_time >= end_time) {
       throw new BadRequestException(`template[${index}] start_time must be before end_time`);
     }
@@ -95,29 +66,19 @@ function normalizeAvailabilityPayload(payload: any): AvailabilityRow[] {
   return normalized;
 }
 
-function assertAdminSecret(secretHeader?: string) {
-  const expected = process.env.ADMIN_PRICING_SYNC_SECRET || process.env.ADMIN_SECRET || '';
-  if (!expected || secretHeader !== expected) {
-    throw new ForbiddenException('invalid admin secret');
-  }
-}
-
-function normalizePriority(value: unknown): 'routine' | 'urgent' {
-  const normalized = String(value || 'routine').trim().toLowerCase();
-  if (normalized !== 'routine' && normalized !== 'urgent') {
-    throw new BadRequestException('priority must be routine or urgent');
-  }
-  return normalized as 'routine' | 'urgent';
-}
-
 @Controller('vets')
 @UseGuards(AuthGuard)
 export class VetsController {
-  constructor(private readonly db: DbService, private readonly rc: RequestContext) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly rc: RequestContext,
+    private readonly validator: ValidatorService,
+    private readonly enumService: EnumService,
+  ) {}
 
-  private async currentActor(): Promise<{ id: string; role: ActorRole }> {
+  private async currentActor(): Promise<{ id: string; role: string }> {
     const actorId = this.rc.requireUuidUserId();
-    const { rows } = await this.db.query<{ id: string; role: ActorRole }>(
+    const { rows } = await this.db.query<{ id: string; role: string }>(
       `select id, role
          from users
         where id = $1::uuid
@@ -270,7 +231,7 @@ export class VetsController {
     const offset = Math.max(parseInt(offsetRaw || '0', 10) || 0, 0);
     const search = q?.trim() ? `%${q.trim().toLowerCase()}%` : null;
     const specialtyFilter = (specialtyId || specialtyIdAlt || '').trim() || null;
-    if (specialtyFilter) assertUuid(specialtyFilter, 'specialtyId');
+    if (specialtyFilter) this.validator.validateUUID(specialtyFilter, 'specialtyId');
 
     const { rows } = await this.db.query<any>(
       `select v.id,
@@ -322,15 +283,15 @@ export class VetsController {
   ) {
     const actor = await this.currentActor();
     if (actor.role !== 'vet') throw new ForbiddenException('vet_role_required');
-    const specialties = normalizeUuidArray(body?.specialties, 'specialties');
-    const languages = normalizeStringArray(body?.languages, 'languages');
+    const specialties = this.validator.parseUuidArray(body?.specialties, 'specialties');
+    const languages = this.validator.parseStringArray(body?.languages, 'languages');
     const yearsExperience = body?.years_experience == null ? null : Number(body.years_experience);
     if (yearsExperience != null && (!Number.isInteger(yearsExperience) || yearsExperience < 0)) {
       throw new BadRequestException('years_experience must be a non-negative integer');
     }
 
     await this.db.runInTx(async (q) => {
-      const { rows: userRows } = await q<{ role: ActorRole }>(
+      const { rows: userRows } = await q<{ role: string }>(
         `select role from users where id = $1::uuid limit 1`,
         [actor.id]
       );
@@ -379,7 +340,7 @@ export class VetsController {
   async replaceMyAvailability(@Body() body: { template?: AvailabilityRow[] } | AvailabilityRow[]) {
     const actor = await this.currentActor();
     if (actor.role !== 'vet') throw new ForbiddenException('vet_role_required');
-    const rows = normalizeAvailabilityPayload(body);
+    const rows = normalizeAvailabilityPayload(body, this.validator);
     await this.db.runInTx(async (q) => {
       const { rows: vetRows } = await q<{ id: string }>(
         `select id from vets where id = $1::uuid limit 1`,
@@ -613,13 +574,15 @@ export class VetsController {
     if (actor.role === 'vet') throw new ForbiddenException('owners_or_admin_only');
     const petId = String(body?.petId || '').trim();
     if (!petId) throw new BadRequestException('petId required');
-    assertUuid(petId, 'petId');
+    this.validator.validateUUID(petId, 'petId');
     const specialtyId = body?.specialtyId ? String(body.specialtyId).trim() : null;
-    if (specialtyId) assertUuid(specialtyId, 'specialtyId');
+    if (specialtyId) this.validator.validateUUID(specialtyId, 'specialtyId');
     const assignedVetId = body?.assignedVetId ? String(body.assignedVetId).trim() : null;
-    if (assignedVetId) assertUuid(assignedVetId, 'assignedVetId');
+    if (assignedVetId) this.validator.validateUUID(assignedVetId, 'assignedVetId');
     const notes = typeof body?.notes === 'string' ? body.notes.trim() : null;
-    const priority = normalizePriority(body?.priority);
+    const priorityVal = String(body?.priority || 'routine').trim().toLowerCase();
+    const allPriorities = this.enumService.getValues('vet_referrals', 'priority');
+    const priority = allPriorities.has(priorityVal) ? priorityVal : 'routine';
 
     const row = await this.db.runInTx(async (q) => {
       if (actor.role !== 'admin') {
@@ -680,12 +643,12 @@ export class VetsController {
       notes?: string;
     }
   ) {
-    assertUuid(referralId, 'referralId');
+    this.validator.validateUUID(referralId, 'referralId');
     const actor = await this.currentActor();
     const assignedVetId = body?.assignedVetId ? String(body.assignedVetId).trim() : null;
-    if (assignedVetId) assertUuid(assignedVetId, 'assignedVetId');
+    if (assignedVetId) this.validator.validateUUID(assignedVetId, 'assignedVetId');
     const appointmentId = body?.appointmentId ? String(body.appointmentId).trim() : null;
-    if (appointmentId) assertUuid(appointmentId, 'appointmentId');
+    if (appointmentId) this.validator.validateUUID(appointmentId, 'appointmentId');
     const requestedStatus = body?.status ? String(body.status).trim().toLowerCase() : null;
     if (requestedStatus && !['intake', 'assigned', 'accepted', 'completed', 'canceled'].includes(requestedStatus)) {
       throw new BadRequestException('invalid referral status');
@@ -804,8 +767,8 @@ export class VetsController {
 
   @Post(':vetId/approve')
   async approveVet(@Headers('x-admin-secret') secret: string, @Param('vetId') vetId: string) {
-    assertAdminSecret(secret);
-    assertUuid(vetId, 'vetId');
+    this.validator.assertAdminSecret(secret);
+    this.validator.validateUUID(vetId, 'vetId');
     await this.db.query(
       `update users
           set role = 'vet',
@@ -827,19 +790,19 @@ export class VetsController {
 
   @Get(':vetId/status')
   async status(@Param('vetId') vetId: string) {
-    assertUuid(vetId, 'vetId');
+    this.validator.validateUUID(vetId, 'vetId');
     return this.getVetStatus(vetId);
   }
 
   @Get(':vetId/availability')
   async availability(@Param('vetId') vetId: string) {
-    assertUuid(vetId, 'vetId');
+    this.validator.validateUUID(vetId, 'vetId');
     return this.loadAvailabilityTemplate(vetId);
   }
 
   @Get(':vetId')
   async detail(@Param('vetId') vetId: string) {
-    assertUuid(vetId, 'vetId');
+    this.validator.validateUUID(vetId, 'vetId');
     return this.buildVetDetail(vetId);
   }
 }
