@@ -3,6 +3,7 @@ set -euo pipefail
 
 : ${GATEWAY_BASE:?"Set GATEWAY_BASE (e.g., https://api.staging.callavet.mx)"}
 : ${TOKEN:?"Set TOKEN (Bearer JWT)"}
+: ${SESSION_ID:?"Set SESSION_ID to an authorized video chat_sessions.id"}
 
 hdr=(
   -H "Authorization: Bearer $TOKEN"
@@ -13,8 +14,15 @@ print -- "[video] Creating room"
 create_resp=$(curl -sS -X POST $hdr[@] --data '{"sessionId":"'$SESSION_ID'"}' "$GATEWAY_BASE/video/rooms")
 print -- "$create_resp" | jq . 2>/dev/null || print -- "$create_resp"
 room_id=$(print -- $create_resp | jq -r '.roomId // empty' 2>/dev/null || true)
+provider=$(print -- $create_resp | jq -r '.provider // empty' 2>/dev/null || true)
+token=$(print -- $create_resp | jq -r '.token // empty' 2>/dev/null || true)
+url=$(print -- $create_resp | jq -r '.url // empty' 2>/dev/null || true)
 if [[ -z "$room_id" ]]; then
   print -- "[video] Create failed"
+  exit 1
+fi
+if [[ "$provider" != "livekit" || -z "$token" || -z "$url" ]]; then
+  print -- "[video] LiveKit response missing provider/token/url"
   exit 1
 fi
 print -- "[video] Ending room id=$room_id"

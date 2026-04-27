@@ -36,6 +36,12 @@ services:
         sync: false
       - key: SENDGRID_REPLY_TO
         sync: false
+      - key: LIVEKIT_URL
+        sync: false
+      - key: LIVEKIT_API_KEY
+        sync: false
+      - key: LIVEKIT_API_SECRET
+        sync: false
 
   - type: web
     name: cav-webhooks-staging
@@ -49,9 +55,17 @@ services:
     envVars:
       - key: NODE_ENV
         value: staging
+      - key: DATABASE_URL
+        sync: false
       - key: STRIPE_SECRET_KEY
         sync: false
       - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: LIVEKIT_API_KEY
+        sync: false
+      - key: LIVEKIT_API_SECRET
+        sync: false
+      - key: INTERNAL_LIVEKIT_RECONCILE_SECRET
         sync: false
 
   - type: web

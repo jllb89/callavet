@@ -11,7 +11,11 @@ export const EnvSchema = z.object({
   PORT: z.string().transform(v=>Number(v)).optional(),
   SUPABASE_JWT_SECRET: z.string().min(1).optional(),
   STRIPE_SECRET_KEY: z.string().min(1).optional(),
-  DATABASE_URL: z.string().min(1).optional()
+  DATABASE_URL: z.string().min(1).optional(),
+  LIVEKIT_URL: z.string().url().optional(),
+  LIVEKIT_API_KEY: z.string().min(1).optional(),
+  LIVEKIT_API_SECRET: z.string().min(1).optional(),
+  LIVEKIT_WEBHOOK_SECRET: z.string().min(1).optional()
 });
 
 function validateEnv(config: Record<string, unknown>) {

@@ -1,6 +1,6 @@
 # Backend Roadmap to Reach Subscription and Billing Quality
 
-_Last updated: 2026-04-23_
+_Last updated: 2026-04-27_
 
 ## Purpose
 This document sequences the backend work required so the rest of the platform reaches the same production bar as subscriptions and billing before major effort returns to the Flutter app.
@@ -110,18 +110,35 @@ Exit criteria:
 Target: 2 to 3 weeks
 
 Status:
-Deferred on 2026-04-23 by product priority to focus on Phase 4 structured clinical record work first.
+Active on 2026-04-27 with LiveKit Cloud selected as the video provider. Phase 3 is restarting with a foundation slice first, in parallel with Phase 6 operations hardening.
+
+Update on 2026-04-27 (implementation pass 1):
+LiveKit Cloud was selected and the gateway foundation was started. The gateway now has a LiveKit server SDK dependency, LiveKit environment validation/placeholders, a dedicated LiveKit adapter service, and `/video/rooms` now issues authorized LiveKit participant tokens for existing `video` sessions instead of fake random room/token values.
+
+Update on 2026-04-27 (implementation pass 2):
+Phase 3B now routes LiveKit Cloud lifecycle events through the dedicated webhooks service at `/livekit/webhook`. The receiver verifies LiveKit authorization, persists raw room and participant events in `livekit_video_events`, and syncs room start/end state into `chat_sessions` and `clinical_encounters.video_room_id`.
+
+Update on 2026-04-27 (implementation pass 3):
+Phase 3C adds `video_session_lifecycle`, idempotent entitlement commit/release helpers, room-token entitlement reservation, forced-end settlement, and a protected `/livekit/reconcile` sweep for join-timeout and host-absent release paths.
 
 Goal:
 Replace fake room issuance with a real video backend that behaves like subscriptions and billing do today.
 
+Actionable rollout:
+- [x] Phase 3A. Provider foundation: LiveKit Cloud decision, env vars, SDK adapter, token issuance, and smoke contract.
+- [x] Phase 3B. Lifecycle webhooks: verify LiveKit webhook auth, persist room/participant events, and sync session state.
+- [x] Phase 3C. Entitlement safety: handle room start/end, join timeout, reconnect, host absent, forced end, and entitlement finalize/release paths.
+- [ ] Phase 3D. Recording/transcript hooks: add event hooks and admin visibility even if recording/transcription stays disabled initially.
+- [ ] Phase 3E. Staging hardening: run two-participant smoke, backend core smoke, and failure-mode smokes as deployment gates.
+
 Deliverables:
-- Choose and integrate the room provider, likely LiveKit or equivalent.
-- Implement real room and token lifecycle with authenticated joins.
-- Bind room access to appointment, session, and user role.
-- Sync room start and end events with session state and entitlement consumption.
-- Handle join timeout, host absent, reconnect, and forced room end cases.
-- Add recording or transcript event hooks even if transcription is deferred to a later phase.
+- [x] Choose and integrate the room provider: LiveKit Cloud.
+- [x] Implement authenticated LiveKit room creation and participant token issuance for existing video sessions.
+- [x] Bind token issuance to session membership and user role.
+- [x] Sync room start and end events with session state.
+- [x] Wire entitlement consumption/release decisions to verified room lifecycle events.
+- [x] Handle join timeout, host absent, reconnect, and forced room end cases.
+- [ ] Add recording or transcript event hooks even if transcription is deferred to a later phase.
 
 Exit criteria:
 - Two authenticated participants can complete a staged video consult end to end.
@@ -223,12 +240,11 @@ Reason:
 - Validation note: interpreter-aware suite execution is required (`zsh` shebang scripts must not be forced through `bash`), otherwise false negatives appear (for example, `print: command not found`) that do not reflect backend runtime health.
 - Phase 0 staging validation completed on 2026-04-23; keep the backend core smoke suite green as a deployment gate.
 - Phase 1 closed on staging on 2026-04-23 with a fresh all-green backend core smoke rerun, including the new vet-operations coverage.
-- Supabase CLI is now normalized around the native `supabase/` project; use `SUPABASE_DIRECT_DATABASE_URL` for CLI migration commands, with local mirrored history currently spanning `0035` through `0043`.
-- Supabase CLI is now normalized around the native `supabase/` project; apply `0047_phase6_notifications_admin_ops.sql` next and keep local mirrored history aligned through `0047`.
-- Make a hard provider decision for video during Phase 1, even if Phase 3 implementation starts later.
+- Supabase CLI is now normalized around the native `supabase/` project; use `SUPABASE_DIRECT_DATABASE_URL` for CLI migration commands, with local mirrored history currently spanning `0035` through `0049`.
+- LiveKit Cloud was selected on 2026-04-27; Phase 3A gateway token issuance, Phase 3B webhook ingestion, and Phase 3C entitlement safety are implemented and should be validated after LiveKit and database secrets are configured on staging.
 - Define the encounter and horse-history schema during Phase 1 so chat and video events can link into it cleanly.
 - Phase 2 staging proof is complete; keep `env/scripts/smoke-realtime-phase2.mjs` green as a gate for chat-service deploys.
-- Phase 3 remains intentionally deferred; resume video infrastructure after Phase 6 hardening.
+- Phase 3 is active again for LiveKit integration; next step is Phase 3D recording/transcript hooks and admin visibility, even if recording remains disabled initially.
 - Phase 4 is now closed on staging; keep `env/scripts/smoke-phase4-clinical-record.sh` green as an ongoing deployment gate for clinical-record changes.
 - Phase 6 is now the active priority: notifications, admin operations completion, operational dashboards/alerts, and runbooks.
 - Phase 5 (AI triage/referral/drafting) is intentionally deferred until after Phase 6 completion.
@@ -241,6 +257,7 @@ Reason:
 - `services/gateway-api/src/modules/notes/session-notes.controller.ts`
 - `services/gateway-api/src/modules/notes/notes.controller.ts`
 - `services/gateway-api/src/modules/video/video.controller.ts`
+- `services/gateway-api/src/modules/video/livekit.service.ts`
 - `services/chat-service/src/modules/chat/chat.gateway.ts`
 - `services/chat-service/src/modules/chat/chat.service.ts`
 - `packages/db/migrations/0042_realtime_chat_backbone.sql`

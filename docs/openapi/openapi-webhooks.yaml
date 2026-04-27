@@ -44,6 +44,97 @@ paths:
         "400":
           description: Signature verification failed
 
+  /livekit/webhook:
+    get:
+      summary: LiveKit webhook readiness
+      description: Returns non-secret configuration readiness for the LiveKit webhook receiver.
+      responses:
+        "200":
+          description: Ready response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  service: { type: string }
+                  endpoint: { type: string }
+                  configured:
+                    type: object
+                    properties:
+                      database: { type: boolean }
+                      livekitApiKey: { type: boolean }
+                      livekitSecret: { type: boolean }
+                      reconcileSecret: { type: boolean }
+    post:
+      summary: LiveKit webhook (raw body, signed)
+      description: >
+        Verify the LiveKit authorization header with LiveKit credentials, persist room and participant lifecycle events, and sync matching video session state.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Raw LiveKit webhook event payload
+      responses:
+        "200":
+          description: Acknowledge
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  received: { type: boolean }
+                  eventType: { type: string }
+                  eventId: { type: string, format: uuid }
+        "400":
+          description: Signature verification failed
+        "500":
+          description: Persistence or sync failure
+
+  /livekit/reconcile:
+    post:
+      summary: Reconcile stale LiveKit video sessions
+      description: Protected internal endpoint that releases unused video reservations for join-timeout and host-absent cases.
+      parameters:
+        - in: header
+          name: x-internal-secret
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                limit: { type: integer, minimum: 1, maximum: 200, default: 50 }
+                timeoutMinutes: { type: integer, minimum: 1, maximum: 240, default: 10 }
+      responses:
+        "200":
+          description: Reconcile results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  processed: { type: integer }
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        sessionId: { type: string, format: uuid }
+                        action: { type: string }
+                        reason: { type: string }
+        "401":
+          description: Unauthorized
+        "500":
+          description: Reconcile failed or secret missing
+
   /internal/ingest/stripe:
     post:
       summary: Normalize Stripe event into Gateway/Supabase

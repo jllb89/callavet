@@ -1653,15 +1653,17 @@ paths:
   /video/rooms:
     post:
       tags: [Video]
-      summary: Create room + grant token (internal)
+      summary: Create/ensure LiveKit room and grant participant token
       security: [{ bearerAuth: [] }]
       requestBody: { $ref: "#/components/requestBodies/VideoRoomCreate" }
-      responses: { "200": { $ref: "#/components/responses/VideoRoom" } }
+      responses:
+        "200": { $ref: "#/components/responses/VideoRoom" }
+        "402": { description: Video entitlement payment or reservation required }
 
   /video/rooms/{roomId}/end:
     post:
       tags: [Video]
-      summary: End/lock a room
+      summary: End/delete a LiveKit room
       security: [{ bearerAuth: [] }]
       parameters: [ { in: path, name: roomId, required: true, schema: { type: string } } ]
       responses: { "200": { $ref: "#/components/responses/Ok" } }
@@ -3241,7 +3243,25 @@ components:
       content: { application/json: { schema: { type: object, properties: { text: { type: string } } } } }
     VideoRoom:
       description: LiveKit room + token
-      content: { application/json: { schema: { type: object, properties: { roomId: { type: string }, token: { type: string } } } } }
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              provider: { type: string, enum: [livekit] }
+              roomId: { type: string }
+              roomName: { type: string }
+              sessionId: { type: string, format: uuid }
+              token: { type: string }
+              url: { type: string, format: uri }
+              identity: { type: string }
+              role: { type: string, enum: [owner, vet, admin, participant] }
+              expiresIn: { type: integer }
+              entitlement:
+                type: object
+                properties:
+                  consumptionId: { type: string, format: uuid }
+                  status: { type: string, enum: [reserved] }
     Notes:
       description: Vet notes
       content: { application/json: { schema: { $ref: "#/components/schemas/Notes" } } }
