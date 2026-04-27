@@ -8,15 +8,31 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "", { apiVersion: "20
 const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET || "";
 let pool: Pool | undefined;
 
+function databaseConnectionOptions(connectionString: string) {
+  let normalizedConnectionString = connectionString;
+  let needsSsl = /[?&]sslmode=require/.test(connectionString) || /supabase\.(co|com)/i.test(connectionString) || /pooler\.supabase\.com/i.test(connectionString);
+  try {
+    const url = new URL(connectionString);
+    if (url.searchParams.has("sslmode")) {
+      needsSsl = needsSsl || url.searchParams.get("sslmode") === "require";
+      url.searchParams.delete("sslmode");
+      normalizedConnectionString = url.toString();
+    }
+  } catch {
+    normalizedConnectionString = connectionString;
+  }
+
+  return {
+    connectionString: normalizedConnectionString,
+    ssl: needsSsl ? { rejectUnauthorized: false } : undefined,
+  };
+}
+
 function db() {
   if (pool) return pool;
   const connectionString = process.env.DATABASE_URL || "";
   if (!connectionString) throw new Error("DATABASE_URL is not set");
-  const needsSsl = /[?&]sslmode=require/.test(connectionString) || /supabase\.(co|com)/i.test(connectionString) || /pooler\.supabase\.com/i.test(connectionString);
-  pool = new Pool({
-    connectionString,
-    ssl: needsSsl ? { rejectUnauthorized: false } : undefined,
-  });
+  pool = new Pool(databaseConnectionOptions(connectionString));
   return pool;
 }
 
