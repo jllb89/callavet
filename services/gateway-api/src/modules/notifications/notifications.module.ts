@@ -8,5 +8,6 @@ import { DbModule } from '../db/db.module';
   imports: [AuthModule, DbModule],
   controllers: [NotificationsController],
   providers: [NotificationsService],
+  exports: [NotificationsService],
 })
 export class NotificationsModule {}
