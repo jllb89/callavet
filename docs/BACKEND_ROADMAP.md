@@ -205,7 +205,7 @@ Exit criteria:
 Target: 2 weeks
 
 Status:
-Active on 2026-04-23 as the next implementation phase after Phase 4 closure; Phase 5 is intentionally deferred for now.
+Closed on staging on 2026-04-28 after ops alert hardening, runbook completion, and post-redeploy gate validation.
 
 Update on 2026-04-23 (implementation pass 1):
 Migration `0047_phase6_notifications_admin_ops.sql` was added (mirrored in `packages/db/migrations`) to introduce `public.notification_events` and `public.admin_audit_logs`. Gateway now supports event-driven notifications through `/notifications/events`, and admin operational tooling was expanded with `/admin/notifications/events`, `/admin/audit/logs`, `/admin/export/sessions`, `/admin/export/notes`, and `/admin/ops/dashboard`. Smoke scripts were updated to cover these new Phase 6 surfaces.
@@ -215,6 +215,9 @@ Notification triggers integrated into all key workflows: appointments (scheduled
 
 Update on 2026-04-28 (post-redeploy validation):
 Staging gateway redeployed with DI fix (`NotificationsService` exported from `NotificationsModule`) and startup crash resolved. Validation gates passed: `/health` and `/version` returned 200, `env/scripts/smoke-backend-core.sh` completed successfully, and notification persistence/admin visibility verified via `env/scripts/smoke-notifications-send.sh` + `env/scripts/smoke-admin-ops.sh` (`notification_events` rows visible, including expected failed-provider states such as SendGrid `Unauthorized` in sandbox credentials mismatch cases).
+
+Update on 2026-04-28 (hardening closure):
+`GET /admin/ops/dashboard` now exposes explicit alert coverage for notification failures/queue depth, video failure modes, room issuance failures, websocket auth failures, and AI job errors (with safe fallback when optional telemetry tables are absent). `env/scripts/smoke-admin-ops.sh` now enforces these alert keys as a deployment gate. Operational runbooks were finalized in `PRODUCTION_CHECKLIST.md` for backups/restore drills, webhook replay, refund side effects, and incident handling. Post-redeploy validation on staging passed with both `env/scripts/smoke-admin-ops.sh` and `env/scripts/smoke-backend-core.sh` green.
 
 Goal:
 Bring non-billing operations up to the same production standard as billing support flows.
@@ -262,8 +265,8 @@ Reason:
 - Phase 4 is now closed on staging; keep `env/scripts/smoke-phase4-clinical-record.sh` green as an ongoing deployment gate for clinical-record changes.
 - Phase 6 implementation pass 2 completed on 2026-04-28: notification triggers integrated into appointments (scheduled/start/end), sessions (start/end), payments (failure), and notes (ready). All admin endpoints functional (notifications/events, audit/logs, export/sessions, export/notes, ops/dashboard). Gateway API compiles without errors.
 - Phase 6 post-redeploy gate passed on 2026-04-28 after exporting `NotificationsService` from `NotificationsModule`: gateway startup stable, backend core smoke green, and notification event persistence visible from admin tooling.
-- Phase 6 is now the active priority: notification smoke gates, Render deployment of updated gateway service, staging validation of notification event persistence and admin endpoint coverage.
-- Phase 5 (AI triage/referral/drafting) is intentionally deferred until after Phase 6 completion.
+- Phase 6 is now closed on staging on 2026-04-28: notification/admin hardening complete with enforced ops alert coverage and documented runbooks.
+- Phase 5 (AI triage/referral/drafting) is now the active priority.
 
 ## Related Files
 - `services/gateway-api/src/modules/subscriptions/subscriptions.controller.ts`
