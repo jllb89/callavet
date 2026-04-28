@@ -213,6 +213,9 @@ Migration `0047_phase6_notifications_admin_ops.sql` was added (mirrored in `pack
 Update on 2026-04-28 (implementation pass 2):
 Notification triggers integrated into all key workflows: appointments (scheduled, consult.start, consult.end), sessions (consult.start, consult.end), payments (payment.failed via Stripe event handlers), and notes (note.ready). Injected NotificationsService into AppointmentsController, SessionsController, InternalStripeService, and SessionNotesController with fire-and-forget (non-blocking) notification hooks on state transitions. All admin endpoints for notifications, audit logs, export/sessions, export/notes, and ops/dashboard are fully functional. Gateway API compiles without errors and is ready for staging deployment and smoke testing.
 
+Update on 2026-04-28 (post-redeploy validation):
+Staging gateway redeployed with DI fix (`NotificationsService` exported from `NotificationsModule`) and startup crash resolved. Validation gates passed: `/health` and `/version` returned 200, `env/scripts/smoke-backend-core.sh` completed successfully, and notification persistence/admin visibility verified via `env/scripts/smoke-notifications-send.sh` + `env/scripts/smoke-admin-ops.sh` (`notification_events` rows visible, including expected failed-provider states such as SendGrid `Unauthorized` in sandbox credentials mismatch cases).
+
 Goal:
 Bring non-billing operations up to the same production standard as billing support flows.
 
@@ -258,6 +261,7 @@ Reason:
 - Phase 3E staging hardening is now closed on 2026-04-28: backend core smoke green, signed LiveKit webhook persistence verified, and admin video lifecycle endpoint confirmed.
 - Phase 4 is now closed on staging; keep `env/scripts/smoke-phase4-clinical-record.sh` green as an ongoing deployment gate for clinical-record changes.
 - Phase 6 implementation pass 2 completed on 2026-04-28: notification triggers integrated into appointments (scheduled/start/end), sessions (start/end), payments (failure), and notes (ready). All admin endpoints functional (notifications/events, audit/logs, export/sessions, export/notes, ops/dashboard). Gateway API compiles without errors.
+- Phase 6 post-redeploy gate passed on 2026-04-28 after exporting `NotificationsService` from `NotificationsModule`: gateway startup stable, backend core smoke green, and notification event persistence visible from admin tooling.
 - Phase 6 is now the active priority: notification smoke gates, Render deployment of updated gateway service, staging validation of notification event persistence and admin endpoint coverage.
 - Phase 5 (AI triage/referral/drafting) is intentionally deferred until after Phase 6 completion.
 
