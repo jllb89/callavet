@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { DbService } from '../db/db.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import crypto from 'node:crypto';
 
 interface IncomingStripeEvent {
@@ -10,7 +11,10 @@ interface IncomingStripeEvent {
 
 @Injectable()
 export class InternalStripeService {
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly notifications: NotificationsService,
+  ) {}
 
   // Resolve plan (id + code) from Stripe price id using DB (no env vars)
   private async resolvePlanFromPrice(priceId?: string): Promise<{ id: string; code: string } | undefined> {
@@ -200,6 +204,30 @@ export class InternalStripeService {
     if (!subscriptionId) return { ok: true, ignored: 'invoice_no_subscription' };
     const status = succeeded ? 'active' : 'past_due';
     const res = await this.db.query<{ id: string }>(`UPDATE user_subscriptions SET status=$2, updated_at=now() WHERE stripe_subscription_id=$1 RETURNING id`, [subscriptionId, status]);
+    
+    // Fire-and-forget notification for payment failures
+    if (!succeeded && res.rows.length > 0) {
+      try {
+        const { rows: subRows } = await this.db.query<{ user_id: string }>(
+          `select user_id from user_subscriptions where id = $1`,
+          [res.rows[0].id]
+        );
+        if (subRows[0]?.user_id) {
+          this.notifications.sendEvent({
+            eventType: 'payment.failed',
+            userId: subRows[0].user_id,
+            channel: 'email',
+            variables: {
+              invoiceId: invoice.id,
+              subscriptionId: subscriptionId,
+            },
+          }).catch(e => console.error('[invoice.payment_failed] notification failed:', e));
+        }
+      } catch (e) {
+        // Swallow notification errors; do not block payment event processing
+      }
+    }
+    
     return { ok: true, updated: res.rows.length, statusApplied: status };
   }
 
@@ -368,9 +396,29 @@ export class InternalStripeService {
     const piId: string | undefined = pi.id;
     if (!piId) return { ok: true, ignored: 'no_payment_intent_id' };
     const res = await this.db.query(
-      `update overage_purchases set status='failed', updated_at=now() where stripe_payment_intent_id=$1 returning id`,
+      `update overage_purchases set status='failed', updated_at=now() where stripe_payment_intent_id=$1 returning id, user_id`,
       [piId]
     );
+    
+    // Fire-and-forget notification for payment failure
+    if (res.rows.length > 0) {
+      try {
+        const row = res.rows[0] as any;
+        if (row?.user_id) {
+          this.notifications.sendEvent({
+            eventType: 'payment.failed',
+            userId: row.user_id,
+            channel: 'email',
+            variables: {
+              paymentIntentId: piId,
+            },
+          }).catch(e => console.error('[payment_intent.failed] notification failed:', e));
+        }
+      } catch (e) {
+        // Swallow notification errors; do not block payment event processing
+      }
+    }
+    
     return { ok: true, failed: res.rows.length, payment_intent: piId };
   }
 

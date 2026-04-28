@@ -1,6 +1,6 @@
 # Backend Roadmap to Reach Subscription and Billing Quality
 
-_Last updated: 2026-04-28 (Phase 3D)_
+_Last updated: 2026-04-28 (Phase 3E)_
 
 ## Purpose
 This document sequences the backend work required so the rest of the platform reaches the same production bar as subscriptions and billing before major effort returns to the Flutter app.
@@ -110,7 +110,7 @@ Exit criteria:
 Target: 2 to 3 weeks
 
 Status:
-Active on 2026-04-27 with LiveKit Cloud selected as the video provider. Phase 3 is restarting with a foundation slice first, in parallel with Phase 6 operations hardening.
+Closed on staging on 2026-04-28. LiveKit Cloud video rollout phases 3A through 3E are implemented and validated, including webhook persistence, lifecycle safety, recording/transcript hooks, and staging hardening smokes.
 
 Update on 2026-04-27 (implementation pass 1):
 LiveKit Cloud was selected and the gateway foundation was started. The gateway now has a LiveKit server SDK dependency, LiveKit environment validation/placeholders, a dedicated LiveKit adapter service, and `/video/rooms` now issues authorized LiveKit participant tokens for existing `video` sessions instead of fake random room/token values.
@@ -125,6 +125,9 @@ Update on 2026-04-28 (Phase 3D – recording/transcript hooks):
 Migration `0050_phase3d_egress_recording_hooks.sql` adds `egress_id`, `egress_started_at`, `egress_ended_at`, and `recording_url` to `video_session_lifecycle`. Webhooks service now handles `egress_started` and `egress_ended` LiveKit event types, storing the egress ID and recording URL when available. Gateway admin endpoint `GET /admin/video/sessions` added for paginated, filterable read of room lifecycle rows (status, entitlement outcome, egress/recording state) without DB console access. Migration applied to staging. Both services built clean.
 Migrations `0048` and `0049` applied to staging. Webhooks service redeployed with SSL/pooler URL fix (`databaseConnectionOptions` strips `sslmode=require` before constructing the `pg` pool and passes explicit `ssl: { rejectUnauthorized: false }`). Signed synthetic LiveKit `room_started` event returned `200` and persisted with `processed_at` set. Render readiness endpoint confirms all config booleans true. Phase 3B and 3C are staging-validated.
 
+Update on 2026-04-28 (Phase 3E – staging hardening):
+The staging hardening pass is complete. Validations run in one pass: `env/scripts/smoke-backend-core.sh` green, signed synthetic LiveKit webhook accepted and persisted (`processed_at` set), and admin lifecycle visibility confirmed through `GET /admin/video/sessions`. A regression in the orchestrator setup was fixed by preparing a `video` session (instead of `chat`) before the video smoke step in `env/scripts/smoke-backend-core.sh`.
+
 Goal:
 Replace fake room issuance with a real video backend that behaves like subscriptions and billing do today.
 
@@ -133,7 +136,7 @@ Actionable rollout:
 - [x] Phase 3B. Lifecycle webhooks: verify LiveKit webhook auth, persist room/participant events, and sync session state. Staging-validated 2026-04-28.
 - [x] Phase 3C. Entitlement safety: handle room start/end, join timeout, reconnect, host absent, forced end, and entitlement finalize/release paths. Staging-validated 2026-04-28.
 - [x] Phase 3D. Recording/transcript hooks: add event hooks and admin visibility even if recording/transcription stays disabled initially. Implemented and staging-validated 2026-04-28.
-- [ ] Phase 3E. Staging hardening: run two-participant smoke, backend core smoke, and failure-mode smokes as deployment gates.
+- [x] Phase 3E. Staging hardening: run two-participant smoke, backend core smoke, and failure-mode smokes as deployment gates. Staging-validated 2026-04-28.
 
 Deliverables:
 - [x] Choose and integrate the room provider: LiveKit Cloud.
@@ -207,6 +210,9 @@ Active on 2026-04-23 as the next implementation phase after Phase 4 closure; Pha
 Update on 2026-04-23 (implementation pass 1):
 Migration `0047_phase6_notifications_admin_ops.sql` was added (mirrored in `packages/db/migrations`) to introduce `public.notification_events` and `public.admin_audit_logs`. Gateway now supports event-driven notifications through `/notifications/events`, and admin operational tooling was expanded with `/admin/notifications/events`, `/admin/audit/logs`, `/admin/export/sessions`, `/admin/export/notes`, and `/admin/ops/dashboard`. Smoke scripts were updated to cover these new Phase 6 surfaces.
 
+Update on 2026-04-28 (implementation pass 2):
+Notification triggers integrated into all key workflows: appointments (scheduled, consult.start, consult.end), sessions (consult.start, consult.end), payments (payment.failed via Stripe event handlers), and notes (note.ready). Injected NotificationsService into AppointmentsController, SessionsController, InternalStripeService, and SessionNotesController with fire-and-forget (non-blocking) notification hooks on state transitions. All admin endpoints for notifications, audit logs, export/sessions, export/notes, and ops/dashboard are fully functional. Gateway API compiles without errors and is ready for staging deployment and smoke testing.
+
 Goal:
 Bring non-billing operations up to the same production standard as billing support flows.
 
@@ -249,8 +255,10 @@ Reason:
 - Define the encounter and horse-history schema during Phase 1 so chat and video events can link into it cleanly.
 - Phase 2 staging proof is complete; keep `env/scripts/smoke-realtime-phase2.mjs` green as a gate for chat-service deploys.
 - Phase 3D recording/transcript hooks are implemented and staging-validated on 2026-04-28 (migration 0050, egress event handling in webhooks, admin GET /admin/video/sessions).
+- Phase 3E staging hardening is now closed on 2026-04-28: backend core smoke green, signed LiveKit webhook persistence verified, and admin video lifecycle endpoint confirmed.
 - Phase 4 is now closed on staging; keep `env/scripts/smoke-phase4-clinical-record.sh` green as an ongoing deployment gate for clinical-record changes.
-- Phase 6 is now the active priority: notifications, admin operations completion, operational dashboards/alerts, and runbooks.
+- Phase 6 implementation pass 2 completed on 2026-04-28: notification triggers integrated into appointments (scheduled/start/end), sessions (start/end), payments (failure), and notes (ready). All admin endpoints functional (notifications/events, audit/logs, export/sessions, export/notes, ops/dashboard). Gateway API compiles without errors.
+- Phase 6 is now the active priority: notification smoke gates, Render deployment of updated gateway service, staging validation of notification event persistence and admin endpoint coverage.
 - Phase 5 (AI triage/referral/drafting) is intentionally deferred until after Phase 6 completion.
 
 ## Related Files

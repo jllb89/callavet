@@ -4,6 +4,7 @@ import { AuthGuard } from '../auth/auth.guard';
 import { RequestContext } from '../auth/request-context.service';
 import { ValidatorService } from '../config/validator.service';
 import { EnumService } from '../config/enum.service';
+import { NotificationsService } from '../notifications/notifications.service';
 
 function appointmentDurationMinutes(start: any, end: any): number {
   const startAt = new Date(start).getTime();
@@ -20,6 +21,7 @@ export class AppointmentsController {
     private readonly rc: RequestContext,
     private readonly validator: ValidatorService,
     private readonly enumService: EnumService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   @Get('appointments')
@@ -122,6 +124,21 @@ export class AppointmentsController {
         );
         return rows[0];
       });
+      // Fire-and-forget notification: appointment scheduled
+      try {
+        this.notifications.sendEvent({
+          eventType: 'appointment.scheduled',
+          userId: row?.user_id,
+          channel: 'email',
+          variables: {
+            appointmentId: row?.id,
+            vetId: row?.vet_id,
+            startsAt: row?.starts_at,
+          },
+        }).catch(e => console.error('[appointment.create] notification failed:', e));
+      } catch (e) {
+        // Swallow notification errors; do not block appointment creation
+      }
       return row;
     } catch (e: any) {
       if (e instanceof HttpException) throw e;
@@ -137,6 +154,17 @@ export class AppointmentsController {
     try {
       if (this.db.isStub) return { id, status: body.status || 'scheduled' } as any;
       const actorId = this.rc.requireUuidUserId();
+      
+      // Fetch old appointment status before transaction for notifications
+      const oldAppointmentData = await this.db.runInTx(async (q) => {
+        const { rows } = await q<{ status: string; user_id: string }>(
+          `select status, user_id from appointments where id = $1::uuid limit 1`,
+          [id]
+        );
+        return rows[0];
+      });
+      const oldStatus = oldAppointmentData?.status;
+      
       const row = await this.db.runInTx(async (q) => {
         const { rows: actorRows } = await q<{ role: string }>(
           `select role from users where id = $1::uuid limit 1`,
@@ -257,6 +285,37 @@ export class AppointmentsController {
         return rows[0];
       });
       if (!row) throw new HttpException('not_found', HttpStatus.NOT_FOUND);
+      // Fire-and-forget notifications for status transitions
+      const newStatus = row?.status;
+      try {
+        if (newStatus === 'active' && oldStatus !== 'active') {
+          // Consult starting
+          this.notifications.sendEvent({
+            eventType: 'consult.start',
+            userId: row?.user_id,
+            channel: 'email',
+            variables: {
+              appointmentId: row?.id,
+              sessionId: row?.session_id,
+              vetId: row?.vet_id,
+            },
+          }).catch(e => console.error('[appointment.patch:active] notification failed:', e));
+        } else if (['completed', 'canceled', 'no_show'].includes(newStatus || '') && !['completed', 'canceled', 'no_show'].includes(oldStatus || '')) {
+          // Consult ending
+          this.notifications.sendEvent({
+            eventType: 'consult.end',
+            userId: row?.user_id,
+            channel: 'email',
+            variables: {
+              appointmentId: row?.id,
+              sessionId: row?.session_id,
+              reason: newStatus,
+            },
+          }).catch(e => console.error('[appointment.patch:end] notification failed:', e));
+        }
+      } catch (e) {
+        // Swallow notification errors; do not block status update
+      }
       return row;
     } catch (e: any) {
       if (e instanceof HttpException) throw e;

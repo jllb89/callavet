@@ -85,7 +85,7 @@ if [[ -z "$PET_ID" ]]; then
 fi
 
 echo "[backend-core] Preparing session for notes/video smoke"
-start_resp=$(curl -sS -X POST "$GATEWAY_BASE/sessions/start" "${JSON_HEADER[@]}" -d '{"kind":"chat"}')
+start_resp=$(curl -sS -X POST "$GATEWAY_BASE/sessions/start" "${JSON_HEADER[@]}" -d '{"kind":"video"}')
 
 if command -v jq >/dev/null 2>&1; then
   SESSION_ID=$(echo "$start_resp" | jq -r '.sessionId // empty')

@@ -5,6 +5,7 @@ import { RequestContext } from '../auth/request-context.service';
 import { EndpointRateLimitGuard } from '../rate-limit/endpoint-rate-limit.guard';
 import { RateLimit } from '../rate-limit/rate-limit.decorator';
 import { ValidatorService } from '../config/validator.service';
+import { NotificationsService } from '../notifications/notifications.service';
 
 @Controller('sessions')
 @UseGuards(AuthGuard)
@@ -13,6 +14,7 @@ export class SessionsController {
     private readonly db: DbService,
     private readonly rc: RequestContext,
     private readonly validator: ValidatorService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   @Get()
@@ -73,7 +75,22 @@ export class SessionsController {
       if (this.db.isStub) return { id: sessionId, status: body.status } as any;
       const status = String(body.status).toLowerCase();
       const endNow = status === 'completed' || status === 'canceled';
+      
+      // Track old status before update
+      let oldStatus: string | null = null;
+      
       const row = await this.db.runInTx(async (q) => {
+        // Fetch old state first
+        const { rows: oldRows } = await q(
+          `select id, user_id, vet_id, pet_id, status, mode, started_at, ended_at
+             from chat_sessions
+            where id = $1
+              and (user_id = auth.uid() or vet_id = auth.uid())
+            limit 1`,
+          [sessionId]
+        );
+        oldStatus = oldRows[0]?.status || null;
+        
         const { rows } = await q(
           `update chat_sessions
               set status = $2,
@@ -87,6 +104,36 @@ export class SessionsController {
         return rows[0];
       });
       if (!row) throw new HttpException('not_found', HttpStatus.NOT_FOUND);
+      
+      // Fire-and-forget notifications for status transitions
+      try {
+        if (status === 'active' && oldStatus !== 'active') {
+          // Consult starting
+          this.notifications.sendEvent({
+            eventType: 'consult.start',
+            userId: row?.user_id,
+            channel: 'email',
+            variables: {
+              sessionId: row?.id,
+              mode: row?.mode,
+            },
+          }).catch(e => console.error('[session.patch:active] notification failed:', e));
+        } else if (['completed', 'canceled'].includes(status) && !['completed', 'canceled'].includes(oldStatus || '')) {
+          // Consult ending
+          this.notifications.sendEvent({
+            eventType: 'consult.end',
+            userId: row?.user_id,
+            channel: 'email',
+            variables: {
+              sessionId: row?.id,
+              reason: status,
+            },
+          }).catch(e => console.error('[session.patch:end] notification failed:', e));
+        }
+      } catch (e) {
+        // Swallow notification errors; do not block status update
+      }
+      
       return row;
     } catch (e: any) {
       if (e instanceof HttpException) throw e;

@@ -4,11 +4,16 @@ import { AuthGuard } from '../auth/auth.guard';
 import { RequestContext } from '../auth/request-context.service';
 import { EndpointRateLimitGuard } from '../rate-limit/endpoint-rate-limit.guard';
 import { RateLimit } from '../rate-limit/rate-limit.decorator';
+import { NotificationsService } from '../notifications/notifications.service';
 
 @UseGuards(AuthGuard)
 @Controller('sessions')
 export class SessionNotesController {
-  constructor(private readonly db: DbService, private readonly rc: RequestContext) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly rc: RequestContext,
+    private readonly notifications: NotificationsService,
+  ) {}
 
   @Get(':sessionId/notes')
   async listSessionNotes(@Param('sessionId') sessionId: string) {
@@ -156,6 +161,31 @@ export class SessionNotesController {
         }
         return rows[0];
       });
+      
+      // Fire-and-forget notification: note ready for pet owner
+      if (row && pet_id) {
+        try {
+          const { rows: petRows } = await this.db.query<{ user_id: string }>(
+            `select user_id from pets where id = $1 limit 1`,
+            [pet_id]
+          );
+          if (petRows[0]?.user_id) {
+            this.notifications.sendEvent({
+              eventType: 'note.ready',
+              userId: petRows[0].user_id,
+              channel: 'email',
+              variables: {
+                noteId: (row as any)?.id,
+                sessionId: sessionId,
+                petId: pet_id,
+              },
+            }).catch(e => console.error('[note.ready] notification failed:', e));
+          }
+        } catch (e) {
+          // Swallow notification errors; do not block note creation
+        }
+      }
+      
       return row;
     } catch (e: any) {
       const msg = e?.message || String(e);
