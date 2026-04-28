@@ -71,7 +71,9 @@ function safePayload(event: any) {
 }
 
 function extractLiveKitFields(event: any) {
-  const room = event?.room || {};
+  // Egress events surface room info under egressInfo rather than room
+  const egress = event?.egressInfo || null;
+  const room = event?.room || (egress ? { name: egress.roomName, sid: egress.roomId } : {});
   const participant = event?.participant || {};
   const roomName = String(room.name || "").trim() || null;
   const metadata = parseJsonObject(room.metadata);
@@ -90,7 +92,18 @@ function extractLiveKitFields(event: any) {
     sessionId,
     participantIdentity: String(participant.identity || "").trim() || null,
     participantSid: String(participant.sid || "").trim() || null,
+    egressId: egress ? (String(egress.egressId || "").trim() || null) : null,
+    recordingUrl: egress ? extractRecordingUrl(egress) : null,
   };
+}
+
+function extractRecordingUrl(egressInfo: any): string | null {
+  // Prefer direct_file_output result, then file_results array
+  const fileResults: any[] = Array.isArray(egressInfo?.fileResults) ? egressInfo.fileResults : [];
+  const first = fileResults.find((f: any) => f?.filename || f?.location);
+  if (first?.location) return String(first.location);
+  if (first?.filename) return String(first.filename);
+  return null;
 }
 
 type LiveKitFields = ReturnType<typeof extractLiveKitFields>;
@@ -111,6 +124,10 @@ type VideoLifecycleState = {
   entitlement_finalized_at: string | null;
   entitlement_released_at: string | null;
   safety_reason: string | null;
+  egress_id: string | null;
+  egress_started_at: string | null;
+  egress_ended_at: string | null;
+  recording_url: string | null;
   consumption_id: string | null;
   consumption_finalized: boolean | null;
   consumption_canceled_at: string | null;
@@ -201,6 +218,10 @@ async function getVideoLifecycleState(client: PoolClient, sessionId: string) {
             v.entitlement_finalized_at::text,
             v.entitlement_released_at::text,
             v.safety_reason,
+            v.egress_id,
+            v.egress_started_at::text,
+            v.egress_ended_at::text,
+            v.recording_url,
             ec.id as consumption_id,
             ec.finalized as consumption_finalized,
             ec.canceled_at::text as consumption_canceled_at
@@ -216,6 +237,7 @@ async function getVideoLifecycleState(client: PoolClient, sessionId: string) {
        ) ec on true
       where v.session_id = $1::uuid
       limit 1`,
+    // NOTE: egress_id, egress_started_at, egress_ended_at, recording_url added by 0050
     [sessionId]
   );
   return rows[0] || null;
@@ -429,6 +451,10 @@ async function reconcileStaleVideoSessions(limit: number, timeoutMinutes: number
               v.entitlement_finalized_at::text,
               v.entitlement_released_at::text,
               v.safety_reason,
+              v.egress_id,
+              v.egress_started_at::text,
+              v.egress_ended_at::text,
+              v.recording_url,
               ec.id as consumption_id,
               ec.finalized as consumption_finalized,
               ec.canceled_at::text as consumption_canceled_at
@@ -515,6 +541,30 @@ async function syncLiveKitSessionState(fields: LiveKitFields) {
           [fields.sessionId]
         );
       }
+    }
+
+    if (fields.eventType === "egress_started" && fields.egressId) {
+      await client.query(
+        `update video_session_lifecycle
+            set egress_id = coalesce(egress_id, $2),
+                egress_started_at = coalesce(egress_started_at, now()),
+                updated_at = now()
+          where session_id = $1::uuid`,
+        [fields.sessionId, fields.egressId]
+      );
+      console.log("[livekit-webhook] egress_started", fields.sessionId, fields.egressId);
+    }
+
+    if (fields.eventType === "egress_ended") {
+      await client.query(
+        `update video_session_lifecycle
+            set egress_ended_at = coalesce(egress_ended_at, now()),
+                recording_url = coalesce($3, recording_url),
+                updated_at = now()
+          where session_id = $1::uuid`,
+        [fields.sessionId, fields.egressId, fields.recordingUrl]
+      );
+      console.log("[livekit-webhook] egress_ended", fields.sessionId, fields.egressId, fields.recordingUrl ? "(has url)" : "(no url)");
     }
 
     if (fields.eventType === "room_finished") {

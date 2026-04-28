@@ -4,6 +4,7 @@ info:
   version: 0.1.0
   description: >
     Public+private HTTP API for Call-a-Vet. Auth via Supabase JWT (Bearer).
+    Primary login is Phone OTP (Supabase Auth: send code → verify code → session).
     RLS enforced at the DB layer. Idempotency on critical mutations via `Idempotency-Key`.
 
 servers:
@@ -38,6 +39,97 @@ tags:
   - name: Webhooks
   - name: AI (internal)
 
+components:
+  parameters:
+    sessionId:
+      in: path
+      name: sessionId
+      required: true
+      schema: { type: string, format: uuid }
+    petId:
+      in: path
+      name: petId
+      required: true
+      schema: { type: string, format: uuid }
+  schemas:
+    ApiOk:
+      type: object
+      properties:
+        ok: { type: boolean, enum: [true] }
+        reason: { type: string, nullable: true }
+    ApiError:
+      type: object
+      properties:
+        ok: { type: boolean, enum: [false] }
+        reason: { type: string }
+    ErrorReason:
+      type: string
+      description: Standardized error reasons for subscriptions/overage/session flows
+      enum:
+        - validation_error
+        - unauthenticated
+        - plan_not_found
+        - already_has_active_subscription
+        - no_active_subscription
+        - stripe_subscription_active_use_stripe_flow
+        - cannot_resume_not_canceled
+        - change_plan_same_plan
+        - code_required
+        - item_not_found
+        - no_purchase_or_credit_available
+        - checkout_failed
+        - cancel_failed
+        - resume_failed
+        - change_plan_failed
+        - usage_failed
+        - start_failed
+        - end_failed
+        - commit_failed
+        - release_failed
+    Session:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        vet_id: { type: string, format: uuid, nullable: true }
+        pet_id: { type: string, format: uuid, nullable: true }
+        status: { type: string, enum: [active, completed, canceled, pending_payment] }
+        mode: { type: string, enum: [chat, video] }
+        started_at: { type: string, format: date-time }
+        ended_at: { type: string, format: date-time, nullable: true }
+    SessionEndResponse:
+      type: object
+      properties:
+        ok: { type: boolean }
+        sessionId: { type: string, format: uuid }
+        ended: { type: boolean }
+    SessionStartResponse:
+      type: object
+      properties:
+        ok: { type: boolean }
+        sessionId: { type: string, format: uuid }
+        consumptionId: { type: string, format: uuid, nullable: true }
+        kind: { type: string, enum: [chat, video] }
+        overage: { type: boolean }
+        credit:
+          type: object
+          nullable: true
+          properties:
+            used: { type: boolean }
+            code: { type: string }
+            remaining: { type: integer }
+        payment:
+          type: object
+          nullable: true
+          properties:
+            url: { type: string, description: 'Stripe Checkout URL (one-off overage)'}
+            checkout_session_id: { type: string, description: 'Stripe Checkout Session id'}
+            status: { type: string, description: 'pending|paid|failed' }
+            type: { type: string, description: 'one_off' }
+            currency: { type: string }
+            amount: { type: integer, nullable: true }
+            reason: { type: string }
+
 paths:
 
   /health:
@@ -60,6 +152,196 @@ paths:
         "200":
           description: OK
           content: { application/json: { schema: { type: object, properties: { now: { type: string, format: date-time } } } } }
+
+  /auth/otp/send:
+    post:
+      tags: [Auth & Profile]
+      summary: Send OTP with server-side guardrails
+      description: |
+        Sends OTP through Supabase Auth after passing guardrails.
+        Current policy (staging/prod defaults):
+        - Cooldown: 60s between sends per destination
+        - Per destination window: 3 sends / 15 minutes
+        - Daily cap: SMS 6/day per phone, Email 12/day per email
+        - Per IP: 20 sends / 15 minutes, 150/day
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [channel]
+              properties:
+                channel:
+                  type: string
+                  enum: [sms, email]
+                phone:
+                  type: string
+                  description: E.164 phone number. Required when channel=sms.
+                  example: +525542850675
+                email:
+                  type: string
+                  format: email
+                  description: Required when channel=email.
+                  example: user@example.com
+                shouldCreateUser:
+                  type: boolean
+                  default: false
+      responses:
+        "200":
+          description: OTP accepted and sent downstream
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  cooldownSeconds: { type: integer, example: 60 }
+                  message: { type: string }
+        "400":
+          description: Invalid payload (channel, phone or email format)
+        "429":
+          description: Guardrail blocked request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: false }
+                  code:
+                    type: string
+                    enum:
+                      - cooldown_active
+                      - too_many_requests_window
+                      - daily_cap_reached
+                      - ip_rate_limited_window
+                      - ip_rate_limited_daily
+                      - otp_send_blocked
+                  message: { type: string }
+                  retryAfterSeconds: { type: integer, nullable: true }
+
+  /auth/otp/verify-lock:
+    post:
+      tags: [Auth & Profile]
+      summary: Check temporary verify lock before OTP verification
+      description: |
+        Enforces wrong-code lock policy.
+        Current policy: lock after 5 failed verify attempts within 15 minutes;
+        lock duration 15 minutes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [channel]
+              properties:
+                channel:
+                  type: string
+                  enum: [sms, email]
+                phone:
+                  type: string
+                  description: Required when channel=sms.
+                email:
+                  type: string
+                  format: email
+                  description: Required when channel=email.
+      responses:
+        "200":
+          description: Not locked; verification can proceed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+        "429":
+          description: Verify is temporarily locked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: false }
+                  code:
+                    type: string
+                    enum: [verify_locked, otp_verify_locked]
+                  message: { type: string }
+                  retryAfterSeconds: { type: integer, nullable: true }
+
+  /auth/otp/verify-attempt:
+    post:
+      tags: [Auth & Profile]
+      summary: Record OTP verification attempt outcome
+      description: Records successful/failed verify attempts for lockout logic and telemetry.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [channel, success]
+              properties:
+                channel:
+                  type: string
+                  enum: [sms, email]
+                phone:
+                  type: string
+                  description: Required when channel=sms.
+                email:
+                  type: string
+                  format: email
+                  description: Required when channel=email.
+                success:
+                  type: boolean
+      responses:
+        "200":
+          description: Attempt recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+
+  /auth/otp/email/confirm-request:
+    post:
+      tags: [Auth & Profile]
+      summary: Request authenticated email confirmation
+      description: |
+        Requests a Supabase confirmation email for the authenticated user by linking/updating
+        auth.users email. Intended for profile completion flows after user submits email.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+      responses:
+        "200":
+          description: Confirmation request accepted or already verified
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  message: { type: string }
+                  status:
+                    type: string
+                    enum: [confirmation_requested, already_verified]
+        "401":
+          description: Missing/invalid bearer authentication
+        "400":
+          description: Invalid email format
+        "4XX":
+          description: Supabase rejected update request (e.g., email already in use)
 
   /me:
     get:
@@ -86,7 +368,37 @@ paths:
       tags: [Auth & Profile]
       summary: Invalidate other sessions
       security: [{ bearerAuth: [] }]
-      responses: { "204": { description: No Content } }
+      responses:
+        "200":
+          description: Revocation summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  userId: { type: string, format: uuid }
+                  revoked: { type: integer, description: "Count of sessions soft-revoked" }
+                  stub: { type: boolean, description: "Present when running in stub mode" }
+
+  /me/security/logout-all-supabase:
+    post:
+      tags: [Auth & Profile]
+      summary: Global Supabase sign-out for current bearer (admin API)
+      description: Uses Supabase Admin API to revoke all sessions for the bearer token presented. Requires service role env vars.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Result of global sign-out attempt
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  mode: { type: string, description: "Operation mode (admin.signOut.global)" }
+                  reason: { type: string }
+                  error: { type: string }
+                  hint: { type: string }
 
   /me/billing-profile:
     get:
@@ -163,73 +475,44 @@ paths:
       requestBody: { $ref: "#/components/requestBodies/SignedUrl" }
       responses: { "200": { $ref: "#/components/responses/SignedUrl" } }
 
-  /vets:
+  /pets/{petId}/health-profile:
     get:
-      tags: [Vets]
-      summary: Public vet directory with filters
+      tags: [Pets, Notes & Care Plans]
+      summary: Get structured horse health profile
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/petId" } ]
+      responses: { "200": { $ref: "#/components/responses/PetHealthProfile" } }
+    put:
+      tags: [Pets, Notes & Care Plans]
+      summary: Upsert structured horse health profile
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/petId" } ]
+      requestBody: { $ref: "#/components/requestBodies/PetHealthProfileUpsert" }
+      responses: { "200": { $ref: "#/components/responses/PetHealthProfile" } }
+
+  /pets/{petId}/encounters:
+    get:
+      tags: [Notes & Care Plans]
+      summary: List encounter timeline for a pet
+      security: [{ bearerAuth: [] }]
       parameters:
+        - { $ref: "#/components/parameters/petId" }
         - in: query
-          name: country
-          schema:
-            type: string
-        - in: query
-          name: specialties
-          schema:
-            type: string
-        - in: query
-          name: languages
-          schema:
-            type: string
-      responses: { "200": { $ref: "#/components/responses/ListVets" } }
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200 }
+      responses: { "200": { $ref: "#/components/responses/ListEncounters" } }
 
-  /vets/{vetId}:
+  /encounters/{encounterId}:
     get:
-      tags: [Vets]
-      summary: Public vet profile
-      parameters: [ { $ref: "#/components/parameters/vetId" } ]
-      responses: { "200": { $ref: "#/components/responses/Vet" } }
-
-  /me/vet:
-    get:
-      tags: [Vets]
-      summary: Get my vet profile
+      tags: [Notes & Care Plans]
+      summary: Get full encounter timeline detail
       security: [{ bearerAuth: [] }]
-      responses: { "200": { $ref: "#/components/responses/Vet" } }
-    put:
-      tags: [Vets]
-      summary: Upsert my vet profile
-      security: [{ bearerAuth: [] }]
-      requestBody: { $ref: "#/components/requestBodies/VetUpsert" }
-      responses: { "200": { $ref: "#/components/responses/Vet" } }
-
-  /me/vet/availability:
-    get:
-      tags: [Vets, Appointments]
-      summary: List weekly slots
-      security: [{ bearerAuth: [] }]
-      responses: { "200": { $ref: "#/components/responses/VetAvailability" } }
-    put:
-      tags: [Vets, Appointments]
-      summary: Replace weekly template
-      security: [{ bearerAuth: [] }]
-      requestBody: { $ref: "#/components/requestBodies/VetAvailability" }
-      responses: { "200": { $ref: "#/components/responses/VetAvailability" } }
-
-  /me/vet/availability/overrides:
-    post:
-      tags: [Vets, Appointments]
-      summary: Add an availability override
-      security: [{ bearerAuth: [] }]
-      requestBody: { $ref: "#/components/requestBodies/VetOverride" }
-      responses: { "201": { $ref: "#/components/responses/VetOverride" } }
-
-  /me/vet/availability/overrides/{id}:
-    delete:
-      tags: [Vets, Appointments]
-      summary: Delete an availability override
-      security: [{ bearerAuth: [] }]
-      parameters: [ { in: path, name: id, required: true, schema: { type: string, format: uuid } } ]
-      responses: { "204": { description: No Content } }
+      parameters:
+        - in: path
+          name: encounterId
+          required: true
+          schema: { type: string, format: uuid }
+      responses: { "200": { $ref: "#/components/responses/EncounterDetail" } }
 
   /centers/near:
     get:
@@ -247,7 +530,7 @@ paths:
           schema:
             type: number
         - in: query
-          name: radius
+          name: radiusKm
           schema:
             type: number
             default: 10
@@ -273,12 +556,73 @@ paths:
       security: [{ bearerAuth: [] }]
       responses: { "200": { $ref: "#/components/responses/ListSubscriptions" } }
 
+  /subscriptions/recommendation:
+    get:
+      tags: [Plans & Subscriptions]
+      summary: Server-side recommended plan for the current user
+      description: |
+        Returns a recommended plan code computed on the server.
+        Strategy:
+        - If `horses` query param is provided, chooses the smallest active plan
+          whose `pets_included_default` covers that amount.
+        - Otherwise falls back to user `customer_type` mapping.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: horses
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+          description: Target number of horses to cover.
+      responses:
+        "200":
+          description: Recommendation resolved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  recommendedCode:
+                    type: string
+                    nullable: true
+                    description: Lowercased subscription plan code.
+                  strategy:
+                    type: string
+                    enum: [horses_target, customer_type, fallback_first_active_plan, stub]
+                  horsesTarget:
+                    type: integer
+                    nullable: true
+                  customerType:
+                    type: string
+                    nullable: true
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
+
   /subscriptions/usage/current:
     get:
       tags: [Plans & Subscriptions]
       summary: Current-period usage snapshot
       security: [{ bearerAuth: [] }]
-      responses: { "200": { $ref: "#/components/responses/Usage" } }
+      responses:
+        "200": { $ref: "#/components/responses/Usage" }
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
 
   /subscriptions/checkout:
     post:
@@ -286,28 +630,68 @@ paths:
       summary: Start Stripe Checkout for a plan
       security: [{ bearerAuth: [] }]
       requestBody: { $ref: "#/components/requestBodies/Checkout" }
-      responses: { "200": { $ref: "#/components/responses/StripeCheckout" } }
+      responses:
+        "200": { $ref: "#/components/responses/StripeCheckout" }
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
 
   /subscriptions/portal:
     post:
       tags: [Plans & Subscriptions]
       summary: Create Stripe Billing Portal session
       security: [{ bearerAuth: [] }]
-      responses: { "200": { $ref: "#/components/responses/StripePortal" } }
+      responses:
+        "200": { $ref: "#/components/responses/StripePortal" }
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
 
   /subscriptions/cancel:
     post:
       tags: [Plans & Subscriptions]
       summary: Cancel at period end
       security: [{ bearerAuth: [] }]
-      responses: { "200": { $ref: "#/components/responses/Subscription" } }
+      responses:
+        "200": { $ref: "#/components/responses/Subscription" }
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
 
   /subscriptions/resume:
     post:
       tags: [Plans & Subscriptions]
       summary: Resume subscription
       security: [{ bearerAuth: [] }]
-      responses: { "200": { $ref: "#/components/responses/Subscription" } }
+      responses:
+        "200": { $ref: "#/components/responses/Subscription" }
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
 
   /subscriptions/change-plan:
     post:
@@ -315,7 +699,516 @@ paths:
       summary: Change plan (prorated)
       security: [{ bearerAuth: [] }]
       requestBody: { $ref: "#/components/requestBodies/ChangePlan" }
-      responses: { "200": { $ref: "#/components/responses/Subscription" } }
+      responses:
+        "200": { $ref: "#/components/responses/Subscription" }
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
+
+  /subscriptions/activate-plan:
+    post:
+      tags: [Plans & Subscriptions]
+      summary: Activate or switch plan server-side (internal flow)
+      description: |
+        Activates a plan directly in server/database without external checkout.
+        Intended for controlled internal or transitional flows.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code:
+                  type: string
+                  description: Plan code to activate.
+                seats:
+                  type: integer
+                  minimum: 1
+                  description: Optional pets/horse seats override.
+      responses:
+        "200":
+          description: Plan activated or switched
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  action: { type: string, enum: [activate-plan] }
+                  mode: { type: string, enum: [inserted, updated] }
+                  subscription: { type: object, additionalProperties: true }
+                  plan: { type: object, additionalProperties: true }
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
+
+  /subscriptions/stripe/checkout:
+    post:
+      tags: [Plans & Subscriptions]
+      summary: Create Stripe Checkout Session for a plan
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                plan_code: { type: string }
+                success_url: { type: string }
+                cancel_url: { type: string }
+      responses:
+        "200":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+
+  /subscriptions/apple/verify:
+    post:
+      tags: [Plans & Subscriptions]
+      summary: Verify Apple subscription transaction and upsert subscription state
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/AppleSubscriptionVerify" }
+      responses:
+        "200":
+          description: Verification accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  provider: { type: string, enum: [apple] }
+                  environment: { type: string, enum: [sandbox, production] }
+                  validation: { type: string }
+                  event_id: { type: string }
+                  mapped_plan_code: { type: string, nullable: true }
+                  provider_subscription_id: { type: string }
+                  result: { type: object, additionalProperties: true }
+
+      /subscriptions/admin/overage/purchases:
+        get:
+          tags: [Plans & Subscriptions, Admin]
+          summary: List overage purchases (admin)
+          security: [{ bearerAuth: [] }, { adminSecret: [] }]
+          responses:
+            "200":
+              description: Purchases list
+              content:
+                application/json:
+                  examples:
+                    sample:
+                      value:
+                        ok: true
+                        purchases:
+                          - id: "a86c8a43-07cc-44c1-9c32-2f5c9d277d0b"
+                            code: "chat_unit"
+                            status: "paid"
+                            quantity: 1
+                            amount_cents_total: 500
+                            currency: "usd"
+                            original_session_id: "b1c2-..."
+            "403":
+              description: Admin forbidden
+              content:
+                application/json:
+                  schema: { $ref: "#/components/schemas/ApiError" }
+                  examples: { forbidden: { value: { ok: false, reason: "admin_forbidden" } } }
+
+      /subscriptions/admin/overage/consumptions:
+        get:
+          tags: [Plans & Subscriptions, Admin]
+          summary: List overage/credit consumptions (admin)
+          security: [{ bearerAuth: [] }, { adminSecret: [] }]
+          responses:
+            "200":
+              description: Consumptions list
+              content:
+                application/json:
+                  examples:
+                    sample:
+                      value:
+                        ok: true
+                        consumptions:
+                          - id: "c5..."
+                            source: "credit"
+                            overage_purchase_id: null
+                            created_at: "2025-11-26T12:00:00Z"
+                          - id: "d6..."
+                            source: "overage"
+                            overage_purchase_id: "a86c8a43-07cc-44c1-9c32-2f5c9d277d0b"
+                            original_session_id: "b1c2..."
+            "403":
+              description: Admin forbidden
+              content:
+                application/json:
+                  schema: { $ref: "#/components/schemas/ApiError" }
+                  examples: { forbidden: { value: { ok: false, reason: "admin_forbidden" } } }
+
+      /subscriptions/admin/overage/mark-paid:
+        post:
+          tags: [Plans & Subscriptions, Admin]
+          summary: Mark purchase paid (admin)
+          security: [{ bearerAuth: [] }, { adminSecret: [] }]
+          requestBody:
+            required: true
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    purchase_id: { type: string, format: uuid }
+                    force_consume: { type: boolean }
+          responses:
+            "200":
+              description: Paid marked
+              content:
+                application/json:
+                  examples:
+                    sample:
+                      value:
+                        ok: true
+                        previous_status: "checkout_created"
+                        new_status: "paid"
+                        consumed: false
+            "400":
+              description: Error
+              content:
+                application/json:
+                  schema: { $ref: "#/components/schemas/ApiError" }
+                  examples:
+                    not_found: { value: { ok: false, reason: "purchase_not_found" } }
+                    invalid: { value: { ok: false, reason: "invalid_status_transition" } }
+
+      /subscriptions/admin/overage/mark-refunded:
+        post:
+          tags: [Plans & Subscriptions, Admin]
+          summary: Mark purchase refunded (admin)
+          security: [{ bearerAuth: [] }, { adminSecret: [] }]
+          requestBody:
+            required: true
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    purchase_id: { type: string, format: uuid }
+          responses:
+            "200":
+              description: Refunded marked
+              content:
+                application/json:
+                  examples:
+                    sample:
+                      value:
+                        ok: true
+                        previous_status: "paid"
+                        new_status: "refunded"
+                        credits_reversed: 1
+            "400":
+              description: Error
+              content:
+                application/json:
+                  schema: { $ref: "#/components/schemas/ApiError" }
+                  examples:
+                    not_found: { value: { ok: false, reason: "purchase_not_found" } }
+                    already_refunded: { value: { ok: false, reason: "already_refunded" } }
+
+      /subscriptions/admin/overage/adjust-credits:
+        post:
+          tags: [Plans & Subscriptions, Admin]
+          summary: Adjust credits (admin)
+          security: [{ bearerAuth: [] }, { adminSecret: [] }]
+          requestBody:
+            required: true
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    code: { type: string }
+                    delta: { type: integer }
+                    expires_at: { type: string, format: date-time, nullable: true }
+          responses:
+            "200":
+              description: Credits adjusted
+              content:
+                application/json:
+                  examples:
+                    sample:
+                      value:
+                        ok: true
+                        code: "chat_unit"
+                        delta: 1
+                        remaining: 3
+            "400":
+              description: Error
+              content:
+                application/json:
+                  schema: { $ref: "#/components/schemas/ApiError" }
+                  examples:
+                    invalid_code: { value: { ok: false, reason: "item_not_found" } }
+
+      /subscriptions/admin/overage/items:
+        get:
+          tags: [Plans & Subscriptions, Admin]
+          summary: List overage items (admin)
+          security: [{ bearerAuth: [] }, { adminSecret: [] }]
+          responses:
+            "200":
+              description: Items list
+              content:
+                application/json:
+                  examples:
+                    sample:
+                      value:
+                        ok: true
+                        items:
+                          - code: "chat_unit"
+                            name: "Chat Overage Unit"
+                            currency: "usd"
+                            amount_cents: 500
+                            is_active: true
+        post:
+          tags: [Plans & Subscriptions, Admin]
+          summary: Create/update overage item (admin)
+          security: [{ bearerAuth: [] }, { adminSecret: [] }]
+          requestBody:
+            required: true
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    code: { type: string }
+                    name: { type: string }
+                    description: { type: string }
+                    currency: { type: string }
+                    amount_cents: { type: integer }
+                    is_active: { type: boolean }
+                    metadata: { type: object }
+          responses:
+            "200":
+              description: Item upserted
+              content:
+                application/json:
+                  examples:
+                    sample:
+                      value:
+                        ok: true
+                        item:
+                          code: "chat_unit"
+                          name: "Chat Overage Unit"
+                          currency: "usd"
+                          amount_cents: 500
+                          is_active: true
+            "400":
+              description: Error
+              content:
+                application/json:
+                  schema: { $ref: "#/components/schemas/ApiError" }
+                  examples:
+                    invalid: { value: { ok: false, reason: "invalid_payload" } }
+                  session_id: { type: string }
+                  url: { type: string }
+                  plan_code: { type: string }
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
+
+  /subscriptions/overage/checkout:
+    post:
+      tags: [Plans & Subscriptions]
+      summary: Create Stripe Checkout Session for overage item
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                code: { type: string, description: Overage item code }
+                quantity: { type: integer, minimum: 1, default: 1 }
+                original_session_id: { type: string, format: uuid }
+                currency: { type: string }
+      responses:
+        "200":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  session_id: { type: string }
+                  url: { type: string }
+                  code: { type: string }
+                  quantity: { type: integer }
+                  currency: { type: string }
+              examples:
+                session_bound:
+                  value:
+                    ok: true
+                    session_id: "cs_test_..."
+                    url: "https://checkout.stripe.com/..."
+                    code: "chat_unit"
+                    quantity: 1
+                    currency: "usd"
+                units:
+                  value:
+                    ok: true
+                    session_id: "cs_test_..."
+                    url: "https://checkout.stripe.com/..."
+                    code: "chat_unit"
+                    quantity: 3
+                    currency: "usd"
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
+
+  /subscriptions/overage/items:
+    get:
+      tags: [Plans & Subscriptions]
+      summary: List active overage items
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        code: { type: string }
+                        name: { type: string }
+                        description: { type: string }
+                        currency: { type: string }
+                        amount_cents: { type: integer }
+                        is_active: { type: boolean }
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
+
+  /subscriptions/overage/credits:
+    get:
+      tags: [Plans & Subscriptions]
+      summary: List overage credits for current user
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  credits:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        code: { type: string }
+                        remaining_units: { type: integer }
+                        expires_at: { type: string, nullable: true }
+              examples:
+                sample:
+                  value:
+                    ok: true
+                    credits:
+                      - code: "chat_unit"
+                        remaining_units: 2
+                        expires_at: null
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
+
+  /subscriptions/overage/consume:
+    post:
+      tags: [Plans & Subscriptions]
+      summary: Manually consume a paid overage purchase or draw credit
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                code: { type: string }
+                original_session_id: { type: string, format: uuid }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  mode: { type: string, enum: [purchase, credit] }
+                  purchase_id: { type: string, format: uuid }
+                  consumption_id: { type: string, format: uuid }
+                  remaining_units: { type: integer }
+        "400":
+          description: Error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, default: false }
+                  reason: { $ref: "#/components/schemas/ErrorReason" }
 
   /entitlements/reserve:
     post:
@@ -358,6 +1251,123 @@ paths:
             type: string
       requestBody: { $ref: "#/components/requestBodies/EntitlementRelease" }
       responses: { "200": { $ref: "#/components/responses/Ok" } }
+
+  /sessions:
+    get:
+      tags: [Sessions]
+      summary: List sessions for user or vet
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string, format: uuid }
+                        user_id: { type: string, format: uuid }
+                        vet_id: { type: string, format: uuid, nullable: true }
+                        pet_id: { type: string, format: uuid, nullable: true }
+                        status: { type: string }
+                        mode: { type: string, enum: [chat, video] }
+                        started_at: { type: string }
+                        ended_at: { type: string, nullable: true }
+
+  /sessions/{sessionId}:
+    get:
+      tags: [Sessions]
+      summary: Get session by id
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: sessionId
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+    patch:
+      tags: [Sessions]
+      summary: Update session status
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: sessionId
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: string, enum: [active, completed, canceled, pending_payment] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+
+  /sessions/start:
+    post:
+      tags: [Sessions]
+      summary: Start a chat or video session
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                type: { type: string, enum: [chat, video] }
+                kind: { type: string, enum: [chat, video] }
+                sessionId: { type: string, format: uuid }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionStartResponse" }
+
+  /sessions/end:
+    post:
+      tags: [Sessions]
+      summary: End a session and optionally commit consumption
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sessionId: { type: string, format: uuid }
+                consumptionId: { type: string, format: uuid, nullable: true }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionEndResponse" }
 
   /payments:
     get:
@@ -409,7 +1419,7 @@ paths:
           schema:
             type: string
       requestBody: { $ref: "#/components/requestBodies/StartSession" }
-      responses: { "200": { $ref: "#/components/responses/SessionStart" } }
+      responses: { "201": { $ref: "#/components/responses/SessionStart" } }
 
   /sessions/end:
     post:
@@ -452,7 +1462,28 @@ paths:
       tags: [Messages]
       summary: List messages in a session
       security: [{ bearerAuth: [] }]
-      parameters: [ { $ref: "#/components/parameters/sessionId" }, { $ref: "#/components/parameters/pagingLimit" }, { $ref: "#/components/parameters/pagingCursor" } ]
+      parameters:
+        - { $ref: "#/components/parameters/sessionId" }
+        - { $ref: "#/components/parameters/pagingLimit" }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+        - in: query
+          name: since
+          schema: { type: string, format: date-time }
+        - in: query
+          name: until
+          schema: { type: string, format: date-time }
+        - in: query
+          name: sort
+          schema:
+            type: string
+            enum: [created_at.asc, created_at.desc]
+            default: created_at.asc
+        - in: query
+          name: includeDeleted
+          schema: { type: boolean }
+          description: Admin-only; include soft-deleted messages
       responses: { "200": { $ref: "#/components/responses/ListMessages" } }
     post:
       tags: [Messages]
@@ -467,8 +1498,157 @@ paths:
       tags: [Messages]
       summary: Export transcript
       security: [{ bearerAuth: [] }]
-      parameters: [ { $ref: "#/components/parameters/sessionId" } ]
+      parameters:
+        - { $ref: "#/components/parameters/sessionId" }
+        - in: query
+          name: since
+          schema: { type: string, format: date-time }
+        - in: query
+          name: until
+          schema: { type: string, format: date-time }
+        - in: query
+          name: includeDeleted
+          schema: { type: boolean }
+          description: Admin-only; include soft-deleted messages
       responses: { "200": { $ref: "#/components/responses/Transcript" } }
+
+  /messages:
+    get:
+      tags: [Messages]
+      summary: List messages (global)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+        - in: query
+          name: sessionId
+          schema: { type: string, format: uuid }
+        - in: query
+          name: role
+          schema: { type: string, enum: [user, vet, ai] }
+        - in: query
+          name: senderId
+          schema: { type: string, format: uuid }
+        - in: query
+          name: since
+          schema: { type: string, format: date-time }
+        - in: query
+          name: until
+          schema: { type: string, format: date-time }
+        - in: query
+          name: sort
+          schema: { type: string, enum: [created_at.asc, created_at.desc], default: created_at.desc }
+        - in: query
+          name: includeDeleted
+          schema: { type: boolean }
+          description: Admin-only; include soft-deleted messages
+      responses:
+        "200":
+          description: Global messages list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  items: { type: array, items: { $ref: "#/components/schemas/Message" } }
+                  limit: { type: integer }
+                  offset: { type: integer }
+                  count: { type: integer }
+                  sort: { type: string }
+                  since: { type: string, format: date-time, nullable: true }
+                  until: { type: string, format: date-time, nullable: true }
+                  includeDeleted: { type: boolean }
+
+  /messages/transcripts:
+    get:
+      tags: [Messages]
+      summary: Global transcripts (recent sessions)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: sessionsLimit
+          schema: { type: integer, minimum: 1, maximum: 50, default: 10 }
+        - in: query
+          name: perLimit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+        - in: query
+          name: since
+          schema: { type: string, format: date-time }
+        - in: query
+          name: until
+          schema: { type: string, format: date-time }
+        - in: query
+          name: includeDeleted
+          schema: { type: boolean }
+          description: Admin-only; include soft-deleted messages
+      responses:
+        "200":
+          description: Global transcripts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  sessions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        session_id: { type: string, format: uuid }
+                        items: { type: array, items: { $ref: "#/components/schemas/Message" } }
+                  sessionsLimit: { type: integer }
+                  perLimit: { type: integer }
+                  since: { type: string, format: date-time, nullable: true }
+                  until: { type: string, format: date-time, nullable: true }
+                  includeDeleted: { type: boolean }
+
+  /messages/{id}:
+    get:
+      tags: [Messages]
+      summary: Message detail
+      security: [{ bearerAuth: [] }]
+      parameters: [ { in: path, name: id, required: true, schema: { type: string, format: uuid } } ]
+      responses: { "200": { $ref: "#/components/schemas/Message" } }
+    patch:
+      tags: [Messages]
+      summary: Redact message
+      security: [{ bearerAuth: [] }]
+      parameters: [ { in: path, name: id, required: true, schema: { type: string, format: uuid } } ]
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { reason: { type: string, maxLength: 500 } } }
+      responses:
+        "200":
+          description: Redacted message
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  message: { $ref: "#/components/schemas/Message" }
+    delete:
+      tags: [Messages]
+      summary: Soft delete message
+      security: [{ bearerAuth: [] }]
+      parameters: [ { in: path, name: id, required: true, schema: { type: string, format: uuid } } ]
+      responses:
+        "200":
+          description: Soft-deleted message
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  message: { $ref: "#/components/schemas/Message" }
 
   /video/rooms:
     post:
@@ -491,10 +1671,16 @@ paths:
   /sessions/{sessionId}/notes:
     get:
       tags: [Notes & Care Plans]
-      summary: Get vet notes for a session
+      summary: Get consultation notes for a session
+      description: |
+        Returns `{ data: [...] }` of notes.
+        Access:
+        - Owners: notes where the session's pet belongs to the user.
+        - Vets: notes they authored, and all notes for sessions where they are the assigned vet.
+        - Admins: all notes.
       security: [{ bearerAuth: [] }]
       parameters: [ { $ref: "#/components/parameters/sessionId" } ]
-      responses: { "200": { $ref: "#/components/responses/Notes" } }
+      responses: { "200": { $ref: "#/components/responses/ListNotes" } }
     post:
       tags: [Notes & Care Plans]
       summary: Upsert vet notes (SOAP/summary)
@@ -565,6 +1751,132 @@ paths:
       parameters: [ { in: path, name: id, required: true, schema: { type: string, format: uuid } } ]
       responses: { "200": { $ref: "#/components/responses/ImageCase" } }
 
+  /vets:
+    get:
+      tags: [Vets]
+      summary: List vets
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: specialtyId
+          schema: { type: string, format: uuid }
+        - in: query
+          name: includeUnapproved
+          schema: { type: boolean }
+      responses: { "200": { $ref: "#/components/responses/ListVets" } }
+
+  /vets/specialties:
+    get:
+      tags: [Vets]
+      summary: List vet specialties
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/ListSpecialties" } }
+
+  /vets/me/profile:
+    get:
+      tags: [Vets]
+      summary: Get my vet profile
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/Vet" } }
+    patch:
+      tags: [Vets]
+      summary: Update my vet profile
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/VetProfilePatch" }
+      responses: { "200": { $ref: "#/components/responses/Vet" } }
+
+  /vets/me/status:
+    get:
+      tags: [Vets]
+      summary: Get my vet status
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/VetStatus" } }
+
+  /vets/me/availability:
+    get:
+      tags: [Vets]
+      summary: Get my availability template
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/VetAvailability" } }
+    put:
+      tags: [Vets]
+      summary: Replace my availability template
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/VetAvailabilityUpsert" }
+      responses: { "200": { $ref: "#/components/responses/VetAvailability" } }
+
+  /vets/me/queue:
+    get:
+      tags: [Vets]
+      summary: Get my vet operations queue
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/VetQueue" } }
+
+  /vets/referrals:
+    get:
+      tags: [Vets]
+      summary: List referrals scoped to the current actor
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: status
+          schema: { type: string, enum: [intake, assigned, accepted, completed, canceled] }
+      responses: { "200": { $ref: "#/components/responses/ListReferrals" } }
+    post:
+      tags: [Vets]
+      summary: Create referral intake
+      security: [{ bearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/VetReferralCreate" }
+      responses: { "201": { $ref: "#/components/responses/VetReferral" } }
+
+  /vets/referrals/{referralId}:
+    patch:
+      tags: [Vets]
+      summary: Assign or advance a referral
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: referralId
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody: { $ref: "#/components/requestBodies/VetReferralPatch" }
+      responses: { "200": { $ref: "#/components/responses/VetReferral" } }
+
+  /vets/{vetId}:
+    get:
+      tags: [Vets]
+      summary: Get vet detail
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/vetId" } ]
+      responses: { "200": { $ref: "#/components/responses/Vet" } }
+
+  /vets/{vetId}/approve:
+    post:
+      tags: [Vets]
+      summary: Approve a vet profile
+      security: [{ bearerAuth: [] }, { adminSecret: [] }]
+      parameters: [ { $ref: "#/components/parameters/vetId" } ]
+      responses: { "200": { $ref: "#/components/responses/Vet" } }
+
+  /vets/{vetId}/status:
+    get:
+      tags: [Vets]
+      summary: Get vet status rollup
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/vetId" } ]
+      responses: { "200": { $ref: "#/components/responses/VetStatus" } }
+
+  /vets/{vetId}/availability:
+    get:
+      tags: [Vets]
+      summary: Get a vet availability template
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/vetId" } ]
+      responses: { "200": { $ref: "#/components/responses/VetAvailability" } }
+
   /appointments:
     get:
       tags: [Appointments]
@@ -587,25 +1899,55 @@ paths:
       requestBody: { $ref: "#/components/requestBodies/AppointmentPatch" }
       responses: { "200": { $ref: "#/components/responses/Appointment" } }
 
+  /appointments/{id}/transitions:
+    post:
+      tags: [Appointments]
+      summary: Execute an explicit appointment transition
+      security: [{ bearerAuth: [] }]
+      parameters: [ { in: path, name: id, required: true, schema: { type: string, format: uuid } } ]
+      requestBody: { $ref: "#/components/requestBodies/AppointmentTransition" }
+      responses: { "200": { $ref: "#/components/responses/Appointment" } }
+
   /vets/{vetId}/availability/slots:
     get:
       tags: [Appointments]
       summary: Generated slots (template + overrides)
+      security: [{ bearerAuth: [] }]
       parameters:
         - { $ref: "#/components/parameters/vetId" }
         - in: query
-          name: from
-          required: true
+          name: since
           schema:
             type: string
             format: date-time
         - in: query
-          name: to
-          required: true
+          name: until
           schema:
             type: string
             format: date-time
+        - in: query
+          name: durationMin
+          schema:
+            type: integer
+            default: 30
       responses: { "200": { $ref: "#/components/responses/ListSlots" } }
+
+  /vets/{vetId}/ratings:
+    get:
+      tags: [Ratings]
+      summary: List ratings for a vet
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/vetId" } ]
+      responses: { "200": { $ref: "#/components/responses/ListRatings" } }
+
+  /sessions/{sessionId}/ratings:
+    post:
+      tags: [Ratings]
+      summary: Create or update the session owner's rating for the assigned vet
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/sessionId" } ]
+      requestBody: { $ref: "#/components/requestBodies/RatingCreate" }
+      responses: { "200": { $ref: "#/components/responses/Rating" } }
 
   /kb:
     get:
@@ -681,6 +2023,207 @@ paths:
                         snippet: { type: string }
                         metadata: { type: object, additionalProperties: true }
 
+  /vector/search:
+    get:
+      tags: [Knowledge Base & Search]
+      summary: Vector search (GET convenience)
+      description: "GET variant for quick testing in browsers. Accepts same semantics as POST but embedding passed via one of: embedding|e|query_embedding|vec."
+      parameters:
+        - in: query
+          name: target
+          required: true
+          schema: { type: string, enum: [kb, messages, notes, products, services, pets, vets] }
+        - in: query
+          name: topK
+          schema: { type: integer, default: 8, maximum: 50 }
+        - in: query
+          name: embedding
+          schema: { type: string, description: "JSON array string or comma-separated floats" }
+        - in: query
+          name: filter_ids
+          schema: { type: string, description: "JSON array string or comma-separated UUIDs" }
+      responses:
+        "200":
+          description: Nearest neighbors
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string, format: uuid }
+                        score: { type: number }
+                        snippet: { type: string }
+                        metadata: { type: object, additionalProperties: true }
+
+  /vector/debug:
+    get:
+      tags: [Knowledge Base & Search]
+      summary: Embedding debug stats (pets)
+      responses:
+        "200":
+          description: Counts of rows and embeddings presence
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pets: { type: integer }
+                  pets_with_emb: { type: integer }
+                  sample: { type: array, items: { type: object, properties: { id: { type: string }, has_embedding: { type: boolean } } } }
+
+  /vector/pets:
+    get:
+      tags: [Knowledge Base & Search]
+      summary: List recent pets with embedding flag
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50, minimum: 1, maximum: 200 }
+      responses:
+        "200":
+          description: Pet rows
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        has_embedding: { type: boolean }
+
+  /search:
+    get:
+      tags: [Knowledge Base & Search]
+      summary: Lexical KB search (bilingual)
+      description: Combines English + Spanish websearch queries; falls back to ILIKE pattern.
+      parameters:
+        - in: query
+          name: type
+          schema: { type: string, enum: [kb], default: kb }
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 10, maximum: 50 }
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { type: object, additionalProperties: true } }
+                  took_ms: { type: integer }
+                  lexical: { type: boolean }
+
+  /_db/status:
+    get:
+      tags: [System]
+      summary: Database connectivity + stub status
+      responses:
+        "200":
+          description: DB status snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /subscriptions/usage:
+    get:
+      tags: [Plans & Subscriptions]
+      summary: Current usage snapshot (legacy path)
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Usage or no active subscription
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  msg: { type: string }
+                  usage: { $ref: "#/components/schemas/Usage" }
+
+  /subscriptions/reserve-chat:
+    post:
+      tags: [Plans & Subscriptions]
+      summary: Reserve chat entitlement for existing session
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId: { type: string, format: uuid }
+                sessionId: { type: string, format: uuid }
+              required: [sessionId]
+      responses:
+        "200": { description: Reservation outcome, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+
+  /subscriptions/reserve-video:
+    post:
+      tags: [Plans & Subscriptions]
+      summary: Reserve video entitlement for existing session
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId: { type: string, format: uuid }
+                sessionId: { type: string, format: uuid }
+              required: [sessionId]
+      responses:
+        "200": { description: Reservation outcome, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+
+  /subscriptions/commit:
+    post:
+      tags: [Plans & Subscriptions]
+      summary: Commit (finalize) entitlement consumption
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                consumptionId: { type: string, format: uuid }
+              required: [consumptionId]
+      responses:
+        "200": { description: Commit result, content: { application/json: { schema: { type: object, properties: { ok: { type: boolean } } } } } }
+
+  /subscriptions/release:
+    post:
+      tags: [Plans & Subscriptions]
+      summary: Release (rollback) entitlement reservation
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                consumptionId: { type: string, format: uuid }
+              required: [consumptionId]
+      responses:
+        "200": { description: Release result, content: { application/json: { schema: { type: object, properties: { ok: { type: boolean } } } } } }
+
   /vector/upsert:
     post:
       tags: [Knowledge Base & Search]
@@ -714,22 +2257,6 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Ok" }
 
-  /sessions/{sessionId}/ratings:
-    post:
-      tags: [Ratings]
-      summary: Rate a session
-      security: [{ bearerAuth: [] }]
-      parameters: [ { $ref: "#/components/parameters/sessionId" } ]
-      requestBody: { $ref: "#/components/requestBodies/RatingCreate" }
-      responses: { "201": { $ref: "#/components/responses/Rating" } }
-
-  /vets/{vetId}/ratings:
-    get:
-      tags: [Ratings]
-      summary: Public aggregate ratings
-      parameters: [ { $ref: "#/components/parameters/vetId" } ]
-      responses: { "200": { $ref: "#/components/responses/ListRatings" } }
-
   /notifications/test:
     post:
       tags: [Notifications]
@@ -738,13 +2265,111 @@ paths:
       requestBody: { $ref: "#/components/requestBodies/NotifyTest" }
       responses: { "200": { $ref: "#/components/responses/Ok" } }
 
-  /files/signed-url:
+  /notifications/send:
+    post:
+      tags: [Notifications]
+      summary: Send an email via SendGrid
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                to: { type: string, format: email }
+                subject: { type: string, description: Required if no templateId }
+                text: { type: string }
+                html: { type: string }
+                replyTo: { type: string, format: email }
+                templateId: { type: string }
+                dynamicTemplateData: { type: object, additionalProperties: true }
+                categories: { type: array, items: { type: string } }
+                asmGroupId: { type: integer }
+                sandbox: { type: boolean, description: Enable SendGrid sandbox mode }
+              required: [to]
+      responses:
+        "200":
+          description: Result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  id: { type: string, nullable: true }
+                  statusCode: { type: integer }
+                  sandbox: { type: boolean }
+
+  /notifications/events:
+    post:
+      tags: [Notifications]
+      summary: Enqueue or send a notification event
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [eventType]
+              properties:
+                eventType: { type: string, example: note.ready }
+                userId: { type: string, format: uuid }
+                channel: { type: string, enum: [email, sms, whatsapp, push, system], default: email }
+                to: { type: string, description: Destination (email/phone/token depending on channel) }
+                templateId: { type: string }
+                variables: { type: object, additionalProperties: true }
+                subject: { type: string }
+                message: { type: string }
+                sandbox: { type: boolean }
+      responses:
+        "200":
+          description: Event status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  id: { type: string, format: uuid }
+                  status: { type: string, enum: [queued, sent, failed] }
+                  channel: { type: string }
+                  provider: { type: string, nullable: true }
+                  providerId: { type: string, nullable: true }
+                  reason: { type: string, nullable: true }
+
+  /files/upload:
     post:
       tags: [Files]
-      summary: Generic signed upload URL
+      summary: Server-side upload to storage
       security: [{ bearerAuth: [] }]
-      requestBody: { $ref: "#/components/requestBodies/SignedUrl" }
-      responses: { "200": { $ref: "#/components/responses/SignedUrl" } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                path: { type: string }
+                content: { type: string, description: base64 or data URL }
+                contentType: { type: string }
+                petId: { type: string, format: uuid }
+                sessionId: { type: string, format: uuid }
+                labels: { type: array, items: { type: string } }
+                findings: { type: string }
+                diagnosis_label: { type: string }
+              required: [path, content]
+      responses:
+        "200":
+          description: Upload result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  path: { type: string }
+                  contentType: { type: string }
 
   /files/download-url:
     get:
@@ -784,10 +2409,22 @@ paths:
   /admin/credits/grant:
     post:
       tags: [Admin]
-      summary: Grant comp credits/entitlements
+      summary: Grant or revoke overage credits
       security: [{ bearerAuth: [] }]
       requestBody: { $ref: "#/components/requestBodies/GrantCredits" }
-      responses: { "200": { $ref: "#/components/responses/Ok" } }
+      responses:
+        "200":
+          description: Credits adjusted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  userId: { type: string, format: uuid }
+                  code: { type: string }
+                  delta: { type: integer }
+                  remaining: { type: integer }
 
   /admin/refunds:
     post:
@@ -813,23 +2450,257 @@ paths:
       requestBody: { $ref: "#/components/requestBodies/PlanUpsert" }
       responses: { "200": { $ref: "#/components/responses/Plan" } }
 
-  /admin/coupons:
-    post:
-      tags: [Admin]
-      summary: Create coupon (optional)
-      security: [{ bearerAuth: [] }]
-      requestBody:
-        content:
-          application/json:
-            schema: { type: object, properties: { code: { type: string }, percent_off: { type: number } }, required: [code] }
-      responses: { "201": { $ref: "#/components/responses/Ok" } }
-
   /admin/analytics/usage:
     get:
       tags: [Admin]
       summary: Usage analytics
       security: [{ bearerAuth: [] }]
-      responses: { "200": { $ref: "#/components/responses/Ok" } }
+      responses:
+        "200":
+          description: Usage analytics snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  generatedAt: { type: string, format: date-time }
+                  metrics:
+                    type: object
+                    properties:
+                      users: { type: integer }
+                      activeSubscriptions: { type: integer }
+                      sessionsThisMonth: { type: integer }
+
+  /admin/notifications/events:
+    get:
+      tags: [Admin]
+      summary: List notification delivery events
+      security: [{ bearerAuth: [] }, { adminSecret: [] }]
+      parameters:
+        - in: query
+          name: status
+          schema: { type: string, enum: [queued, sent, failed, skipped] }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: Notification events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string, format: uuid }
+                        user_id: { type: string, format: uuid, nullable: true }
+                        event_type: { type: string }
+                        channel: { type: string }
+                        destination: { type: string, nullable: true }
+                        status: { type: string }
+                        provider: { type: string, nullable: true }
+                        provider_message_id: { type: string, nullable: true }
+                        error_text: { type: string, nullable: true }
+                        created_at: { type: string, format: date-time }
+                        sent_at: { type: string, format: date-time, nullable: true }
+
+  /admin/audit/logs:
+    get:
+      tags: [Admin]
+      summary: List admin audit logs
+      security: [{ bearerAuth: [] }, { adminSecret: [] }]
+      parameters:
+        - in: query
+          name: action
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: Admin audit logs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string, format: uuid }
+                        actor_user_id: { type: string, format: uuid, nullable: true }
+                        action: { type: string }
+                        target_type: { type: string, nullable: true }
+                        target_id: { type: string, nullable: true }
+                        metadata: { type: object, additionalProperties: true }
+                        created_at: { type: string, format: date-time }
+
+  /admin/export/sessions:
+    get:
+      tags: [Admin]
+      summary: Export session operational dataset
+      security: [{ bearerAuth: [] }, { adminSecret: [] }]
+      parameters:
+        - in: query
+          name: from
+          schema: { type: string, format: date-time }
+        - in: query
+          name: to
+          schema: { type: string, format: date-time }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 5000, default: 1000 }
+      responses:
+        "200":
+          description: Session export result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  exportedAt: { type: string, format: date-time }
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+
+  /admin/export/notes:
+    get:
+      tags: [Admin]
+      summary: Export notes operational dataset
+      security: [{ bearerAuth: [] }, { adminSecret: [] }]
+      parameters:
+        - in: query
+          name: from
+          schema: { type: string, format: date-time }
+        - in: query
+          name: to
+          schema: { type: string, format: date-time }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 5000, default: 1000 }
+      responses:
+        "200":
+          description: Notes export result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  exportedAt: { type: string, format: date-time }
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+
+  /admin/video/sessions:
+    get:
+      tags: [Admin]
+      summary: List video session lifecycle records
+      description: Paginated read of video_session_lifecycle rows. Shows room status, entitlement outcome, egress/recording state, and safety reason. Useful for support diagnosis without DB console access.
+      security: [{ bearerAuth: [] }, { adminSecret: [] }]
+      parameters:
+        - in: header
+          name: x-admin-secret
+          required: true
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [pending, waiting, live, ended, released, timed_out, host_absent, forced_ended]
+      responses:
+        "200":
+          description: Video session lifecycle list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  count: { type: integer }
+                  limit: { type: integer }
+                  offset: { type: integer }
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        session_id: { type: string, format: uuid }
+                        room_name: { type: string, nullable: true }
+                        room_sid: { type: string, nullable: true }
+                        status: { type: string }
+                        first_room_started_at: { type: string, format: date-time, nullable: true }
+                        first_both_joined_at: { type: string, format: date-time, nullable: true }
+                        room_finished_at: { type: string, format: date-time, nullable: true }
+                        entitlement_finalized_at: { type: string, format: date-time, nullable: true }
+                        entitlement_released_at: { type: string, format: date-time, nullable: true }
+                        safety_reason: { type: string, nullable: true }
+                        egress_id: { type: string, nullable: true }
+                        egress_started_at: { type: string, format: date-time, nullable: true }
+                        egress_ended_at: { type: string, format: date-time, nullable: true }
+                        recording_url: { type: string, nullable: true }
+                        created_at: { type: string, format: date-time }
+                        updated_at: { type: string, format: date-time }
+        "403":
+          description: Invalid admin secret
+
+  /admin/ops/dashboard:
+    get:
+      tags: [Admin]
+      summary: Ops metrics and alerts snapshot
+      security: [{ bearerAuth: [] }, { adminSecret: [] }]
+      responses:
+        "200":
+          description: Dashboard metrics and alert state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  generatedAt: { type: string, format: date-time }
+                  metrics:
+                    type: object
+                    properties:
+                      sessions24h: { type: integer }
+                      messages24h: { type: integer }
+                      notifications24h: { type: integer }
+                      failedNotifications24h: { type: integer }
+                      pendingNotifications: { type: integer }
+                      refunds24h: { type: integer }
+                  alerts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        key: { type: string }
+                        severity: { type: string, enum: [ok, warning, critical] }
+                        value: { type: integer }
+                        threshold: { type: integer }
 
   /webhooks/stripe:
     post:
@@ -847,6 +2718,13 @@ paths:
       summary: Normalize Stripe event into DB (internal)
       security: [{ bearerAuth: [] }]
       requestBody: { $ref: "#/components/requestBodies/StripeIngest" }
+      responses: { "200": { $ref: "#/components/responses/Ok" } }
+
+  /internal/apple/event:
+    post:
+      tags: [Webhooks]
+      summary: Ingest Apple server notification payload (internal)
+      requestBody: { $ref: "#/components/requestBodies/AppleEventIngest" }
       responses: { "200": { $ref: "#/components/responses/Ok" } }
 
   /internal/embeddings/backfill:
@@ -873,6 +2751,10 @@ paths:
 
 components:
   securitySchemes:
+    adminSecret:
+      type: apiKey
+      in: header
+      name: x-admin-secret
     bearerAuth:
       type: http
       scheme: bearer
@@ -886,25 +2768,21 @@ components:
     pagingCursor: { in: query, name: cursor, schema: { type: string } }
 
   requestBodies:
-        Refund:
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  paymentId: { type: string }
-                  reason: { type: string, enum: [requested_by_customer, duplicate, fraudulent], nullable: true }
-                  amount: { type: integer, description: "Amount to refund in cents" }
-                  requestId: { type: string, description: "Idempotency token for admin refund" }
-                required: [paymentId]
     MePatch:
       content:
         application/json:
           schema:
             type: object
             properties:
+              name: { type: string }
               full_name: { type: string }
+              email: { type: string, format: email }
               phone: { type: string }
+              country: { type: string, description: "ISO 3166-1 alpha-2" }
+              state: { type: string }
+              customer_type:
+                type: string
+                enum: [owner, caballerango, veterinarian, trainer, ranch_responsible]
               language: { type: string, enum: [es, en] }
               timezone: { type: string }
     BillingProfile:
@@ -925,15 +2803,43 @@ components:
             properties:
               path: { type: string }
               contentType: { type: string }
-            required: [path, contentType]
     VetUpsert:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/VetInput" }
+    VetProfilePatch:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              license_number: { type: string }
+              country: { type: string }
+              bio: { type: string }
+              years_experience: { type: integer }
+              specialties: { type: array, items: { type: string, format: uuid } }
+              languages: { type: array, items: { type: string } }
     VetAvailability:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/VetAvailability" }
+    VetAvailabilityUpsert:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              template:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    weekday: { type: integer, minimum: 0, maximum: 6 }
+                    start_time: { type: string, pattern: "^\\d{2}:\\d{2}$" }
+                    end_time: { type: string, pattern: "^\\d{2}:\\d{2}$" }
+                    timezone: { type: string }
+                  required: [weekday, start_time, end_time]
+            required: [template]
     VetOverride:
       content:
         application/json:
@@ -1036,6 +2942,37 @@ components:
             properties:
               summary_text: { type: string }
               plan_summary: { type: string }
+              assessment_text: { type: string }
+              diagnosis_text: { type: string }
+              follow_up_instructions: { type: string }
+              next_follow_up_at: { type: string, format: date-time, nullable: true }
+              severity: { type: string, enum: [low, medium, high, critical], nullable: true }
+              pet_id: { type: string, format: uuid, nullable: true }
+    PetHealthProfileUpsert:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              allergies: { type: array, items: { type: string } }
+              chronic_conditions: { type: array, items: { type: string } }
+              current_medications:
+                type: array
+                items: { type: object, additionalProperties: true }
+              vaccine_history:
+                type: array
+                items: { type: object, additionalProperties: true }
+              injury_history:
+                type: array
+                items: { type: object, additionalProperties: true }
+              procedure_history:
+                type: array
+                items: { type: object, additionalProperties: true }
+              feed_profile: { type: object, additionalProperties: true }
+              insurance: { type: object, additionalProperties: true }
+              emergency_contacts:
+                type: array
+                items: { type: object, additionalProperties: true }
     CarePlanCreate:
       content:
         application/json:
@@ -1043,6 +2980,8 @@ components:
             type: object
             properties:
               created_by_ai: { type: boolean, default: true }
+              session_id: { type: string, format: uuid, nullable: true }
+              encounter_id: { type: string, format: uuid, nullable: true }
               short_term: { type: string }
               mid_term: { type: string }
               long_term: { type: string }
@@ -1072,6 +3011,8 @@ components:
             type: object
             properties:
               image_url: { type: string, format: uri }
+              encounter_id: { type: string, format: uuid, nullable: true }
+              session_id: { type: string, format: uuid, nullable: true }
               labels: { type: array, items: { type: string } }
               findings: { type: string }
               diagnosis_label: { type: string }
@@ -1082,17 +3023,55 @@ components:
           schema:
             type: object
             properties:
-              vet_id: { type: string, format: uuid }
-              pet_id: { type: string, format: uuid }
-              starts_at: { type: string, format: date-time }
-            required: [vet_id, pet_id, starts_at]
+              vetId: { type: string, format: uuid }
+              petId: { type: string, format: uuid }
+              startsAt: { type: string, format: date-time }
+              durationMin: { type: integer, default: 30 }
+              specialtyId: { type: string, format: uuid }
+            required: [vetId, startsAt, specialtyId]
     AppointmentPatch:
       content:
         application/json:
           schema:
             type: object
             properties:
-              status: { type: string, enum: [scheduled, active, completed, no_show, canceled] }
+              status: { type: string, enum: [scheduled, confirmed, active, completed, no_show, canceled] }
+              startsAt: { type: string, format: date-time }
+              endsAt: { type: string, format: date-time }
+              durationMin: { type: integer }
+    AppointmentTransition:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              to: { type: string, enum: [confirmed, active, completed, no_show, canceled] }
+              status: { type: string, enum: [confirmed, active, completed, no_show, canceled] }
+            oneOf:
+              - required: [to]
+              - required: [status]
+    VetReferralCreate:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              petId: { type: string, format: uuid }
+              specialtyId: { type: string, format: uuid }
+              assignedVetId: { type: string, format: uuid }
+              priority: { type: string, enum: [routine, urgent], default: routine }
+              notes: { type: string }
+            required: [petId]
+    VetReferralPatch:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              assignedVetId: { type: string, format: uuid }
+              appointmentId: { type: string, format: uuid }
+              status: { type: string, enum: [intake, assigned, accepted, completed, canceled] }
+              notes: { type: string }
     KBUpsert:
       content:
         application/json:
@@ -1131,6 +3110,41 @@ components:
             properties:
               type: { type: string }
               data: { type: object }
+    AppleSubscriptionVerify:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              event_id: { type: string }
+              event_type: { type: string, default: manual_verify }
+              environment: { type: string, enum: [sandbox, production], default: sandbox }
+              original_transaction_id: { type: string }
+              transaction_id: { type: string }
+              product_id: { type: string }
+              app_account_token: { type: string, format: uuid }
+              status: { type: string, enum: [trialing, active, past_due, canceled, expired], default: active }
+              current_period_start: { type: string, format: date-time }
+              current_period_end: { type: string, format: date-time }
+              cancel_at_period_end: { type: boolean }
+              auto_renew: { type: boolean }
+              signed_payload: { type: string }
+              payload: { type: object, additionalProperties: true }
+    AppleEventIngest:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              event_id: { type: string }
+              event_type: { type: string }
+              environment: { type: string, enum: [sandbox, production] }
+              original_transaction_id: { type: string }
+              transaction_id: { type: string }
+              product_id: { type: string }
+              app_account_token: { type: string, format: uuid }
+              signed_payload: { type: string }
+              payload: { type: object, additionalProperties: true }
 
     PlanUpsert:
       content:
@@ -1142,36 +3156,28 @@ components:
           schema:
             type: object
             properties:
-              user_id: { type: string, format: uuid }
-              credits: { type: integer, minimum: 1 }
-              type: { type: string, enum: [chat, video] }
+              userId: { type: string, format: uuid }
+              user_id: { type: string, format: uuid, description: Legacy alias for userId }
+              code: { type: string, description: Overage item code such as chat_unit or video_unit }
+              delta: { type: integer, description: Positive to grant, negative to revoke }
+              credits: { type: integer, description: Legacy alias for delta }
+              type: { type: string, enum: [chat, video], description: Legacy alias to map into chat_unit or video_unit }
+              expires_at: { type: string, format: date-time, nullable: true }
               note: { type: string }
-            required: [user_id, credits]
+            required: [userId, delta]
     Refund:
       content:
         application/json:
           schema:
             type: object
             properties:
-              payment_id: { type: string, format: uuid }
-              reason: { type: string }
-              amount_cents: { type: integer }
-            required: [payment_id]
+              paymentId: { type: string }
+              reason: { type: string, enum: [requested_by_customer, duplicate, fraudulent], nullable: true }
+              amount: { type: integer, description: "Amount to refund in cents" }
+              requestId: { type: string, description: "Idempotency token for admin refund" }
+            required: [paymentId]
 
   responses:
-        RefundResult:
-          description: Stripe refund result
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  ok: { type: boolean }
-                  refund_id: { type: string }
-                  status: { type: string }
-                  amount: { type: integer }
-                  currency: { type: string }
-                  payment_intent: { type: string }
     Ok:
       description: OK
       content: { application/json: { schema: { type: object, properties: { ok: { type: boolean, default: true } } } } }
@@ -1229,6 +3235,19 @@ components:
     Payment:
       description: Payment
       content: { application/json: { schema: { $ref: "#/components/schemas/Payment" } } }
+    RefundResult:
+      description: Stripe refund result
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              ok: { type: boolean }
+              refund_id: { type: string }
+              status: { type: string }
+              amount: { type: integer }
+              currency: { type: string }
+              payment_intent: { type: string }
     ListInvoices:
       description: Invoices
       content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Invoice" } } } } } }
@@ -1250,6 +3269,24 @@ components:
     VetOverride:
       description: Vet availability override
       content: { application/json: { schema: { $ref: "#/components/schemas/VetOverride" } } }
+    ListVets:
+      description: Vets
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Vet" } } } } } }
+    ListSpecialties:
+      description: Vet specialties
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/VetSpecialty" } } } } } }
+    VetStatus:
+      description: Vet operational status
+      content: { application/json: { schema: { $ref: "#/components/schemas/VetStatus" } } }
+    VetQueue:
+      description: Vet operational queue
+      content: { application/json: { schema: { $ref: "#/components/schemas/VetQueue" } } }
+    VetReferral:
+      description: Vet referral
+      content: { application/json: { schema: { $ref: "#/components/schemas/VetReferral" } } }
+    ListReferrals:
+      description: Vet referrals
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/VetReferral" } } } } } }
     EntitlementReserve:
       description: Reservation created
       content: { application/json: { schema: { type: object, additionalProperties: true } } }
@@ -1286,6 +3323,9 @@ components:
     Notes:
       description: Vet notes
       content: { application/json: { schema: { $ref: "#/components/schemas/Notes" } } }
+    ListNotes:
+      description: Vet notes list
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Notes" } } } } } }
     ListCarePlans:
       description: Care plans
       content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/CarePlan" } } } } } }
@@ -1333,9 +3373,34 @@ components:
           schema:
             type: object
             properties:
+              path: { type: string }
               url: { type: string, format: uri }
+              token: { type: string, nullable: true }
+              expires_in: { type: integer, nullable: true }
+              expiresIn: { type: integer, nullable: true }
               method: { type: string }
               headers: { type: object, additionalProperties: true }
+    PetHealthProfile:
+      description: Structured horse health profile
+      content: { application/json: { schema: { $ref: "#/components/schemas/PetHealthProfile" } } }
+    ListEncounters:
+      description: Encounter list
+      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Encounter" } } } } } }
+    EncounterDetail:
+      description: Encounter timeline detail
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              encounter: { $ref: "#/components/schemas/Encounter" }
+              notes: { type: array, items: { $ref: "#/components/schemas/Notes" } }
+              imageCases: { type: array, items: { $ref: "#/components/schemas/ImageCase" } }
+              carePlans: { type: array, items: { $ref: "#/components/schemas/CarePlan" } }
+              files: { type: array, items: { $ref: "#/components/schemas/EncounterFile" } }
+              appointment: { $ref: "#/components/schemas/Appointment", nullable: true }
+              session: { $ref: "#/components/schemas/Session", nullable: true }
+              healthProfile: { $ref: "#/components/schemas/PetHealthProfile", nullable: true }
     ListUsers:
       description: Users
       content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/User" } } } } } }
@@ -1347,6 +3412,10 @@ components:
     Me:
       type: object
       properties:
+        customerType:
+          type: string
+          enum: [owner, caballerango, veterinarian, trainer, ranch_responsible]
+          nullable: true
         user: { $ref: "#/components/schemas/User" }
         billing_profile: { $ref: "#/components/schemas/BillingProfile" }
         active_subscription: { $ref: "#/components/schemas/Subscription" }
@@ -1357,6 +3426,12 @@ components:
         email: { type: string, format: email }
         full_name: { type: string }
         phone: { type: string }
+        country: { type: string }
+        state: { type: string }
+        customer_type:
+          type: string
+          enum: [owner, caballerango, veterinarian, trainer, ranch_responsible]
+          nullable: true
         role: { type: string, enum: [user, vet, admin] }
     BillingProfile:
       type: object
@@ -1413,12 +3488,31 @@ components:
     VetInput:
       type: object
       properties:
+        full_name: { type: string }
         license_number: { type: string }
         country: { type: string }
         bio: { type: string }
         years_experience: { type: integer }
         specialties: { type: array, items: { type: string, format: uuid } }
         languages: { type: array, items: { type: string } }
+        rating_average: { type: number }
+        rating_count: { type: integer }
+    VetSpecialty:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string, nullable: true }
+    VetClinicAffiliation:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        address: { type: string, nullable: true }
+        phone: { type: string, nullable: true }
+        website: { type: string, format: uri, nullable: true }
+        is_partner: { type: boolean }
+        role: { type: string, nullable: true }
     Vet:
       allOf:
         - $ref: "#/components/schemas/VetInput"
@@ -1426,6 +3520,14 @@ components:
           properties:
             id: { type: string, format: uuid }
             is_approved: { type: boolean }
+            specialty_details:
+              type: array
+              items: { $ref: "#/components/schemas/VetSpecialty" }
+            clinics:
+              type: array
+              items: { $ref: "#/components/schemas/VetClinicAffiliation" }
+            email: { type: string, format: email, nullable: true }
+            phone: { type: string, nullable: true }
     Center:
       type: object
       properties:
@@ -1490,8 +3592,22 @@ components:
         issued_at: { type: string, format: date-time }
     SessionStart:
       type: object
+      description: Start session response including entitlement or overage info
       properties:
-        session: { $ref: "#/components/schemas/Session" }
+        ok: { type: boolean }
+        sessionId: { type: string, format: uuid }
+        kind: { type: string, enum: [chat, video] }
+        consumptionId: { type: string, format: uuid, nullable: true }
+        overage: { type: boolean }
+        overageReason: { type: string, nullable: true }
+        payment: { type: object, nullable: true, properties: {
+          stub: { type: boolean },
+          status: { type: string },
+          type: { type: string },
+          currency: { type: string },
+          amount: { type: integer, nullable: true },
+          reason: { type: string, nullable: true }
+        } }
         video: { type: object, nullable: true, properties: { roomId: { type: string }, token: { type: string } } }
     Session:
       type: object
@@ -1516,14 +3632,49 @@ components:
     Notes:
       type: object
       properties:
+        id: { type: string, format: uuid }
+        encounter_id: { type: string, format: uuid, nullable: true }
         session_id: { type: string, format: uuid }
-        vet_id: { type: string, format: uuid }
-        summary_text: { type: string }
-        plan_summary: { type: string }
+        pet_id: { type: string, format: uuid }
+        vet_id: { type: string, format: uuid, nullable: true }
+        summary_text: { type: string, nullable: true }
+        plan_summary: { type: string, nullable: true }
+        assessment_text: { type: string, nullable: true }
+        diagnosis_text: { type: string, nullable: true }
+        follow_up_instructions: { type: string, nullable: true }
+        next_follow_up_at: { type: string, format: date-time, nullable: true }
+        severity: { type: string, enum: [low, medium, high, critical], nullable: true }
+        created_at: { type: string, format: date-time }
+    PetHealthProfile:
+      type: object
+      properties:
+        pet_id: { type: string, format: uuid }
+        allergies: { type: array, items: { type: string } }
+        chronic_conditions: { type: array, items: { type: string } }
+        current_medications:
+          type: array
+          items: { type: object, additionalProperties: true }
+        vaccine_history:
+          type: array
+          items: { type: object, additionalProperties: true }
+        injury_history:
+          type: array
+          items: { type: object, additionalProperties: true }
+        procedure_history:
+          type: array
+          items: { type: object, additionalProperties: true }
+        feed_profile: { type: object, additionalProperties: true }
+        insurance: { type: object, additionalProperties: true }
+        emergency_contacts:
+          type: array
+          items: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
     CarePlan:
       type: object
       properties:
         id: { type: string, format: uuid }
+        encounter_id: { type: string, format: uuid, nullable: true }
         pet_id: { type: string, format: uuid }
         created_by_ai: { type: boolean }
         short_term: { type: string }
@@ -1542,11 +3693,43 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
+        encounter_id: { type: string, format: uuid, nullable: true }
         pet_id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid, nullable: true }
         image_url: { type: string, format: uri }
         labels: { type: array, items: { type: string } }
         findings: { type: string }
         diagnosis_label: { type: string }
+    EncounterFile:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        encounter_id: { type: string, format: uuid }
+        pet_id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid, nullable: true }
+        storage_path: { type: string }
+        content_type: { type: string, nullable: true }
+        labels: { type: array, items: { type: string } }
+        created_at: { type: string, format: date-time }
+    Encounter:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid, nullable: true }
+        appointment_id: { type: string, format: uuid, nullable: true }
+        pet_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        vet_id: { type: string, format: uuid, nullable: true }
+        video_room_id: { type: string, nullable: true }
+        status: { type: string }
+        started_at: { type: string, format: date-time, nullable: true }
+        ended_at: { type: string, format: date-time, nullable: true }
+        notes_count: { type: integer, nullable: true }
+        image_cases_count: { type: integer, nullable: true }
+        care_plans_count: { type: integer, nullable: true }
+        files_count: { type: integer, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
     Appointment:
       type: object
       properties:
@@ -1556,7 +3739,7 @@ components:
         user_id: { type: string, format: uuid }
         starts_at: { type: string, format: date-time }
         ends_at: { type: string, format: date-time, nullable: true }
-        status: { type: string }
+        status: { type: string, enum: [scheduled, confirmed, active, completed, no_show, canceled] }
     Slot:
       type: object
       properties:
@@ -1580,6 +3763,18 @@ components:
         user_id: { type: string, format: uuid }
         score: { type: integer, minimum: 1, maximum: 5 }
         comment: { type: string }
+        user_name: { type: string, nullable: true }
+    VetStatus:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        is_approved: { type: boolean }
+        rating_average: { type: number }
+        rating_count: { type: integer }
+        upcoming_appointments: { type: integer }
+        active_consults: { type: integer }
+        pending_notes: { type: integer }
+        open_referrals: { type: integer }
     VetAvailability:
       type: object
       properties:
@@ -1591,6 +3786,7 @@ components:
               weekday: { type: integer, minimum: 0, maximum: 6 }
               start_time: { type: string, pattern: "^\\d{2}:\\d{2}$" }
               end_time: { type: string, pattern: "^\\d{2}:\\d{2}$" }
+              timezone: { type: string, nullable: true }
         overrides:
           type: array
           items: { $ref: "#/components/schemas/VetOverride" }
@@ -1602,5 +3798,42 @@ components:
         start: { type: string, format: date-time }
         end: { type: string, format: date-time }
         closed: { type: boolean }
+    VetQueue:
+      type: object
+      properties:
+        upcomingAppointments:
+          type: array
+          items: { $ref: "#/components/schemas/Appointment" }
+        activeConsults:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        pendingNotes:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        referrals:
+          type: array
+          items: { $ref: "#/components/schemas/VetReferral" }
+    VetReferral:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        pet_id: { type: string, format: uuid }
+        pet_name: { type: string, nullable: true }
+        user_id: { type: string, format: uuid }
+        user_name: { type: string, nullable: true }
+        specialty_id: { type: string, format: uuid, nullable: true }
+        specialty_name: { type: string, nullable: true }
+        assigned_vet_id: { type: string, format: uuid, nullable: true }
+        assigned_vet_name: { type: string, nullable: true }
+        appointment_id: { type: string, format: uuid, nullable: true }
+        priority: { type: string, enum: [routine, urgent] }
+        status: { type: string, enum: [intake, assigned, accepted, completed, canceled] }
+        notes: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
 
   examples: {}

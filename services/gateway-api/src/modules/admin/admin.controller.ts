@@ -513,6 +513,64 @@ export class AdminController {
     return { ok: true, exportedAt: new Date().toISOString(), data: rows };
   }
 
+  @Get('video/sessions')
+  async adminVideoSessions(
+    @Headers('x-admin-secret') secret: string,
+    @Query('limit') limitQ?: string,
+    @Query('offset') offsetQ?: string,
+    @Query('status') statusQ?: string,
+  ) {
+    assertAdmin(secret);
+    const limit = Math.min(Math.max(Number(limitQ) || 50, 1), 200);
+    const offset = Math.max(Number(offsetQ) || 0, 0);
+    const allowedStatuses = ['pending', 'waiting', 'live', 'ended', 'released', 'timed_out', 'host_absent', 'forced_ended'];
+    const statusFilter = statusQ && allowedStatuses.includes(statusQ) ? statusQ : null;
+
+    const { rows } = await this.db.query<{
+      session_id: string;
+      room_name: string | null;
+      room_sid: string | null;
+      status: string;
+      first_room_started_at: string | null;
+      first_both_joined_at: string | null;
+      room_finished_at: string | null;
+      entitlement_finalized_at: string | null;
+      entitlement_released_at: string | null;
+      safety_reason: string | null;
+      egress_id: string | null;
+      egress_started_at: string | null;
+      egress_ended_at: string | null;
+      recording_url: string | null;
+      created_at: string;
+      updated_at: string;
+    }>(
+      `select v.session_id,
+              v.room_name,
+              v.room_sid,
+              v.status,
+              v.first_room_started_at,
+              v.first_both_joined_at,
+              v.room_finished_at,
+              v.entitlement_finalized_at,
+              v.entitlement_released_at,
+              v.safety_reason,
+              v.egress_id,
+              v.egress_started_at,
+              v.egress_ended_at,
+              v.recording_url,
+              v.created_at,
+              v.updated_at
+         from video_session_lifecycle v
+        where ($1::text is null or v.status = $1)
+        order by v.updated_at desc
+        limit $2 offset $3`,
+      [statusFilter, limit, offset]
+    );
+
+    await this.logAdminAction('admin.video.sessions.list', 'video_session_lifecycle', null, { limit, offset, statusFilter, count: rows.length });
+    return { ok: true, count: rows.length, limit, offset, data: rows };
+  }
+
   @Get('ops/dashboard')
   async opsDashboard(@Headers('x-admin-secret') secret: string) {
     assertAdmin(secret);

@@ -70,6 +70,8 @@ paths:
       summary: LiveKit webhook (raw body, signed)
       description: >
         Verify the LiveKit authorization header with LiveKit credentials, persist room and participant lifecycle events, and sync matching video session state.
+        Supported event types: room_started, room_finished, participant_joined, participant_left, egress_started, egress_ended.
+        Egress events update egress_id, egress_started_at, egress_ended_at, and recording_url on video_session_lifecycle.
       requestBody:
         required: true
         content:
