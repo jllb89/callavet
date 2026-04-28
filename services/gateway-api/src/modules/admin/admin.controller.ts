@@ -43,6 +43,23 @@ export class AdminController {
     }
   }
 
+  private async tableExists(tableName: string) {
+    const { rows } = await this.db.query<{ exists: boolean }>(
+      `select to_regclass($1) is not null as exists`,
+      [tableName]
+    );
+    return rows[0]?.exists === true;
+  }
+
+  private async safeCount(sql: string, params: any[] = []) {
+    try {
+      const { rows } = await this.db.query<{ count: number }>(sql, params);
+      return rows[0]?.count ?? 0;
+    } catch {
+      return 0;
+    }
+  }
+
   @Get('users')
   async listUsers(
     @Headers('x-admin-secret') secret: string,
@@ -574,34 +591,102 @@ export class AdminController {
   @Get('ops/dashboard')
   async opsDashboard(@Headers('x-admin-secret') secret: string) {
     assertAdmin(secret);
-    const [sessions24h, messages24h, notifications24h, failedNotifications24h, pendingNotifications, refunds24h] = await Promise.all([
-      this.db.query<{ count: number }>(
-        `select count(*)::int as count from chat_sessions where created_at >= now() - interval '24 hours'`
-      ),
-      this.db.query<{ count: number }>(
-        `select count(*)::int as count from messages where created_at >= now() - interval '24 hours'`
-      ),
-      this.db.query<{ count: number }>(
-        `select count(*)::int as count from notification_events where created_at >= now() - interval '24 hours'`
-      ),
-      this.db.query<{ count: number }>(
-        `select count(*)::int as count from notification_events where status = 'failed' and created_at >= now() - interval '24 hours'`
-      ),
-      this.db.query<{ count: number }>(
-        `select count(*)::int as count from notification_events where status = 'queued'`
-      ),
-      this.db.query<{ count: number }>(
-        `select count(*)::int as count from admin_audit_logs where action = 'admin.refunds.create' and created_at >= now() - interval '24 hours'`
-      ),
+    const [hasVideoLifecycle, hasAiJobRuns, hasWsAuthFailures] = await Promise.all([
+      this.tableExists('public.video_session_lifecycle'),
+      this.tableExists('public.ai_job_runs'),
+      this.tableExists('public.ws_auth_failures'),
+    ]);
+
+    const [
+      sessions24h,
+      messages24h,
+      notifications24h,
+      failedNotifications24h,
+      pendingNotifications,
+      refunds24h,
+      videoFailureModes24h,
+      roomIssuanceFailures24h,
+      wsAuthFailures24h,
+      aiJobErrors24h,
+    ] = await Promise.all([
+      this.safeCount(`select count(*)::int as count from chat_sessions where created_at >= now() - interval '24 hours'`),
+      this.safeCount(`select count(*)::int as count from messages where created_at >= now() - interval '24 hours'`),
+      this.safeCount(`select count(*)::int as count from notification_events where created_at >= now() - interval '24 hours'`),
+      this.safeCount(`select count(*)::int as count from notification_events where status = 'failed' and created_at >= now() - interval '24 hours'`),
+      this.safeCount(`select count(*)::int as count from notification_events where status = 'queued'`),
+      this.safeCount(`select count(*)::int as count from admin_audit_logs where action = 'admin.refunds.create' and created_at >= now() - interval '24 hours'`),
+      hasVideoLifecycle
+        ? this.safeCount(
+            `select count(*)::int as count
+               from video_session_lifecycle
+              where updated_at >= now() - interval '24 hours'
+                and status in ('timed_out', 'host_absent', 'forced_ended')`
+          )
+        : Promise.resolve(0),
+      hasVideoLifecycle
+        ? this.safeCount(
+            `select count(*)::int as count
+               from video_session_lifecycle
+              where updated_at >= now() - interval '24 hours'
+                and (
+                  safety_reason in ('provider_create_failed', 'token_issue_failed', 'livekit_not_configured')
+                  or (status = 'forced_ended' and safety_reason = 'forced_end')
+                )`
+          )
+        : Promise.resolve(0),
+      hasWsAuthFailures
+        ? this.safeCount(`select count(*)::int as count from ws_auth_failures where created_at >= now() - interval '24 hours'`)
+        : this.safeCount(
+            `select count(*)::int as count
+               from admin_audit_logs
+              where created_at >= now() - interval '24 hours'
+                and (
+                  action ilike 'ws.%auth%fail%'
+                  or action ilike 'chat.%auth%fail%'
+                  or action ilike 'realtime.%auth%fail%'
+                )`
+          ),
+      hasAiJobRuns
+        ? this.safeCount(
+            `select count(*)::int as count
+               from ai_job_runs
+              where created_at >= now() - interval '24 hours'
+                and status in ('failed', 'error')`
+          )
+        : this.safeCount(
+            `select count(*)::int as count
+               from admin_audit_logs
+              where created_at >= now() - interval '24 hours'
+                and (
+                  action ilike 'ai.%error%'
+                  or action ilike 'ai.%fail%'
+                  or (
+                    action ilike 'ai.%'
+                    and (
+                      metadata ? 'error'
+                      or metadata ? 'exception'
+                    )
+                  )
+                )`
+          ),
     ]);
 
     const metrics = {
-      sessions24h: sessions24h.rows[0]?.count ?? 0,
-      messages24h: messages24h.rows[0]?.count ?? 0,
-      notifications24h: notifications24h.rows[0]?.count ?? 0,
-      failedNotifications24h: failedNotifications24h.rows[0]?.count ?? 0,
-      pendingNotifications: pendingNotifications.rows[0]?.count ?? 0,
-      refunds24h: refunds24h.rows[0]?.count ?? 0,
+      sessions24h,
+      messages24h,
+      notifications24h,
+      failedNotifications24h,
+      pendingNotifications,
+      refunds24h,
+      videoFailureModes24h,
+      roomIssuanceFailures24h,
+      wsAuthFailures24h,
+      aiJobErrors24h,
+      telemetry: {
+        videoLifecycle: hasVideoLifecycle,
+        wsAuthFailuresTable: hasWsAuthFailures,
+        aiJobRunsTable: hasAiJobRuns,
+      },
     };
 
     const alerts = [
@@ -616,6 +701,30 @@ export class AdminController {
         severity: metrics.pendingNotifications > 100 ? 'warning' : 'ok',
         value: metrics.pendingNotifications,
         threshold: 100,
+      },
+      {
+        key: 'video.failure.modes',
+        severity: metrics.videoFailureModes24h > 15 ? 'critical' : metrics.videoFailureModes24h > 3 ? 'warning' : 'ok',
+        value: metrics.videoFailureModes24h,
+        threshold: 3,
+      },
+      {
+        key: 'video.room_issuance.failures',
+        severity: metrics.roomIssuanceFailures24h > 8 ? 'critical' : metrics.roomIssuanceFailures24h > 1 ? 'warning' : 'ok',
+        value: metrics.roomIssuanceFailures24h,
+        threshold: 1,
+      },
+      {
+        key: 'realtime.ws_auth.failures',
+        severity: metrics.wsAuthFailures24h > 20 ? 'critical' : metrics.wsAuthFailures24h > 5 ? 'warning' : 'ok',
+        value: metrics.wsAuthFailures24h,
+        threshold: 5,
+      },
+      {
+        key: 'ai.job.errors',
+        severity: metrics.aiJobErrors24h > 10 ? 'critical' : metrics.aiJobErrors24h > 2 ? 'warning' : 'ok',
+        value: metrics.aiJobErrors24h,
+        threshold: 2,
       },
     ];
 

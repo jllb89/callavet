@@ -71,3 +71,23 @@ print -- "$exp_notes" | jq . 2>/dev/null || print -- "$exp_notes"
 print -- "[admin] Ops dashboard"
 ops=$(curl -sS -X GET $hdr[@] "$GATEWAY_BASE/admin/ops/dashboard")
 print -- "$ops" | jq . 2>/dev/null || print -- "$ops"
+
+print -- "[admin] Ops dashboard alert coverage"
+required_alerts=(
+  "notifications.failed.rate"
+  "notifications.queue.depth"
+  "video.failure.modes"
+  "video.room_issuance.failures"
+  "realtime.ws_auth.failures"
+  "ai.job.errors"
+)
+
+for key in $required_alerts; do
+  present=$(print -- "$ops" | jq -r --arg key "$key" '[.alerts[]? | select(.key == $key)] | length' 2>/dev/null || print -- "0")
+  if [[ "$present" -lt 1 ]]; then
+    print -- "[admin] Missing ops alert key: $key"
+    exit 1
+  fi
+done
+
+print -- "[admin] Ops dashboard alert coverage ok"

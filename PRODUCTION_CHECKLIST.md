@@ -14,3 +14,93 @@
 - Support: Admin tools for refunds/credits, logout-all, pricing controls; logging for billing events.
 - Performance: Verify pgvector index settings and analyze after embeddings backfill.
 - Rollout: Staging smoke tests; cutover plan; feature flags if needed.
+
+## Phase 6 Runbooks
+
+### 1) Backups and Restore Verification
+
+Goal: prove we can restore service data without production DB console access.
+
+Steps:
+1. Confirm automated backups / PITR are enabled in Supabase project settings.
+2. Record current backup policy: cadence, retention, restore target (staging project).
+3. Run a restore drill into staging from a recent snapshot.
+4. Validate restored data integrity via deployment gates:
+	- `zsh env/scripts/smoke-backend-core.sh`
+	- `zsh env/scripts/smoke-admin-ops.sh`
+5. Capture restore metadata: backup timestamp, restore duration, smoke outcome.
+
+Operational guardrails:
+- Never run restore drills directly into prod.
+- Keep restore drill evidence in release notes for each production cut.
+
+### 2) Webhook Replay (Stripe and LiveKit)
+
+Goal: safely replay missed/delayed events and verify idempotency.
+
+Steps:
+1. Identify incident window and affected event IDs.
+2. Replay Stripe events through internal ingest route with internal secret:
+	- `POST /internal/stripe/event`
+3. Replay LiveKit signed webhooks against webhooks service endpoint:
+	- `POST /livekit/webhook`
+4. Verify no duplicate side effects:
+	- `stripe_subscription_events` idempotency behavior
+	- `livekit_video_events` + `video_session_lifecycle` state consistency
+5. Run focused post-replay checks:
+	- `GET /admin/notifications/events`
+	- `GET /admin/video/sessions`
+
+Operational guardrails:
+- Replay in chronological order where possible.
+- Use narrow windows to avoid replay storms.
+
+### 3) Refund Side Effects
+
+Goal: ensure refunds keep credits/entitlements/subscriptions consistent.
+
+Steps:
+1. Create refund from admin endpoint:
+	- `POST /admin/refunds`
+2. Validate Stripe/webhook side effects:
+	- `charge.refunded` and related update handlers applied once.
+3. Validate domain state:
+	- overage purchase status transitions
+	- overage credit decrement/reversal behavior
+	- entitlement consumption consistency for session-linked usage
+4. Verify support visibility:
+	- `GET /admin/audit/logs`
+	- `GET /admin/export/sessions`
+
+Operational guardrails:
+- Always include `requestId` for idempotent refund operations.
+- Never issue duplicate manual refunds for same payment intent.
+
+### 4) Incident Handling (P1/P2)
+
+Goal: rapid triage and containment for chat/video/notifications failures.
+
+Severity model:
+- P1: user-facing outage (gateway unavailable, mass room issuance failures, auth collapse).
+- P2: degraded function (notification provider failures, elevated ws auth failures, partial endpoint errors).
+
+Playbook:
+1. Detect and classify from `GET /admin/ops/dashboard` alerts.
+2. Contain:
+	- freeze risky rollouts,
+	- disable non-critical toggles/paths,
+	- preserve idempotency and data safety.
+3. Diagnose via exports and admin logs:
+	- `GET /admin/audit/logs`
+	- `GET /admin/notifications/events`
+	- `GET /admin/video/sessions`
+4. Recover with the smallest safe change (config fix, rollback, replay, or targeted patch).
+5. Verify recovery gates:
+	- `zsh env/scripts/smoke-backend-core.sh`
+	- `zsh env/scripts/smoke-admin-ops.sh`
+6. Publish incident summary with timeline, root cause, and prevention tasks.
+
+Escalation triggers:
+- Any `critical` alert in ops dashboard.
+- Notification failure spikes and queue growth that do not stabilize within one observation window.
+- Repeated forced-ended / timed-out video sessions above baseline.
