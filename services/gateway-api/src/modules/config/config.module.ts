@@ -15,7 +15,14 @@ export const EnvSchema = z.object({
   LIVEKIT_URL: z.string().url().optional(),
   LIVEKIT_API_KEY: z.string().min(1).optional(),
   LIVEKIT_API_SECRET: z.string().min(1).optional(),
-  LIVEKIT_WEBHOOK_SECRET: z.string().min(1).optional()
+  LIVEKIT_WEBHOOK_SECRET: z.string().min(1).optional(),
+  AI_PROVIDER: z.string().min(1).optional(),
+  AI_PROVIDER_BASE_URL: z.string().url().optional(),
+  AI_PROVIDER_API_KEY: z.string().min(1).optional(),
+  OPENAI_API_KEY: z.string().min(1).optional(),
+  AI_MODEL: z.string().min(1).optional(),
+  AI_EMBEDDING_MODEL: z.string().min(1).optional(),
+  AI_REQUEST_TIMEOUT_MS: z.string().regex(/^\d+$/).optional()
 });
 
 function validateEnv(config: Record<string, unknown>) {

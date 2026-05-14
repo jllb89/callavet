@@ -62,6 +62,50 @@ components:
       properties:
         ok: { type: boolean, enum: [false] }
         reason: { type: string }
+    AiRunRequest:
+      type: object
+      properties:
+        petId: { type: string, format: uuid }
+        encounterId: { type: string, format: uuid }
+        sessionId: { type: string, format: uuid }
+        symptoms: { type: string }
+        question: { type: string }
+        context:
+          type: object
+          additionalProperties: true
+        dryRun:
+          type: boolean
+          description: Persist a deterministic workflow-validation draft without calling the external provider.
+    AiRunResponse:
+      type: object
+      properties:
+        ok: { type: boolean, enum: [true] }
+        eventId: { type: string, format: uuid }
+        provider: { type: string }
+        model: { type: string }
+        payload:
+          type: object
+          additionalProperties: true
+        draft:
+          type: object
+          additionalProperties: true
+    AiDraftReviewRequest:
+      type: object
+      properties:
+        status: { type: string, enum: [reviewed, accepted, rejected, superseded] }
+        reviewNotes: { type: string }
+    AiEmbeddingGenerateRequest:
+      type: object
+      required: [target]
+      properties:
+        target: { type: string, enum: [kb, messages, notes, products, services, pets, vets] }
+        ids:
+          type: array
+          items: { type: string, format: uuid }
+        limit: { type: integer, minimum: 1, maximum: 50, default: 10 }
+        dryRun: { type: boolean, description: Generate deterministic validation vectors without provider credentials. }
+        persist: { type: boolean, description: Persist generated embeddings. Defaults to false for dry-run and true for real provider calls. }
+        regenerate: { type: boolean, description: Rebuild embeddings even when the target row already has one. }
     ErrorReason:
       type: string
       description: Standardized error reasons for subscriptions/overage/session flows
@@ -2256,6 +2300,115 @@ paths:
                         additionalProperties: true
       responses:
         "200": { $ref: "#/components/responses/Ok" }
+
+  /ai/triage:
+    post:
+      tags: [AI (internal)]
+      summary: Create a reviewable AI triage draft
+      description: Uses pet, encounter, health profile, recent records, image cases, care plans, and KB context. Output is persisted as an AI draft and is never auto-published.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AiRunRequest" }
+      responses:
+        "200": { description: AI triage draft, content: { application/json: { schema: { $ref: "#/components/schemas/AiRunResponse" } } } }
+
+  /ai/referrals/recommend:
+    post:
+      tags: [AI (internal)]
+      summary: Create a reviewable AI referral recommendation
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AiRunRequest" }
+      responses:
+        "200": { description: AI referral recommendation draft, content: { application/json: { schema: { $ref: "#/components/schemas/AiRunResponse" } } } }
+
+  /ai/drafts/consultation-note:
+    post:
+      tags: [AI (internal)]
+      summary: Create a reviewable AI consultation-note draft
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AiRunRequest" }
+      responses:
+        "200": { description: AI consultation-note draft, content: { application/json: { schema: { $ref: "#/components/schemas/AiRunResponse" } } } }
+
+  /ai/drafts/care-plan:
+    post:
+      tags: [AI (internal)]
+      summary: Create a reviewable AI care-plan draft
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AiRunRequest" }
+      responses:
+        "200": { description: AI care-plan draft, content: { application/json: { schema: { $ref: "#/components/schemas/AiRunResponse" } } } }
+
+  /ai/embeddings/generate:
+    post:
+      tags: [AI (internal)]
+      summary: Generate embeddings for configured vector targets
+      description: Uses `vector_targets` configuration to build snippets and write embeddings to the configured table/column. Calls the OpenAI-compatible embeddings endpoint unless `dryRun=true`.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AiEmbeddingGenerateRequest" }
+      responses:
+        "200": { description: Embedding generation result, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+
+  /ai/drafts:
+    get:
+      tags: [AI (internal)]
+      summary: List visible AI drafts
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { in: query, name: petId, schema: { type: string, format: uuid } }
+        - { in: query, name: encounterId, schema: { type: string, format: uuid } }
+        - { in: query, name: status, schema: { type: string, enum: [draft, reviewed, accepted, rejected, superseded] } }
+        - { in: query, name: type, schema: { type: string, enum: [triage, referral, note, care_plan] } }
+        - { in: query, name: limit, schema: { type: integer, default: 50 } }
+      responses:
+        "200": { description: AI drafts, content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { type: object, additionalProperties: true } } } } } } }
+
+  /ai/drafts/{draftId}/review:
+    patch:
+      tags: [AI (internal)]
+      summary: Mark an AI draft reviewed, accepted, rejected, or superseded
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { in: path, name: draftId, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AiDraftReviewRequest" }
+      responses:
+        "200": { description: Reviewed draft, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+
+  /ai/events:
+    get:
+      tags: [AI (internal)]
+      summary: List visible AI audit events
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { in: query, name: petId, schema: { type: string, format: uuid } }
+        - { in: query, name: encounterId, schema: { type: string, format: uuid } }
+        - { in: query, name: status, schema: { type: string, enum: [queued, running, succeeded, failed, skipped] } }
+        - { in: query, name: limit, schema: { type: integer, default: 50 } }
+      responses:
+        "200": { description: AI audit events, content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { type: object, additionalProperties: true } } } } } } }
 
   /notifications/test:
     post:

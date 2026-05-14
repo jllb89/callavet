@@ -1,6 +1,6 @@
 # Backend Roadmap to Reach Subscription and Billing Quality
 
-_Last updated: 2026-04-28 (Phase 3E)_
+_Last updated: 2026-05-11 (Phase 5 implementation pass 1)_
 
 ## Purpose
 This document sequences the backend work required so the rest of the platform reaches the same production bar as subscriptions and billing before major effort returns to the Flutter app.
@@ -27,12 +27,12 @@ This document sequences the backend work required so the rest of the platform re
 - Sessions and HTTP message flows.
 - Session notes, care plans, and image cases.
 - Knowledge base and vector retrieval plumbing.
+- AI triage, referral recommendations, reviewable note drafts, and reviewable care-plan drafts are implemented behind feature/provider controls and ready for staging validation.
 
 ### Weak or missing now
 - Production-grade realtime chat transport.
 - Real video infrastructure.
 - Structured horse medical record and encounter model.
-- AI triage, referral, note drafting, and care-plan generation.
 - Notifications and admin completeness outside billing.
 
 ## Roadmap Order
@@ -183,18 +183,22 @@ Exit criteria:
 Target: 3 to 4 weeks
 
 Status:
-Deferred on 2026-04-23 by product priority while Phase 6 operations hardening is executed first.
+In implementation as of 2026-05-11. Phase 5 pass 1 is locally implemented and build-validated; staging still needs migration application, gateway redeploy, provider credentials, and smoke validation before this phase can close.
+
+Update on 2026-05-11 (implementation pass 1):
+Migration `0051_phase5_ai_triage_referral_drafting.sql` was added and mirrored in `packages/db/migrations`. It introduces AI feature flags, prompt versions, `ai_events`, and reviewable `ai_drafts` with RLS/indexes. Gateway now has an `AiModule` with OpenAI-compatible provider abstraction, prompt loading, feature checks, audit/event persistence, dry-run mode for deployment validation, and embedding generation through configured `vector_targets`. Authenticated endpoints added: `POST /ai/triage`, `POST /ai/referrals/recommend`, `POST /ai/drafts/consultation-note`, `POST /ai/drafts/care-plan`, `POST /ai/embeddings/generate`, `GET /ai/drafts`, `PATCH /ai/drafts/:draftId/review`, and `GET /ai/events`. OpenAPI is updated and `env/scripts/smoke-phase5-ai.sh` validates dry-run drafts, events, and embedding generation without requiring external model credentials. Gateway API compiles successfully.
 
 Goal:
 Add AI only after the transport, record, and entitlement layers are trustworthy.
 
 Deliverables:
-- Add a provider abstraction for model calls, prompt versioning, audit logs, and feature flags.
-- Implement triage intake that uses health profile, recent encounters, image cases, and KB context.
-- Add vet referral recommendation with explainable output and guardrails.
-- Add AI drafting for session summaries, consultation notes, and care-plan suggestions.
-- Add review workflow so AI suggestions are editable and never auto-publish critical clinical decisions.
-- Add embedding generation jobs so vector retrieval no longer depends on ad hoc backfills.
+- [x] Add a provider abstraction for model calls, prompt versioning, audit logs, and feature flags.
+- [x] Implement triage intake that uses health profile, recent encounters, image cases, and KB context.
+- [x] Add vet referral recommendation with explainable output and guardrails.
+- [x] Add AI drafting for consultation notes and care-plan suggestions.
+- [x] Add review workflow so AI suggestions are editable and never auto-publish critical clinical decisions.
+- [x] Add embedding generation jobs so vector retrieval no longer depends on ad hoc backfills.
+- [ ] Configure production AI provider credentials and run real-provider staging validation in addition to dry-run smoke.
 
 Exit criteria:
 - AI output is reviewable, attributable, and easy to disable.
@@ -267,6 +271,7 @@ Reason:
 - Phase 6 post-redeploy gate passed on 2026-04-28 after exporting `NotificationsService` from `NotificationsModule`: gateway startup stable, backend core smoke green, and notification event persistence visible from admin tooling.
 - Phase 6 is now closed on staging on 2026-04-28: notification/admin hardening complete with enforced ops alert coverage and documented runbooks.
 - Phase 5 (AI triage/referral/drafting) is now the active priority.
+- Phase 5 implementation pass 1 completed locally on 2026-05-11: schema, provider abstraction, reviewable AI endpoints, embedding generation, OpenAPI, and dry-run smoke script are in place. Next gate is applying migration `0051`, setting AI provider env vars, redeploying gateway, and running `env/scripts/smoke-phase5-ai.sh` plus the existing backend/admin/clinical smokes.
 
 ## Related Files
 - `services/gateway-api/src/modules/subscriptions/subscriptions.controller.ts`

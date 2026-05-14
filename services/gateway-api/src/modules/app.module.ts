@@ -26,6 +26,7 @@ import { AppointmentsModule } from './appointments/appointments.module';
 import { RateLimitModule } from './rate-limit/rate-limit.module';
 import { VideoModule } from './video/video.module';
 import { VetsModule } from './vets/vets.module';
+import { AiModule } from './ai/ai.module';
 
 @Module({
   imports: [
@@ -56,6 +57,7 @@ import { VetsModule } from './vets/vets.module';
   AppointmentsModule,
   VetsModule,
   VideoModule,
+  AiModule,
   ],
 })
 export class AppModule {}

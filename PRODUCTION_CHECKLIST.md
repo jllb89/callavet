@@ -13,7 +13,32 @@
 - Security: Rate limits for key endpoints; validate input across subscription/session routes.
 - Support: Admin tools for refunds/credits, logout-all, pricing controls; logging for billing events.
 - Performance: Verify pgvector index settings and analyze after embeddings backfill.
+- AI: Apply migration `0051`; set `AI_PROVIDER`, `AI_PROVIDER_BASE_URL`, `AI_PROVIDER_API_KEY` or `OPENAI_API_KEY`, `AI_MODEL`, `AI_EMBEDDING_MODEL`, and `AI_REQUEST_TIMEOUT_MS`; verify feature flags in `ai_feature_flags`; run dry-run and real-provider AI smokes before launch.
 - Rollout: Staging smoke tests; cutover plan; feature flags if needed.
+
+## Phase 5 AI Launch Gates
+
+1. Apply `0051_phase5_ai_triage_referral_drafting.sql` to staging and production.
+2. Set provider config in gateway environment:
+	- `AI_PROVIDER=openai` or the OpenAI-compatible provider name.
+	- `AI_PROVIDER_BASE_URL=https://api.openai.com/v1` unless using another compatible endpoint.
+	- `AI_PROVIDER_API_KEY` or `OPENAI_API_KEY`.
+	- `AI_MODEL`, for example `gpt-4o-mini`.
+	- `AI_EMBEDDING_MODEL`, for example `text-embedding-3-small`.
+	- `AI_REQUEST_TIMEOUT_MS`, default-safe value `30000`.
+3. Confirm DB feature flags that should launch are enabled:
+	- `ai.triage`
+	- `ai.referral`
+	- `ai.note_draft`
+	- `ai.care_plan_draft`
+	- `ai.embeddings_generation`
+4. Run validation gates after redeploy:
+	- `bash env/scripts/smoke-phase5-ai.sh` for dry-run persistence, reviewable draft/event coverage, and embedding generation coverage.
+	- A real-provider triage or note-draft request with `dryRun=false` using staging-safe case data.
+	- `bash env/scripts/smoke-backend-core.sh`
+	- `zsh env/scripts/smoke-admin-ops.sh`
+	- `bash env/scripts/smoke-phase4-clinical-record.sh`
+5. Keep AI output review-only. Do not auto-create referrals, notes, or care plans from AI drafts until a clinician workflow explicitly accepts them.
 
 ## Phase 6 Runbooks
 
