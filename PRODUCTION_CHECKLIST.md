@@ -13,7 +13,7 @@
 - Security: Rate limits for key endpoints; validate input across subscription/session routes.
 - Support: Admin tools for refunds/credits, logout-all, pricing controls; logging for billing events.
 - Performance: Verify pgvector index settings and analyze after embeddings backfill.
-- AI: Apply migration `0051`; set `AI_PROVIDER`, `AI_PROVIDER_BASE_URL`, `AI_PROVIDER_API_KEY` or `OPENAI_API_KEY`, `AI_MODEL`, `AI_EMBEDDING_MODEL`, and `AI_REQUEST_TIMEOUT_MS`; verify feature flags in `ai_feature_flags`; run dry-run and real-provider AI smokes before launch.
+- AI: Apply migration `0051`; set `AI_PROVIDER`, `AI_PROVIDER_BASE_URL`, `AI_API_MODE`, `AI_PROVIDER_API_KEY` or `OPENAI_API_KEY`, `AI_MODEL`, `AI_EMBEDDING_MODEL`, `AI_REASONING_EFFORT`, and `AI_REQUEST_TIMEOUT_MS`; verify feature flags in `ai_feature_flags`; run dry-run and real-provider AI smokes before launch.
 - Rollout: Staging smoke tests; cutover plan; feature flags if needed.
 
 ## Phase 5 AI Launch Gates
@@ -22,9 +22,11 @@
 2. Set provider config in gateway environment:
 	- `AI_PROVIDER=openai` or the OpenAI-compatible provider name.
 	- `AI_PROVIDER_BASE_URL=https://api.openai.com/v1` unless using another compatible endpoint.
+	- `AI_API_MODE=responses` for OpenAI's current Responses API.
 	- `AI_PROVIDER_API_KEY` or `OPENAI_API_KEY`.
-	- `AI_MODEL`, for example `gpt-4o-mini`.
+	- `AI_MODEL`, for example `gpt-5.5`; use `gpt-5.4-mini` if latency/cost is the tighter constraint.
 	- `AI_EMBEDDING_MODEL`, for example `text-embedding-3-small`.
+	- `AI_REASONING_EFFORT`, for example `low` for staging smoke and routine draft generation.
 	- `AI_REQUEST_TIMEOUT_MS`, default-safe value `30000`.
 3. Confirm DB feature flags that should launch are enabled:
 	- `ai.triage`

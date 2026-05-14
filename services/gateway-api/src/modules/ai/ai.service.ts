@@ -6,6 +6,18 @@ import { VectorTargetService } from '../config/vector-target.service';
 
 type AiDraftType = 'triage' | 'referral' | 'note' | 'care_plan';
 type AiReviewStatus = 'reviewed' | 'accepted' | 'rejected' | 'superseded';
+type AiApiMode = 'responses' | 'chat_completions';
+type AiReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh';
+
+type AiProviderConfig = {
+  provider: string;
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  timeoutMs: number;
+  apiMode: AiApiMode;
+  reasoningEffort?: AiReasoningEffort;
+};
 
 type AiRunInput = {
   petId?: string;
@@ -63,13 +75,25 @@ export class AiService {
     private readonly vectorTargets: VectorTargetService,
   ) {}
 
-  private providerConfig(prompt?: PromptVersion, dryRun = false) {
+  private providerConfig(prompt?: PromptVersion, dryRun = false): AiProviderConfig {
     const provider = dryRun ? 'dry_run' : (process.env.AI_PROVIDER || 'openai');
     const apiKey = process.env.AI_PROVIDER_API_KEY || process.env.OPENAI_API_KEY || '';
     const baseUrl = (process.env.AI_PROVIDER_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
-    const model = prompt?.model || process.env.AI_MODEL || 'gpt-4o-mini';
+    const model = prompt?.model || process.env.AI_MODEL || 'gpt-5.5';
     const timeoutMs = Math.min(Math.max(Number(process.env.AI_REQUEST_TIMEOUT_MS || '30000') || 30000, 5000), 120000);
-    return { provider, apiKey, baseUrl, model, timeoutMs };
+    const requestedApiMode = String(process.env.AI_API_MODE || '').trim().toLowerCase();
+    const apiMode: AiApiMode = requestedApiMode === 'chat_completions'
+      ? 'chat_completions'
+      : requestedApiMode === 'responses'
+        ? 'responses'
+        : provider === 'openai'
+          ? 'responses'
+          : 'chat_completions';
+    const requestedReasoningEffort = String(process.env.AI_REASONING_EFFORT || '').trim().toLowerCase();
+    const reasoningEffort = ['none', 'low', 'medium', 'high', 'xhigh'].includes(requestedReasoningEffort)
+      ? requestedReasoningEffort as AiReasoningEffort
+      : undefined;
+    return { provider, apiKey, baseUrl, model, timeoutMs, apiMode, reasoningEffort };
   }
 
   private embeddingProviderConfig(dryRun = false) {
@@ -320,6 +344,114 @@ export class AiService {
     }
   }
 
+  private strictOutputSchema(schema: Record<string, any>) {
+    const normalize = (node: any): any => {
+      if (!node || typeof node !== 'object' || Array.isArray(node)) return node;
+      const out: Record<string, any> = { ...node };
+      if (out.properties && typeof out.properties === 'object' && !Array.isArray(out.properties)) {
+        out.type = 'object';
+        out.properties = Object.fromEntries(Object.entries(out.properties).map(([key, value]) => [key, normalize(value)]));
+        out.required = Object.keys(out.properties);
+        out.additionalProperties = false;
+      }
+      if (out.items) out.items = normalize(out.items);
+      if (Array.isArray(out.anyOf)) out.anyOf = out.anyOf.map(normalize);
+      if (out.$defs && typeof out.$defs === 'object') {
+        out.$defs = Object.fromEntries(Object.entries(out.$defs).map(([key, value]) => [key, normalize(value)]));
+      }
+      return out;
+    };
+    return normalize(schema);
+  }
+
+  private responseFormat(prompt: PromptVersion) {
+    const schema = prompt.output_schema && Object.keys(prompt.output_schema).length > 0
+      ? prompt.output_schema
+      : { type: 'object', properties: { result: { type: 'string' } }, required: ['result'] };
+    return {
+      type: 'json_schema',
+      name: (prompt.prompt_key || 'ai_response').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64),
+      strict: true,
+      schema: this.strictOutputSchema(schema),
+    };
+  }
+
+  private async postProviderJson(cfg: AiProviderConfig, path: string, body: Record<string, any>, errorPrefix: string) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
+    try {
+      const response = await fetch(`${cfg.baseUrl}${path}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${cfg.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new BadGatewayException(data?.error?.message || `${errorPrefix}_${response.status}`);
+      }
+      return data;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private extractResponsesText(data: any) {
+    if (typeof data?.output_text === 'string' && data.output_text.trim()) return data.output_text;
+    const parts: string[] = [];
+    for (const item of Array.isArray(data?.output) ? data.output : []) {
+      if (item?.type === 'function_call' || item?.type === 'custom_tool_call') {
+        throw new BadGatewayException('ai_provider_tool_call_unhandled');
+      }
+      if (item?.type !== 'message' || !Array.isArray(item.content)) continue;
+      for (const content of item.content) {
+        if (content?.type === 'refusal') throw new BadGatewayException('ai_provider_refusal');
+        if (content?.type === 'output_text' && typeof content.text === 'string') parts.push(content.text);
+      }
+    }
+    return parts.join('').trim();
+  }
+
+  private parseProviderPayload(content: string) {
+    if (!content || typeof content !== 'string') throw new BadGatewayException('ai_provider_empty_response');
+    try {
+      return JSON.parse(content);
+    } catch {
+      throw new BadGatewayException('ai_provider_invalid_json');
+    }
+  }
+
+  private async callResponsesProvider(cfg: AiProviderConfig, prompt: PromptVersion, context: AiContext) {
+    const body: Record<string, any> = {
+      model: cfg.model,
+      store: false,
+      instructions: prompt.system_prompt,
+      input: [{ role: 'user', content: this.renderPrompt(prompt.user_template, context) }],
+      text: { format: this.responseFormat(prompt) },
+    };
+    if (cfg.reasoningEffort) body.reasoning = { effort: cfg.reasoningEffort };
+    const data = await this.postProviderJson(cfg, '/responses', body, 'ai_provider_http');
+    return this.parseProviderPayload(this.extractResponsesText(data));
+  }
+
+  private async callChatCompletionsProvider(cfg: AiProviderConfig, prompt: PromptVersion, context: AiContext) {
+    const data = await this.postProviderJson(cfg, '/chat/completions', {
+      model: cfg.model,
+      store: false,
+      temperature: 0.2,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: prompt.system_prompt },
+        { role: 'user', content: this.renderPrompt(prompt.user_template, context) },
+      ],
+    }, 'ai_provider_http');
+    const content = data?.choices?.[0]?.message?.content;
+    return this.parseProviderPayload(content);
+  }
+
   private async callProvider(prompt: PromptVersion, context: AiContext, draftType: AiDraftType, dryRun = false) {
     const cfg = this.providerConfig(prompt, dryRun);
     if (dryRun) {
@@ -330,41 +462,10 @@ export class AiService {
       };
     }
     if (!cfg.apiKey) throw new ServiceUnavailableException('ai_provider_not_configured');
-
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
-    try {
-      const response = await fetch(`${cfg.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${cfg.apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: cfg.model,
-          temperature: 0.2,
-          response_format: { type: 'json_object' },
-          messages: [
-            { role: 'system', content: prompt.system_prompt },
-            { role: 'user', content: this.renderPrompt(prompt.user_template, context) },
-          ],
-        }),
-        signal: controller.signal,
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new BadGatewayException(data?.error?.message || `ai_provider_http_${response.status}`);
-      }
-      const content = data?.choices?.[0]?.message?.content;
-      if (!content || typeof content !== 'string') throw new BadGatewayException('ai_provider_empty_response');
-      try {
-        return { provider: cfg.provider, model: cfg.model, payload: JSON.parse(content) };
-      } catch {
-        throw new BadGatewayException('ai_provider_invalid_json');
-      }
-    } finally {
-      clearTimeout(timer);
-    }
+    const payload = cfg.apiMode === 'responses'
+      ? await this.callResponsesProvider(cfg, prompt, context)
+      : await this.callChatCompletionsProvider(cfg, prompt, context);
+    return { provider: cfg.provider, model: cfg.model, payload };
   }
 
   private async callEmbeddingProvider(texts: string[], dimension: number, dryRun = false) {
@@ -378,30 +479,12 @@ export class AiService {
     }
     if (!cfg.apiKey) throw new ServiceUnavailableException('ai_provider_not_configured');
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
-    try {
-      const response = await fetch(`${cfg.baseUrl}/embeddings`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${cfg.apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ model: cfg.model, input: texts }),
-        signal: controller.signal,
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new BadGatewayException(data?.error?.message || `ai_embedding_provider_http_${response.status}`);
-      }
-      const embeddings = Array.isArray(data?.data)
-        ? data.data.map((item: any) => this.normalizeEmbedding(item?.embedding, dimension))
-        : [];
-      if (embeddings.length !== texts.length) throw new BadGatewayException('ai_embedding_provider_mismatched_response');
-      return { provider: cfg.provider, model: cfg.model, embeddings };
-    } finally {
-      clearTimeout(timer);
-    }
+    const data = await this.postProviderJson(cfg, '/embeddings', { model: cfg.model, input: texts }, 'ai_embedding_provider_http');
+    const embeddings = Array.isArray(data?.data)
+      ? data.data.map((item: any) => this.normalizeEmbedding(item?.embedding, dimension))
+      : [];
+    if (embeddings.length !== texts.length) throw new BadGatewayException('ai_embedding_provider_mismatched_response');
+    return { provider: cfg.provider, model: cfg.model, embeddings };
   }
 
   private enrichReferralPayload(payload: any, context: AiContext) {

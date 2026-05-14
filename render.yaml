@@ -46,14 +46,18 @@ services:
         value: openai
       - key: AI_PROVIDER_BASE_URL
         value: https://api.openai.com/v1
+      - key: AI_API_MODE
+        value: responses
       - key: OPENAI_API_KEY
         sync: false
       - key: AI_PROVIDER_API_KEY
         sync: false
       - key: AI_MODEL
-        value: gpt-4o-mini
+        value: gpt-5.5
       - key: AI_EMBEDDING_MODEL
         value: text-embedding-3-small
+      - key: AI_REASONING_EFFORT
+        value: low
       - key: AI_REQUEST_TIMEOUT_MS
         value: "30000"
 

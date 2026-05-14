@@ -19,9 +19,11 @@ export const EnvSchema = z.object({
   AI_PROVIDER: z.string().min(1).optional(),
   AI_PROVIDER_BASE_URL: z.string().url().optional(),
   AI_PROVIDER_API_KEY: z.string().min(1).optional(),
+  AI_API_MODE: z.enum(['responses', 'chat_completions']).optional(),
   OPENAI_API_KEY: z.string().min(1).optional(),
   AI_MODEL: z.string().min(1).optional(),
   AI_EMBEDDING_MODEL: z.string().min(1).optional(),
+  AI_REASONING_EFFORT: z.enum(['none', 'low', 'medium', 'high', 'xhigh']).optional(),
   AI_REQUEST_TIMEOUT_MS: z.string().regex(/^\d+$/).optional()
 });
 
