@@ -42,6 +42,20 @@ services:
         sync: false
       - key: LIVEKIT_API_SECRET
         sync: false
+      - key: AI_PROVIDER
+        value: openai
+      - key: AI_PROVIDER_BASE_URL
+        value: https://api.openai.com/v1
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: AI_PROVIDER_API_KEY
+        sync: false
+      - key: AI_MODEL
+        value: gpt-4o-mini
+      - key: AI_EMBEDDING_MODEL
+        value: text-embedding-3-small
+      - key: AI_REQUEST_TIMEOUT_MS
+        value: "30000"
 
   - type: web
     name: cav-webhooks-staging
