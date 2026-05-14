@@ -1,5 +1,6 @@
 import { Body, Controller, Delete, Get, HttpCode, HttpException, HttpStatus, Param, Patch, Post, Put, UseGuards } from '@nestjs/common';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import WebSocket from 'ws';
 import { AuthGuard } from '../auth/auth.guard';
 import { DbService } from '../db/db.service';
 import { RequestContext } from '../auth/request-context.service';
@@ -251,7 +252,7 @@ export class PetsController {
     if (!url || !key) {
       throw new HttpException('Supabase env missing: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY', HttpStatus.BAD_REQUEST);
     }
-    this.supabase = createClient(url, key);
+    this.supabase = createClient(url, key, { realtime: { transport: WebSocket as any } });
     return this.supabase;
   }
 

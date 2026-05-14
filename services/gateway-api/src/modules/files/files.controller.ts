@@ -1,6 +1,7 @@
 import { Controller, Get, Post, Query, UseGuards, Body, BadRequestException, BadGatewayException } from '@nestjs/common';
 import { AuthGuard } from '../auth/auth.guard';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import WebSocket from 'ws';
 import { DbService } from '../db/db.service';
 
 @UseGuards(AuthGuard)
@@ -21,7 +22,7 @@ export class FilesController {
       throw new BadRequestException('Supabase env missing: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY');
     }
     try {
-      this.supabase = createClient(url, key);
+      this.supabase = createClient(url, key, { realtime: { transport: WebSocket as any } });
     } catch (e) {
       throw new BadGatewayException(`storage client init exception: ${this.errorMessage(e)}`);
     }

@@ -257,6 +257,9 @@ importers:
       stripe:
         specifier: ^15.12.0
         version: 15.12.0
+      ws:
+        specifier: ^8.18.3
+        version: 8.18.3
       zod:
         specifier: ^3.23.8
         version: 3.25.76
@@ -273,6 +276,9 @@ importers:
       '@types/pg':
         specifier: ^8.11.10
         version: 8.15.5
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
       ts-node:
         specifier: ^10.9.2
         version: 10.9.2(@types/node@22.18.12)(typescript@6.0.3)

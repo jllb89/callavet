@@ -267,7 +267,8 @@ export class MeController {
     try {
       // Load supabase-js (CJS main supported in v2) at runtime
       const { createClient } = require('@supabase/supabase-js');
-      const client = createClient(supabaseUrl, serviceKey);
+      const WebSocket = require('ws');
+      const client = createClient(supabaseUrl, serviceKey, { realtime: { transport: WebSocket } });
       // Prefer bearer token if provided to perform global sign-out for that user
       const authz = (req?.headers?.authorization || '').toString();
       if (authz?.startsWith('Bearer ')) {
