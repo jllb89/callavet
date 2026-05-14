@@ -24,7 +24,7 @@
 	- `AI_PROVIDER_BASE_URL=https://api.openai.com/v1` unless using another compatible endpoint.
 	- `AI_API_MODE=responses` for OpenAI's current Responses API.
 	- `AI_PROVIDER_API_KEY` or `OPENAI_API_KEY`.
-	- `AI_MODEL`, for example `gpt-5.5`; use `gpt-5.4-mini` if latency/cost is the tighter constraint.
+	- `AI_MODEL=gpt-5.4-mini` for routine launch traffic; reserve `gpt-5.5` for evaluated high-complexity escalation paths.
 	- `AI_EMBEDDING_MODEL`, for example `text-embedding-3-small`.
 	- `AI_REASONING_EFFORT`, for example `low` for staging smoke and routine draft generation.
 	- `AI_REQUEST_TIMEOUT_MS`, default-safe value `30000`.

@@ -53,7 +53,7 @@ services:
       - key: AI_PROVIDER_API_KEY
         sync: false
       - key: AI_MODEL
-        value: gpt-5.5
+        value: gpt-5.4-mini
       - key: AI_EMBEDDING_MODEL
         value: text-embedding-3-small
       - key: AI_REASONING_EFFORT

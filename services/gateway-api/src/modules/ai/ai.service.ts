@@ -79,7 +79,7 @@ export class AiService {
     const provider = dryRun ? 'dry_run' : (process.env.AI_PROVIDER || 'openai');
     const apiKey = process.env.AI_PROVIDER_API_KEY || process.env.OPENAI_API_KEY || '';
     const baseUrl = (process.env.AI_PROVIDER_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
-    const model = prompt?.model || process.env.AI_MODEL || 'gpt-5.5';
+    const model = prompt?.model || process.env.AI_MODEL || 'gpt-5.4-mini';
     const timeoutMs = Math.min(Math.max(Number(process.env.AI_REQUEST_TIMEOUT_MS || '30000') || 30000, 5000), 120000);
     const requestedApiMode = String(process.env.AI_API_MODE || '').trim().toLowerCase();
     const apiMode: AiApiMode = requestedApiMode === 'chat_completions'
