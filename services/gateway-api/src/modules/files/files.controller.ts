@@ -20,7 +20,11 @@ export class FilesController {
     if (!url || !key) {
       throw new BadRequestException('Supabase env missing: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY');
     }
-    this.supabase = createClient(url, key);
+    try {
+      this.supabase = createClient(url, key);
+    } catch (e) {
+      throw new BadGatewayException(`storage client init exception: ${this.errorMessage(e)}`);
+    }
     return this.supabase;
   }
 
