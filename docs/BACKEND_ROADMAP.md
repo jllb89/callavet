@@ -1,6 +1,6 @@
 # Backend Roadmap to Reach Subscription and Billing Quality
 
-_Last updated: 2026-05-11 (Phase 5 implementation pass 1)_
+_Last updated: 2026-05-14 (Phase 5 staging closure and storage gate)_
 
 ## Purpose
 This document sequences the backend work required so the rest of the platform reaches the same production bar as subscriptions and billing before major effort returns to the Flutter app.
@@ -22,18 +22,15 @@ This document sequences the backend work required so the rest of the platform re
 - OTP auth hardening and post-login routing dependencies.
 - Basic DB and OpenAPI discipline around the subscription surface.
 - Vet discovery, specialties, availability management, referral intake and assignment, ratings, and explicit appointment transitions.
+- Realtime chat, LiveKit video lifecycle, structured clinical records, encounter-linked file artifacts, notifications/admin ops, and AI triage/referral/drafting are implemented and staging-validated.
 
 ### Partial now
-- Sessions and HTTP message flows.
-- Session notes, care plans, and image cases.
-- Knowledge base and vector retrieval plumbing.
-- AI triage, referral recommendations, reviewable note drafts, and reviewable care-plan drafts are implemented behind feature/provider controls and ready for staging validation.
+- Production cutover chores remain outside the backend roadmap itself: production env mirroring, backup/PITR confirmation, Stripe webhook production endpoint confirmation, and release runbook evidence.
+- Retrieval quality and embeddings coverage should continue improving with real usage, but the provider/configuration path is in place and validated.
 
 ### Weak or missing now
-- Production-grade realtime chat transport.
-- Real video infrastructure.
-- Structured horse medical record and encounter model.
-- Notifications and admin completeness outside billing.
+- No known launch-blocking backend roadmap item remains open on staging as of 2026-05-14.
+- Future backend enhancements are now product iteration work, especially richer AI tool/function-calling orchestration, high-acuity model escalation, and deeper analytics/evals.
 
 ## Roadmap Order
 
@@ -183,10 +180,13 @@ Exit criteria:
 Target: 3 to 4 weeks
 
 Status:
-In implementation as of 2026-05-11. Phase 5 pass 1 is locally implemented and build-validated; staging still needs migration application, gateway redeploy, provider credentials, and smoke validation before this phase can close.
+Closed on staging on 2026-05-14. Migration `0051_phase5_ai_triage_referral_drafting.sql` is applied and repaired in Supabase migration history, OpenAI Responses API provider configuration is deployed with `gpt-5.4-mini`, dry-run and real-provider AI validation pass, and the Phase 4 clinical file artifact gate is green after the Supabase JS Node 20 WebSocket transport fix.
 
 Update on 2026-05-11 (implementation pass 1):
 Migration `0051_phase5_ai_triage_referral_drafting.sql` was added and mirrored in `packages/db/migrations`. It introduces AI feature flags, prompt versions, `ai_events`, and reviewable `ai_drafts` with RLS/indexes. Gateway now has an `AiModule` with OpenAI-compatible provider abstraction, prompt loading, feature checks, audit/event persistence, dry-run mode for deployment validation, and embedding generation through configured `vector_targets`. Authenticated endpoints added: `POST /ai/triage`, `POST /ai/referrals/recommend`, `POST /ai/drafts/consultation-note`, `POST /ai/drafts/care-plan`, `POST /ai/embeddings/generate`, `GET /ai/drafts`, `PATCH /ai/drafts/:draftId/review`, and `GET /ai/events`. OpenAPI is updated and `env/scripts/smoke-phase5-ai.sh` validates dry-run drafts, events, and embedding generation without requiring external model credentials. Gateway API compiles successfully.
+
+Update on 2026-05-14 (staging closure):
+Gateway AI provider integration was updated to OpenAI's current Responses API with strict structured outputs and `store: false`. Render staging AI env vars are configured for `AI_API_MODE=responses`, `AI_MODEL=gpt-5.4-mini`, `AI_EMBEDDING_MODEL=text-embedding-3-small`, and `AI_REASONING_EFFORT=low`. Staging validation passed: `env/scripts/smoke-phase5-ai.sh` returned `PASS=7 FAIL=0`; a real-provider triage request returned `ok=true`, `provider=openai`, `model=gpt-5.4-mini`; and a real embedding request returned `provider=openai`, `model=text-embedding-3-small` with `persist=false`. The separate deployed file-storage blocker was fixed in gateway commit `f953e4a` by providing the `ws` transport to Supabase JS clients on Render Node 20; plain storage upload/download and `env/scripts/smoke-phase4-clinical-record.sh` now pass on staging (`PASS=11 FAIL=0`).
 
 Goal:
 Add AI only after the transport, record, and entitlement layers are trustworthy.
@@ -198,7 +198,7 @@ Deliverables:
 - [x] Add AI drafting for consultation notes and care-plan suggestions.
 - [x] Add review workflow so AI suggestions are editable and never auto-publish critical clinical decisions.
 - [x] Add embedding generation jobs so vector retrieval no longer depends on ad hoc backfills.
-- [ ] Configure production AI provider credentials and run real-provider staging validation in addition to dry-run smoke.
+- [x] Configure AI provider credentials and run real-provider staging validation in addition to dry-run smoke. Production should mirror the same env set during cutover.
 
 Exit criteria:
 - AI output is reviewable, attributable, and easy to disable.
@@ -248,7 +248,7 @@ These rules apply to every phase:
 - Prefer one source of truth per domain instead of duplicating logic across gateway, chat-service, and clients.
 
 ## Recommended Backend-First Stop Point Before Returning to Flutter
-The safe point to return to major Flutter work is after Phases 0 through 4 are complete.
+The safe point to return to major Flutter work has been reached. Phases 0 through 6 and the Phase 5 AI layer are closed on staging, with the backend core, admin ops, clinical record/file artifact, and AI smoke gates green.
 
 Reason:
 - By then, the app can depend on stable contracts for vet discovery, appointments, chat, video, and medical history.
@@ -270,8 +270,8 @@ Reason:
 - Phase 6 implementation pass 2 completed on 2026-04-28: notification triggers integrated into appointments (scheduled/start/end), sessions (start/end), payments (failure), and notes (ready). All admin endpoints functional (notifications/events, audit/logs, export/sessions, export/notes, ops/dashboard). Gateway API compiles without errors.
 - Phase 6 post-redeploy gate passed on 2026-04-28 after exporting `NotificationsService` from `NotificationsModule`: gateway startup stable, backend core smoke green, and notification event persistence visible from admin tooling.
 - Phase 6 is now closed on staging on 2026-04-28: notification/admin hardening complete with enforced ops alert coverage and documented runbooks.
-- Phase 5 (AI triage/referral/drafting) is now the active priority.
-- Phase 5 implementation pass 1 completed locally on 2026-05-11: schema, provider abstraction, reviewable AI endpoints, embedding generation, OpenAPI, and dry-run smoke script are in place. Next gate is applying migration `0051`, setting AI provider env vars, redeploying gateway, and running `env/scripts/smoke-phase5-ai.sh` plus the existing backend/admin/clinical smokes.
+- Phase 5 (AI triage/referral/drafting) is closed on staging on 2026-05-14: migration `0051` applied/history-repaired, OpenAI Responses API configured, dry-run smoke green, real-provider triage green, and real embedding request green.
+- Backend-first stop point reached on 2026-05-14. Return to Flutter/mobile work, while keeping `env/scripts/smoke-backend-core.sh`, `zsh env/scripts/smoke-admin-ops.sh`, `bash env/scripts/smoke-phase4-clinical-record.sh`, and `bash env/scripts/smoke-phase5-ai.sh` as deployment gates for backend changes.
 
 ## Related Files
 - `services/gateway-api/src/modules/subscriptions/subscriptions.controller.ts`
