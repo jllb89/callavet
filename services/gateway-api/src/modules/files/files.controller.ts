@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Query, UseGuards, Body, BadRequestException } from '@nestjs/common';
+import { Controller, Get, Post, Query, UseGuards, Body, BadRequestException, BadGatewayException } from '@nestjs/common';
 import { AuthGuard } from '../auth/auth.guard';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { DbService } from '../db/db.service';
@@ -8,6 +8,11 @@ import { DbService } from '../db/db.service';
 export class FilesController {
   constructor(private readonly db: DbService) {}
   private supabase?: SupabaseClient;
+
+  private errorMessage(error: unknown) {
+    return String((error as any)?.message || error || 'unknown_error').slice(0, 500);
+  }
+
   private getClient(): SupabaseClient {
     if (this.supabase) return this.supabase;
     const url = process.env.SUPABASE_URL;
@@ -70,6 +75,8 @@ export class FilesController {
     const { error } = await supa.storage.from(bucket).upload(body.path, buffer, {
       contentType,
       upsert: true,
+    }).catch((e) => {
+      throw new BadGatewayException(`storage upload exception: ${this.errorMessage(e)}`);
     });
     if (error) {
       throw new BadRequestException(`upload failed: ${error.message}`);
@@ -138,7 +145,9 @@ export class FilesController {
     if (!path) throw new BadRequestException('path is required');
     const bucket = this.bucket();
     const supa = this.getClient();
-    const { data, error } = await supa.storage.from(bucket).createSignedUrl(path, 3600);
+    const { data, error } = await supa.storage.from(bucket).createSignedUrl(path, 3600).catch((e) => {
+      throw new BadGatewayException(`storage sign exception: ${this.errorMessage(e)}`);
+    });
     if (error) {
       throw new BadRequestException(`sign failed: ${error.message}`);
     }
