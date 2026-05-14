@@ -76,60 +76,58 @@ export class FilesController {
     }
     // Optional: auto-create encounter-linked artifacts if petId provided
     if (body.petId) {
-      const encounterSql = `select coalesce($1::uuid, public.ensure_clinical_encounter($2::uuid, $3::uuid)) as encounter_id`;
-      const encounterRes = await (this.db as any).query(encounterSql, [
-        body.encounterId || null,
-        body.sessionId || null,
-        body.petId,
-      ]);
-      const encounterId = encounterRes.rows[0]?.encounter_id || null;
-
-      if (encounterId) {
-        const fileIdRes = await (this.db as any).query(`select gen_random_uuid() as id`);
-        const fileId = fileIdRes.rows[0].id;
-        await (this.db as any).query(
-          `insert into encounter_files (id, encounter_id, pet_id, session_id, uploaded_by, storage_path, content_type, labels, created_at)
-           values ($1, $2::uuid, $3::uuid, $4::uuid, auth.uid(), $5, $6, $7::text[], now())
-           on conflict (encounter_id, storage_path) do nothing`,
-          [
-            fileId,
-            encounterId,
-            body.petId,
-            body.sessionId || null,
-            body.path,
-            contentType,
-            body.labels || [],
-          ]
-        );
-      }
-
-      const idSql = `select gen_random_uuid() as id`;
-      const idRes = await (this.db as any).query(idSql);
-      const id = idRes.rows[0].id;
-      await (this.db as any).query(
-        `insert into image_cases (id, encounter_id, pet_id, session_id, image_url, labels, findings, diagnosis_label, created_at)
-         values (
-           $1,
-           $2::uuid,
-           $3,
-           $4,
-           $5,
-           $6,
-           $7,
-           $8,
-           now()
-         )`,
-        [
-          id,
-          encounterId,
-          body.petId,
+      const isImageUpload = contentType.toLowerCase().startsWith('image/');
+      await this.db.runInTx(async q => {
+        const encounterSql = `select coalesce($1::uuid, public.ensure_clinical_encounter($2::uuid, $3::uuid)) as encounter_id`;
+        const encounterRes = await q<{ encounter_id: string | null }>(encounterSql, [
+          body.encounterId || null,
           body.sessionId || null,
-          body.path,
-          body.labels || null,
-          body.findings || null,
-          body.diagnosis_label || null,
-        ]
-      );
+          body.petId,
+        ]);
+        const encounterId = encounterRes.rows[0]?.encounter_id || null;
+
+        if (encounterId) {
+          await q(
+            `insert into encounter_files (id, encounter_id, pet_id, session_id, uploaded_by, storage_path, content_type, labels, created_at)
+             values (gen_random_uuid(), $1::uuid, $2::uuid, $3::uuid, auth.uid(), $4, $5, $6::text[], now())
+             on conflict (encounter_id, storage_path) do nothing`,
+            [
+              encounterId,
+              body.petId,
+              body.sessionId || null,
+              body.path,
+              contentType,
+              body.labels || [],
+            ]
+          );
+        }
+
+        if (isImageUpload) {
+          await q(
+            `insert into image_cases (id, encounter_id, pet_id, session_id, image_url, labels, findings, diagnosis_label, created_at)
+             values (
+               gen_random_uuid(),
+               $1::uuid,
+               $2,
+               $3,
+               $4,
+               $5,
+               $6,
+               $7,
+               now()
+             )`,
+            [
+              encounterId,
+              body.petId,
+              body.sessionId || null,
+              body.path,
+              body.labels || null,
+              body.findings || null,
+              body.diagnosis_label || null,
+            ]
+          );
+        }
+      });
     }
     return { ok: true, path: body.path, contentType };
   }
