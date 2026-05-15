@@ -20,6 +20,7 @@ const bool _bypassOtpValidationForDev = bool.fromEnvironment(
   'BYPASS_OTP',
   defaultValue: false,
 );
+const String _trustedDevPhoneDigits = '5542850675';
 
 void _loginLog(String message) {
   if (_loginFlowDebug) {
@@ -35,6 +36,11 @@ String _normalizePhone(String input) {
 }
 
 String _digitsOnly(String input) => input.replaceAll(RegExp(r'[^0-9]'), '');
+
+bool _isTrustedDevPhone(String? phone) {
+  if (phone == null || phone.isEmpty) return false;
+  return _digitsOnly(phone).endsWith(_trustedDevPhoneDigits);
+}
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -316,6 +322,46 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
+  Future<bool?> _hasAtLeastOneHorseViaGateway() async {
+    final token = Supabase.instance.client.auth.currentSession?.accessToken;
+    if (token == null || token.isEmpty) {
+      _loginLog('Horse check skipped: missing auth token');
+      return null;
+    }
+
+    final uri = Uri.parse('${Environment.apiBaseUrl}/pets');
+    final client = HttpClient();
+    try {
+      final req = await client.getUrl(uri);
+      req.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+
+      final res = await req.close();
+      final text = await utf8.decoder.bind(res).join();
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        _loginLog('Horse check failed status=${res.statusCode} body=$text');
+        return null;
+      }
+
+      final decoded =
+          text.isEmpty ? <String, dynamic>{} : (jsonDecode(text) as Map<String, dynamic>);
+      final data = decoded['data'];
+      if (data is! List) {
+        _loginLog('Horse check response has non-list data: $decoded');
+        return null;
+      }
+
+      final hasAtLeastOneHorse = data.whereType<Map>().isNotEmpty;
+      _loginLog('Horse check via gateway: hasAtLeastOneHorse=$hasAtLeastOneHorse');
+      return hasAtLeastOneHorse;
+    } catch (err) {
+      _loginLog('Horse check threw error: $err');
+      return null;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   bool _isGatewayRouteMissing(_GatewayOtpException err) {
     final msg = err.message.toLowerCase();
     return (err.statusCode == 404) &&
@@ -354,6 +400,12 @@ class _LoginScreenState extends State<LoginScreen> {
     String? phone,
     String? email,
   }) async {
+    if (channel == 'sms' && _isTrustedDevPhone(phone)) {
+      _loginLog(
+        'Trusted dev phone detected; bypassing gateway OTP send and using direct Supabase OTP for phone=$phone',
+      );
+      return _sendOtpDirectSupabase(channel: channel, phone: phone, email: email);
+    }
     if (_gatewayOtpUnavailable) {
       return _sendOtpDirectSupabase(channel: channel, phone: phone, email: email);
     }
@@ -578,14 +630,29 @@ class _LoginScreenState extends State<LoginScreen> {
     if (!mounted) return;
 
     if (hasActiveSubscription == true) {
-      _loginLog('Routing userId=$userId to /home (active subscription found)');
-      PostLoginRoutingController.routeTo(
-        context,
-        route: '/home',
-        source: 'login-post-auth-profile-complete',
-        userId: userId,
-        reason: 'active-subscription',
-      );
+      final hasAtLeastOneHorse = await _hasAtLeastOneHorseViaGateway();
+      if (!mounted) return;
+      if (hasAtLeastOneHorse == true) {
+        _loginLog('Routing userId=$userId to /home (active subscription with horses found)');
+        PostLoginRoutingController.routeTo(
+          context,
+          route: '/home',
+          source: 'login-post-auth-profile-complete',
+          userId: userId,
+          reason: 'active-subscription-with-horses',
+        );
+      } else {
+        _loginLog('Routing userId=$userId to /horse-kyc (active subscription but no horses yet)');
+        PostLoginRoutingController.routeTo(
+          context,
+          route: '/horse-kyc',
+          source: 'login-post-auth-profile-complete',
+          userId: userId,
+          reason: hasAtLeastOneHorse == null
+              ? 'horse-check-failed-fallback-to-horse-kyc'
+              : 'active-subscription-no-horses',
+        );
+      }
       return;
     }
 

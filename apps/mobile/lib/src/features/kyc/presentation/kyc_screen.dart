@@ -28,6 +28,7 @@ const bool _kycFlowDebug = bool.fromEnvironment(
   'KYC_FLOW_DEBUG',
   defaultValue: false,
 );
+const String _trustedDevPhoneDigits = '5542850675';
 
 const List<String> _mexicanStates = [
   'Aguascalientes',
@@ -138,6 +139,11 @@ String _normalizePhoneForOtp(String input) {
 String _digitsOnlyPhone(String input) =>
     input.replaceAll(RegExp(r'[^0-9]'), '');
 
+bool _isTrustedDevPhone(String? phone) {
+  if (phone == null || phone.isEmpty) return false;
+  return _digitsOnlyPhone(phone).endsWith(_trustedDevPhoneDigits);
+}
+
 bool _kycGatewayOtpUnavailable = false;
 
 String _otpRetryMessage(String message, int? retryAfterSeconds) {
@@ -189,6 +195,15 @@ Future<Map<String, dynamic>> _sendOtpViaGatewayForKyc({
   required String phone,
   required bool shouldCreateUser,
 }) async {
+  if (_isTrustedDevPhone(phone)) {
+    _kycFlowLog(
+      'Trusted dev phone detected; bypassing gateway OTP send and using direct Supabase OTP for phone=$phone',
+    );
+    return _sendOtpDirectSupabaseForKyc(
+      phone: phone,
+      shouldCreateUser: shouldCreateUser,
+    );
+  }
   if (_kycGatewayOtpUnavailable) {
     return _sendOtpDirectSupabaseForKyc(
       phone: phone,
@@ -258,6 +273,10 @@ class _OtpAttemptGuard {
   }
 
   static Duration? retryAfter(String phone) {
+    if (_isTrustedDevPhone(phone)) {
+      return null; // Dev phone bypasses rate limit
+    }
+
     final now = DateTime.now();
     _prune(phone, now);
     final attempts = _attemptsByPhone[phone];
@@ -271,6 +290,10 @@ class _OtpAttemptGuard {
   }
 
   static void register(String phone) {
+    if (_isTrustedDevPhone(phone)) {
+      return; // Dev phone doesn't track attempts
+    }
+
     final now = DateTime.now();
     _prune(phone, now);
     final attempts = _attemptsByPhone.putIfAbsent(phone, () => <DateTime>[]);
@@ -602,16 +625,33 @@ class _KycScreenState extends State<KycScreen> {
       if (!mounted) return;
 
       if (hasActiveSubscription == true) {
-        postLoginRouteLog(
-          'KYC complete profile and active subscription found. Routing to /home userId=${user?.id}',
-        );
-        PostLoginRoutingController.routeTo(
-          context,
-          route: '/home',
-          source: 'kyc-otp-complete-profile',
-          userId: user?.id,
-          reason: 'active-subscription',
-        );
+        final hasAtLeastOneHorse = await _hasAtLeastOneHorseViaGateway();
+        if (!mounted) return;
+        if (hasAtLeastOneHorse == true) {
+          postLoginRouteLog(
+            'KYC complete profile + active subscription + horses found. Routing to /home userId=${user?.id}',
+          );
+          PostLoginRoutingController.routeTo(
+            context,
+            route: '/home',
+            source: 'kyc-otp-complete-profile',
+            userId: user?.id,
+            reason: 'active-subscription-with-horses',
+          );
+        } else {
+          postLoginRouteLog(
+            'KYC complete profile + active subscription but no horses yet. Routing to /horse-kyc userId=${user?.id}',
+          );
+          PostLoginRoutingController.routeTo(
+            context,
+            route: '/horse-kyc',
+            source: 'kyc-otp-complete-profile',
+            userId: user?.id,
+            reason: hasAtLeastOneHorse == null
+                ? 'horse-check-failed-fallback-to-horse-kyc'
+                : 'active-subscription-no-horses',
+          );
+        }
       } else {
         postLoginRouteLog(
           'KYC complete profile and no active subscription. Routing directly to /subscription-plans userId=${user?.id}',
@@ -746,6 +786,46 @@ class _KycScreenState extends State<KycScreen> {
       return hasActive;
     } catch (err) {
       _kycFlowLog('Active subscription check threw error: $err');
+      return null;
+    } finally {
+      http.close(force: true);
+    }
+  }
+
+  Future<bool?> _hasAtLeastOneHorseViaGateway() async {
+    final token = Supabase.instance.client.auth.currentSession?.accessToken;
+    if (token == null || token.isEmpty) {
+      _kycFlowLog('Horse check skipped: missing auth token');
+      return null;
+    }
+
+    final uri = Uri.parse('${Environment.apiBaseUrl}/pets');
+    final http = HttpClient();
+    try {
+      final req = await http.getUrl(uri);
+      req.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+
+      final res = await req.close();
+      final raw = await utf8.decoder.bind(res).join();
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        _kycFlowLog('Horse check failed status=${res.statusCode} body=$raw');
+        return null;
+      }
+
+      final decoded =
+          raw.isEmpty ? <String, dynamic>{} : (jsonDecode(raw) as Map<String, dynamic>);
+      final data = decoded['data'];
+      if (data is! List) {
+        _kycFlowLog('Horse check response has non-list data: $decoded');
+        return null;
+      }
+
+      final hasAtLeastOneHorse = data.whereType<Map>().isNotEmpty;
+      _kycFlowLog('Horse check via gateway: hasAtLeastOneHorse=$hasAtLeastOneHorse');
+      return hasAtLeastOneHorse;
+    } catch (err) {
+      _kycFlowLog('Horse check threw error: $err');
       return null;
     } finally {
       http.close(force: true);

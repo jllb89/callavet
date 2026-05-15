@@ -1,5 +1,11 @@
+## Launch iOS simulator
+flutter emulators --launch apple_ios_simulator
+
+## Mobile project root
+cd /Users/jorge/Desktop/call-a-vet/apps/mobile
+
 ## Staging (verbose debug)
-flutter run \
+cd /Users/jorge/Desktop/call-a-vet/apps/mobile && flutter run \
   --dart-define=SUPABASE_URL=https://oajnhvizipicnypdxcrb.supabase.co \
   --dart-define=SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9ham5odml6aXBpY255cGR4Y3JiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjE2MDc5MzcsImV4cCI6MjA3NzE4MzkzN30.aSAu4SZVrZjxIyik50rraOmm7Ni2Wk7tFdLXDE_Jelc \
   --dart-define=API_BASE_URL=https://cav-gateway-staging-ugvx.onrender.com \
@@ -7,10 +13,10 @@ flutter run \
   --dart-define=BYPASS_OTP=false \
   --dart-define=KYC_LOCATION_DEBUG=false \
   --dart-define=KYC_FLOW_DEBUG=true \
-  -d "iPhone 17 Pro Max"
+  -d "vet"
 
 ## Production-like local run (quiet logs)
-flutter run \
+cd /Users/jorge/Desktop/call-a-vet/apps/mobile && flutter run \
   --dart-define=SUPABASE_URL=https://oajnhvizipicnypdxcrb.supabase.co \
   --dart-define=SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9ham5odml6aXBpY255cGR4Y3JiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjE2MDc5MzcsImV4cCI6MjA3NzE4MzkzN30.aSAu4SZVrZjxIyik50rraOmm7Ni2Wk7tFdLXDE_Jelc \
   --dart-define=API_BASE_URL=https://cav-gateway-staging-ugvx.onrender.com \
@@ -18,7 +24,7 @@ flutter run \
   --dart-define=BYPASS_OTP=false \
   --dart-define=KYC_LOCATION_DEBUG=false \
   --dart-define=KYC_FLOW_DEBUG=false \
-  -d "iPhone 17 Pro Max"
+  -d "vet"
 
 # Toggle OTP bypass:
 #   --dart-define=BYPASS_OTP=true   -> skips OTP step (dev/testing)

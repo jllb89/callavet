@@ -69,9 +69,18 @@ class _SubscriptionPlansLoaderScreenState
     if (!mounted) return;
 
     if (active.hasActive) {
-      _subscriptionLog(
-          'User already has active subscription. Routing to /home');
-      context.go('/home');
+      final hasAtLeastOneHorse =
+          await _SubscriptionPlansRepository.instance.hasAtLeastOneHorse();
+      if (!mounted) return;
+      if (hasAtLeastOneHorse == true) {
+        _subscriptionLog(
+            'User already has active subscription and horses. Routing to /home');
+        context.go('/home');
+      } else {
+        _subscriptionLog(
+            'User already has active subscription but no horses yet. Routing to /horse-kyc');
+        context.go('/horse-kyc');
+      }
       return;
     }
 
@@ -1010,6 +1019,33 @@ class _SubscriptionPlansRepository {
   Future<bool> hasActiveSubscription() async {
     final result = await fetchActiveSubscription();
     return result.hasActive;
+  }
+
+  Future<bool?> hasAtLeastOneHorse() async {
+    final token = Supabase.instance.client.auth.currentSession?.accessToken;
+    if (token == null || token.isEmpty) {
+      _subscriptionLog('Horse check aborted: missing auth token.');
+      return null;
+    }
+
+    try {
+      final response = await _request(
+        method: 'GET',
+        path: '/pets',
+        token: token,
+      );
+      final data = response is Map<String, dynamic> ? response['data'] : null;
+      if (data is! List) {
+        _subscriptionLog('Horse check got non-list data: $response');
+        return null;
+      }
+      final hasAtLeastOneHorse = data.whereType<Map>().isNotEmpty;
+      _subscriptionLog('Horse check result: hasAtLeastOneHorse=$hasAtLeastOneHorse');
+      return hasAtLeastOneHorse;
+    } catch (err) {
+      _subscriptionLog('Horse check failed: $err');
+      return null;
+    }
   }
 
   Future<Map<String, dynamic>> changePlan(String code) async {
