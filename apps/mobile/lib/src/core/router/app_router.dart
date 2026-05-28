@@ -5,7 +5,7 @@ import '../navigation/post_login_routing_controller.dart';
 
 import '../../features/auth/presentation/login_screen.dart';
 import '../../features/chat/presentation/chat_screen.dart';
-import '../../features/home/presentation/home_screen.dart';
+import '../../features/home/presentation/home_v2_screen.dart';
 import '../../features/horse_care/presentation/horse_care_screen.dart';
 import '../../features/horse_kyc/presentation/horse_kyc_screen.dart';
 import '../../features/kyc/presentation/kyc_screen.dart';
@@ -85,7 +85,7 @@ class AppRouter {
       GoRoute(
         path: '/home',
         name: 'home',
-        builder: (context, state) => const HomeScreen(),
+        builder: (context, state) => const HomeV2Screen(),
       ),
       GoRoute(
         path: '/chat/:sessionId',

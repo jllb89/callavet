@@ -1127,33 +1127,35 @@ class _LoginScreenState extends State<LoginScreen> {
             ),
           ),
         const SizedBox(height: 24),
-        SizedBox(
-          width: 351,
-          child: Stack(
-            alignment: Alignment.center,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  _OtpGroupBox(digits: _otpController.text, startIndex: 0),
-                  const SizedBox(width: 20),
-                  _OtpGroupBox(digits: _otpController.text, startIndex: 3),
-                ],
-              ),
-              Opacity(
-                opacity: 0,
-                child: TextField(
-                  controller: _otpController,
-                  focusNode: _otpFocusNode,
-                  keyboardType: TextInputType.number,
-                  inputFormatters: [
-                    FilteringTextInputFormatter.digitsOnly,
-                    LengthLimitingTextInputFormatter(6),
+        Center(
+          child: SizedBox(
+            width: 351,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    _OtpGroupBox(digits: _otpController.text, startIndex: 0),
+                    const SizedBox(width: 20),
+                    _OtpGroupBox(digits: _otpController.text, startIndex: 3),
                   ],
-                  onChanged: (_) => setState(() {}),
                 ),
-              ),
-            ],
+                Opacity(
+                  opacity: 0,
+                  child: TextField(
+                    controller: _otpController,
+                    focusNode: _otpFocusNode,
+                    keyboardType: TextInputType.number,
+                    inputFormatters: [
+                      FilteringTextInputFormatter.digitsOnly,
+                      LengthLimitingTextInputFormatter(6),
+                    ],
+                    onChanged: (_) => setState(() {}),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
         if (_errorText != null) ...[

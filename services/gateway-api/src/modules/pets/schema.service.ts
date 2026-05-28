@@ -91,6 +91,14 @@ export class SchemaService implements OnModuleInit {
           arrayEnumValues: arrayEnumVals,
         };
       }
+      // Detect boolean fields
+      else if (col.data_type === 'boolean') {
+        fieldSchema = {
+          name,
+          type: 'boolean',
+          required: isRequired,
+        };
+      }
       // Detect enum fields
       else if (enumVals) {
         fieldSchema = {

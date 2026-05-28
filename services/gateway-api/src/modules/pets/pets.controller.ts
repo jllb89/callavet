@@ -124,6 +124,17 @@ export class PetsController {
       return dedup;
     }
 
+    // Boolean fields
+    if (field.type === 'boolean') {
+      if (typeof input === 'boolean') return input;
+      if (typeof input === 'string') {
+        const value = input.trim().toLowerCase();
+        if (value === 'true') return true;
+        if (value === 'false') return false;
+      }
+      throw new HttpException(`${fieldName} must be boolean`, HttpStatus.BAD_REQUEST);
+    }
+
     return input;
   }
 

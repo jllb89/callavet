@@ -12,6 +12,11 @@ void _horseKycLog(String message) {
   debugPrint('[HorseKYC][Flow] $message');
 }
 
+const int _kMaxHorseKycImageBytes = 15 * 1024 * 1024;
+const int _kMaxHorseKycVideoBytes = 150 * 1024 * 1024;
+const double _kHorseBadgeCircleSize = 59;
+const double _kHorseBadgeIconSize = 18;
+
 class HorseKycScreen extends StatefulWidget {
   const HorseKycScreen({super.key});
 
@@ -571,17 +576,22 @@ class _HorseBadge extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Container(
-            width: 59,
-            height: 59,
+            width: _kHorseBadgeCircleSize,
+            height: _kHorseBadgeCircleSize,
             decoration: const BoxDecoration(
               shape: BoxShape.circle,
               color: Color(0xFF23252F),
             ),
-            child: SvgPicture.asset(
-              'assets/icons/caballo.svg',
-              width: 24,
-              height: 24,
-              colorFilter: const ColorFilter.mode(Colors.white, BlendMode.srcIn),
+            child: Center(
+              child: SizedBox(
+                width: _kHorseBadgeIconSize,
+                height: _kHorseBadgeIconSize,
+                child: SvgPicture.asset(
+                  'assets/icons/caballo.svg',
+                  fit: BoxFit.contain,
+                  colorFilter: const ColorFilter.mode(Colors.white, BlendMode.srcIn),
+                ),
+              ),
             ),
           ),
           const SizedBox(height: 8),
@@ -620,8 +630,8 @@ class _AddHorseBadge extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Container(
-            width: 59,
-            height: 59,
+            width: _kHorseBadgeCircleSize,
+            height: _kHorseBadgeCircleSize,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               color: enabled ? Colors.white : const Color(0xFF8A8D97),
@@ -805,23 +815,42 @@ class _HorseEditorSheetState extends State<_HorseEditorSheet> {
         return;
       }
       _horseKycLog('Media selected: count=${items.length}');
-      setState(() {
-        for (final f in items) {
-          final lower = f.name.toLowerCase();
-          final isVideo = lower.endsWith('.mp4') ||
-              lower.endsWith('.mov') ||
-              lower.endsWith('.m4v') ||
-              lower.endsWith('.webm') ||
-              lower.endsWith('.avi');
-          final kind = isVideo ? _PendingMediaKind.video : _PendingMediaKind.image;
-          _draft.pendingMedia.add(_PendingMedia(
+      final accepted = <_PendingMedia>[];
+      final rejected = <String>[];
+      for (final f in items) {
+        final kind = _inferMediaKind(f);
+        if (kind == null) {
+          rejected.add(f.name);
+          continue;
+        }
+
+        final maxBytes = _maxBytesFor(kind);
+        final sizeBytes = await f.length();
+        if (sizeBytes > maxBytes) {
+          rejected.add('${f.name} (${_formatBytes(sizeBytes)})');
+          continue;
+        }
+
+        accepted.add(
+          _PendingMedia(
             file: f,
             kind: kind,
             contentType: _inferContentType(f.name, kind),
-          ));
-        }
-      });
+          ),
+        );
+      }
+
+      if (accepted.isNotEmpty) {
+        setState(() => _draft.pendingMedia.addAll(accepted));
+      }
       _horseKycLog('Pending media updated: total=${_draft.pendingMedia.length}');
+
+      if (rejected.isNotEmpty && mounted) {
+        final summary = rejected.length == 1
+            ? 'No se agregó ${rejected.first}. Máximo: fotos ${_formatBytes(_kMaxHorseKycImageBytes)}, videos ${_formatBytes(_kMaxHorseKycVideoBytes)}.'
+            : 'No se agregaron ${rejected.length} archivos. Máximo: fotos ${_formatBytes(_kMaxHorseKycImageBytes)}, videos ${_formatBytes(_kMaxHorseKycVideoBytes)}.';
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(summary)));
+      }
     } catch (err) {
       _horseKycLog('Media picker error: $err');
       if (!mounted) return;
@@ -831,9 +860,41 @@ class _HorseEditorSheetState extends State<_HorseEditorSheet> {
     }
   }
 
+  _PendingMediaKind? _inferMediaKind(XFile file) {
+    final mime = file.mimeType?.toLowerCase();
+    if (mime != null && mime.startsWith('video/')) return _PendingMediaKind.video;
+    if (mime != null && mime.startsWith('image/')) return _PendingMediaKind.image;
+
+    final name = file.name.toLowerCase();
+    final path = file.path.toLowerCase();
+    const videoExts = ['.mp4', '.mov', '.m4v', '.webm', '.avi'];
+    const imageExts = ['.jpg', '.jpeg', '.png', '.webp', '.heic', '.heif'];
+    if (videoExts.any((ext) => name.endsWith(ext) || path.endsWith(ext))) {
+      return _PendingMediaKind.video;
+    }
+    if (imageExts.any((ext) => name.endsWith(ext) || path.endsWith(ext))) {
+      return _PendingMediaKind.image;
+    }
+    return null;
+  }
+
+  int _maxBytesFor(_PendingMediaKind kind) {
+    return kind == _PendingMediaKind.video
+        ? _kMaxHorseKycVideoBytes
+        : _kMaxHorseKycImageBytes;
+  }
+
+  String _formatBytes(int bytes) {
+    final mb = bytes / (1024 * 1024);
+    if (mb >= 10) return '${mb.round()} MB';
+    return '${mb.toStringAsFixed(1)} MB';
+  }
+
   String _inferContentType(String fileName, _PendingMediaKind kind) {
     final lower = fileName.toLowerCase();
     if (kind == _PendingMediaKind.image) {
+      if (lower.endsWith('.heic')) return 'image/heic';
+      if (lower.endsWith('.heif')) return 'image/heif';
       if (lower.endsWith('.png')) return 'image/png';
       if (lower.endsWith('.webp')) return 'image/webp';
       return 'image/jpeg';
@@ -892,6 +953,26 @@ class _HorseEditorSheetState extends State<_HorseEditorSheet> {
                   ),
                 ),
               ),
+              if (_isLastStep) ...[
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(28, 2, 28, 16),
+                  child: Column(
+                    children: [
+                      _CompactCheckbox(
+                        value: _draft.allowPreventiveSuggestions,
+                        label: 'Autorizo el uso de esta información para sugerencias de cuidado preventivo.',
+                        onChanged: (v) => setState(() => _draft.allowPreventiveSuggestions = v),
+                      ),
+                      const SizedBox(height: 10),
+                      _CompactCheckbox(
+                        value: _draft.acceptsDisclaimer,
+                        label: 'Entiendo que Call a Vet no reemplaza una revisión presencial',
+                        onChanged: (v) => setState(() => _draft.acceptsDisclaimer = v),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 10, 16, 22),
                 child: Row(
@@ -1101,8 +1182,8 @@ class _HorseEditorSheetState extends State<_HorseEditorSheet> {
         const SizedBox(height: 32),
         const _Question(text: 'qué actividad principal realiza el caballo?'),
         const SizedBox(height: 10),
-        _ChipGroup.multi(
-          values: _draft.primaryActivities,
+        _ChipGroup.single(
+          value: _singleValue(_draft.primaryActivities),
           options: const [
             _Option('competition', 'competencia'),
             _Option('regular_training', 'entrenamiento regular'),
@@ -1110,9 +1191,7 @@ class _HorseEditorSheetState extends State<_HorseEditorSheet> {
             _Option('rehabilitation_recovery', 'rehabilitación / recuperación'),
             _Option('retired', 'retirado'),
           ],
-          onToggle: (v) => setState(
-            () => _draft.primaryActivities = _toggleMulti(_draft.primaryActivities, v),
-          ),
+          onChanged: (v) => setState(() => _draft.primaryActivities = {v}),
         ),
         const SizedBox(height: 32),
         const _Question(text: 'intensidad del entrenamiento a la semana:'),
@@ -1129,8 +1208,8 @@ class _HorseEditorSheetState extends State<_HorseEditorSheet> {
         const SizedBox(height: 32),
         const _Question(text: 'sobre que tipo de terreno pisa tu caballo mayormente?'),
         const SizedBox(height: 10),
-        _ChipGroup.multi(
-          values: _draft.terrains,
+        _ChipGroup.single(
+          value: _singleValue(_draft.terrains),
           options: const [
             _Option('sand', 'arena'),
             _Option('grass', 'pasto'),
@@ -1138,9 +1217,7 @@ class _HorseEditorSheetState extends State<_HorseEditorSheet> {
             _Option('mixed', 'mixto'),
             _Option('other', 'otro'),
           ],
-          onToggle: (v) => setState(
-            () => _draft.terrains = _toggleMulti(_draft.terrains, v),
-          ),
+          onChanged: (v) => setState(() => _draft.terrains = {v}),
         ),
       ],
     );
@@ -1264,55 +1341,11 @@ class _HorseEditorSheetState extends State<_HorseEditorSheet> {
         ),
         if (_draft.pendingMedia.isNotEmpty) ...[
           const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: List.generate(_draft.pendingMedia.length, (index) {
-              final item = _draft.pendingMedia[index];
-              return Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(22),
-                  color: Colors.white.withValues(alpha: 0.1),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      item.kind == _PendingMediaKind.image
-                          ? Icons.image_outlined
-                          : Icons.videocam_outlined,
-                      color: Colors.white,
-                      size: 16,
-                    ),
-                    const SizedBox(width: 6),
-                    Text(
-                      item.file.name,
-                      style: const TextStyle(color: Colors.white, fontSize: 12),
-                    ),
-                    const SizedBox(width: 6),
-                    GestureDetector(
-                      onTap: () => setState(() => _draft.pendingMedia.removeAt(index)),
-                      child: const Icon(Icons.close, color: Colors.white70, size: 16),
-                    ),
-                  ],
-                ),
-              );
-            }),
+          _MediaMosaic(
+            media: _draft.pendingMedia,
+            onRemove: (index) => setState(() => _draft.pendingMedia.removeAt(index)),
           ),
         ],
-        const SizedBox(height: 120),
-        _CompactCheckbox(
-          value: _draft.allowPreventiveSuggestions,
-          label: 'Autorizo el uso de esta información para sugerencias de cuidado preventivo.',
-          onChanged: (v) => setState(() => _draft.allowPreventiveSuggestions = v),
-        ),
-        const SizedBox(height: 10),
-        _CompactCheckbox(
-          value: _draft.acceptsDisclaimer,
-          label: 'Entiendo que Call a Vet no reemplaza una revisión presencial',
-          onChanged: (v) => setState(() => _draft.acceptsDisclaimer = v),
-        ),
       ],
     );
   }
@@ -1337,6 +1370,10 @@ class _HorseEditorSheetState extends State<_HorseEditorSheet> {
       next.add(value);
     }
     return next;
+  }
+
+  String? _singleValue(Set<String> values) {
+    return values.isEmpty ? null : values.first;
   }
 }
 
@@ -1516,6 +1553,113 @@ class _ActionPill extends StatelessWidget {
   }
 }
 
+class _MediaMosaic extends StatelessWidget {
+  const _MediaMosaic({
+    required this.media,
+    required this.onRemove,
+  });
+
+  final List<_PendingMedia> media;
+  final ValueChanged<int> onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    return GridView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      itemCount: media.length,
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 3,
+        mainAxisSpacing: 8,
+        crossAxisSpacing: 8,
+      ),
+      itemBuilder: (context, index) {
+        return _MediaMosaicTile(
+          item: media[index],
+          onRemove: () => onRemove(index),
+        );
+      },
+    );
+  }
+}
+
+class _MediaMosaicTile extends StatelessWidget {
+  const _MediaMosaicTile({
+    required this.item,
+    required this.onRemove,
+  });
+
+  final _PendingMedia item;
+  final VoidCallback onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(16),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          if (item.kind == _PendingMediaKind.image)
+            Image.file(
+              File(item.file.path),
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => _MediaFallback(kind: item.kind),
+            )
+          else
+            _MediaFallback(kind: item.kind),
+          const DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [Color(0x00000000), Color(0x66000000)],
+              ),
+            ),
+          ),
+          if (item.kind == _PendingMediaKind.video)
+            const Center(
+              child: Icon(Icons.play_circle_fill, color: Colors.white, size: 34),
+            ),
+          Positioned(
+            top: 6,
+            right: 6,
+            child: GestureDetector(
+              onTap: onRemove,
+              child: Container(
+                width: 22,
+                height: 22,
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.58),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.close, color: Colors.white, size: 14),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MediaFallback extends StatelessWidget {
+  const _MediaFallback({required this.kind});
+
+  final _PendingMediaKind kind;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: Colors.white.withValues(alpha: 0.08),
+      child: Icon(
+        kind == _PendingMediaKind.image ? Icons.image_outlined : Icons.videocam_outlined,
+        color: Colors.white.withValues(alpha: 0.72),
+        size: 28,
+      ),
+    );
+  }
+}
+
 enum _PendingMediaKind { image, video }
 
 class _PendingMedia {
@@ -1651,13 +1795,9 @@ class _HorseDraft {
     addString('weight_range', weightRange);
     addString('breed', breed);
     addString('warmblood_subbreed', warmbloodSubbreed);
-    if (primaryActivities.isNotEmpty) {
-      payload['primary_activities'] = primaryActivities.toList(growable: false);
-    }
+    addString('primary_activity', primaryActivities.isEmpty ? null : primaryActivities.first);
     addString('training_intensity', trainingIntensity);
-    if (terrains.isNotEmpty) {
-      payload['terrains'] = terrains.toList(growable: false);
-    }
+    addString('terrain', terrains.isEmpty ? null : terrains.first);
     if (observedLastSixMonths.isNotEmpty) {
       payload['observed_last_6_months'] = observedLastSixMonths.toList(growable: false);
     }
@@ -1680,6 +1820,10 @@ class _HorseDraft {
   }
 
   static Set<String> _asTextSet(dynamic value) {
+    if (value is String) {
+      final text = value.trim();
+      return text.isEmpty ? <String>{} : <String>{text};
+    }
     if (value is! List) return <String>{};
     return value
         .whereType<dynamic>()
