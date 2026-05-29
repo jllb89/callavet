@@ -539,6 +539,78 @@ export class SubscriptionsController {
     return { ok: true, credits: rows };
   }
 
+  @Post('overage/dev-grant')
+  async devGrantOverageCredit(@Body() body: { type?: 'chat' | 'video'; code?: string; quantity?: number }) {
+    if (process.env.NODE_ENV === 'production' && process.env.ALLOW_DEV_OVERAGE_GRANT !== 'true') {
+      throw new HttpException({ ok: false, reason: 'dev_grant_disabled' }, HttpStatus.FORBIDDEN);
+    }
+    const type = (body?.type || '').trim().toLowerCase();
+    const code = (body?.code || '').trim();
+    if (type !== 'chat' && type !== 'video' && !code) {
+      throw new HttpException({ ok: false, reason: 'type_or_code_required' }, HttpStatus.BAD_REQUEST);
+    }
+    const quantity = Math.max(1, Math.min(Math.floor(Number(body?.quantity || 1) || 1), 5));
+
+    const result = await this.db.runInTx(async (q) => {
+      const { rows: itemRows } = await q<any>(
+        `select id, code, coalesce(metadata->>'type', '') as type
+           from overage_items
+          where is_active
+            and (
+              ($1 <> '' and lower(code) = lower($1))
+              or ($2 <> '' and metadata->>'type' = $2)
+            )
+          order by case when $2 <> '' and metadata->>'type' = $2 then 0 else 1 end,
+                   code asc
+          limit 1`,
+        [code, type]
+      );
+      const item = itemRows[0];
+      if (!item) return { itemNotFound: true } as any;
+
+      const { rows: existingCredits } = await q<any>(
+        `select id
+           from overage_credits
+          where user_id = auth.uid()
+            and overage_item_id = $1::uuid
+          limit 1
+          for update`,
+        [item.id]
+      );
+      if (existingCredits[0]) {
+        const { rows: updated } = await q<{ remaining_units: number }>(
+          `update overage_credits
+              set remaining_units = remaining_units + $2,
+                  updated_at = now()
+            where id = $1::uuid
+            returning remaining_units`,
+          [existingCredits[0].id, quantity]
+        );
+        return { item, remainingUnits: updated[0]?.remaining_units ?? quantity } as any;
+      }
+
+      const { rows: inserted } = await q<{ remaining_units: number }>(
+        `insert into overage_credits (id, user_id, overage_item_id, remaining_units, created_at, updated_at)
+         values (gen_random_uuid(), auth.uid(), $1::uuid, $2, now(), now())
+         returning remaining_units`,
+        [item.id, quantity]
+      );
+      return { item, remainingUnits: inserted[0]?.remaining_units ?? quantity } as any;
+    });
+
+    if ((result as any).itemNotFound) {
+      throw new HttpException({ ok: false, reason: 'item_not_found' }, HttpStatus.BAD_REQUEST);
+    }
+    return {
+      ok: true,
+      mode: 'dev_grant',
+      code: (result as any).item.code,
+      type: (result as any).item.type || type || null,
+      quantity,
+      remaining_units: (result as any).remainingUnits,
+    };
+  }
+
   // List overage purchases for current user
   @Get('admin/overage/purchases')
   async listOveragePurchases(@Req() req: any) {

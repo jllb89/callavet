@@ -237,7 +237,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _sendUserMessage(text);
   }
 
-  Future<void> _activateService(String service, _AiChatTurnResult result) async {
+  Future<void> _activateService(String service, _AiChatTurnResult result, {bool addUserBubble = true}) async {
     if (service == 'scheduled_video') {
       _sendQuickReply(service);
       return;
@@ -251,7 +251,9 @@ class _ChatScreenState extends State<ChatScreen> {
       'activateService start kind=$kind petId=${result.petId} vetId=${result.vetId} specialtyId=${result.specialtyId}',
     );
     setState(() {
-      _messages.add(_ChatMessage.user(kind == 'video' ? 'Iniciar videollamada ahora.' : 'Iniciar chat con el veterinario.'));
+      if (addUserBubble) {
+        _messages.add(_ChatMessage.user(kind == 'video' ? 'Iniciar videollamada ahora.' : 'Iniciar chat con el veterinario.'));
+      }
       _isSending = true;
     });
     _scrollToBottom();
@@ -262,39 +264,17 @@ class _ChatScreenState extends State<ChatScreen> {
       if (start['overage'] == true) {
         if (!mounted) return;
         setState(() {
-          _messages.add(_ChatMessage.assistant(_paymentRequiredMessage(start), includeInHistory: false));
+          _messages.add(_ChatMessage.assistant(
+            _entitlementOfferMessage(kind),
+            result: result.withEntitlement(serviceType: kind, canUse: false, remaining: 0, reason: start['overageReason']?.toString()),
+            includeInHistory: false,
+          ));
           _isSending = false;
         });
         _scrollToBottom();
         return;
       }
-
-      final sessionId = _uuidOrNull(start['sessionId']?.toString() ?? '');
-      if (sessionId == null) {
-        throw const _ChatApiException('No pude activar la consulta: el servidor no devolvió una sesión válida.');
-      }
-
-      if (kind == 'video') {
-        final room = await _createVideoRoom(sessionId);
-        final roomName = room['roomName']?.toString() ?? room['roomId']?.toString() ?? sessionId;
-        _aiChatLog('activateService video room created sessionId=$sessionId roomName=$roomName');
-        if (!mounted) return;
-        setState(() {
-          _messages.add(_ChatMessage.assistant('Videollamada activada. Sala: $roomName', includeInHistory: false));
-          _isSending = false;
-        });
-        _scrollToBottom();
-        return;
-      }
-
-      _aiChatLog('activateService chat session active sessionId=$sessionId; navigating');
-      if (!mounted) return;
-      setState(() {
-        _messages.add(_ChatMessage.assistant('Chat con veterinario activado. Te llevo a la conversación.', includeInHistory: false));
-        _isSending = false;
-      });
-      _scrollToBottom();
-      context.go('/chat/${Uri.encodeComponent(sessionId)}');
+      await _completeStartedSession(kind, start);
     } catch (error) {
       _aiChatLog('activateService failed: ${error.runtimeType} $error');
       if (!mounted) return;
@@ -304,6 +284,86 @@ class _ChatScreenState extends State<ChatScreen> {
       });
       _scrollToBottom();
     }
+  }
+
+  Future<void> _purchaseSingleSession(String service, _AiChatTurnResult result) async {
+    if (_isSending) {
+      _aiChatLog('purchaseSingleSession ignored while busy service=$service');
+      return;
+    }
+    final kind = service == 'video' || service == 'scheduled_video' ? 'video' : 'chat';
+    _aiChatLog('purchaseSingleSession start kind=$kind');
+    setState(() {
+      _messages.add(_ChatMessage.user(kind == 'video' ? 'Comprar videollamada única.' : 'Comprar chat único.'));
+      _isSending = true;
+    });
+    _scrollToBottom();
+
+    try {
+      final grant = await _postGatewayJson('/subscriptions/overage/dev-grant', {
+        'type': kind,
+        'quantity': 1,
+      });
+      _aiChatLog('purchaseSingleSession dev grant response keys=${grant.keys.join(',')}');
+      final start = await _startSession(kind, result);
+      if (start['overage'] == true) {
+        if (!mounted) return;
+        setState(() {
+          _messages.add(_ChatMessage.assistant(
+            _paymentRequiredMessage(start),
+            result: result.withEntitlement(serviceType: kind, canUse: false, remaining: 0, reason: start['overageReason']?.toString()),
+            includeInHistory: false,
+          ));
+          _isSending = false;
+        });
+        _scrollToBottom();
+        return;
+      }
+      await _completeStartedSession(kind, start);
+    } catch (error) {
+      _aiChatLog('purchaseSingleSession failed: ${error.runtimeType} $error');
+      if (!mounted) return;
+      setState(() {
+        _messages.add(_ChatMessage.assistant(_friendlyError(error), includeInHistory: false));
+        _isSending = false;
+      });
+      _scrollToBottom();
+    }
+  }
+
+  void _openSubscriptionUpgrade() {
+    if (_isSending) return;
+    _aiChatLog('openSubscriptionUpgrade route=/subscription-plans');
+    context.go('/subscription-plans');
+  }
+
+  Future<void> _completeStartedSession(String kind, Map<String, dynamic> start) async {
+    final sessionId = _uuidOrNull(start['sessionId']?.toString() ?? '');
+    if (sessionId == null) {
+      throw const _ChatApiException('No pude activar la consulta: el servidor no devolvió una sesión válida.');
+    }
+
+    if (kind == 'video') {
+      final room = await _createVideoRoom(sessionId);
+      final roomName = room['roomName']?.toString() ?? room['roomId']?.toString() ?? sessionId;
+      _aiChatLog('completeStartedSession video room created sessionId=$sessionId roomName=$roomName');
+      if (!mounted) return;
+      setState(() {
+        _messages.add(_ChatMessage.assistant('Videollamada activada. Sala: $roomName', includeInHistory: false));
+        _isSending = false;
+      });
+      _scrollToBottom();
+      return;
+    }
+
+    _aiChatLog('completeStartedSession chat session active sessionId=$sessionId; navigating');
+    if (!mounted) return;
+    setState(() {
+      _messages.add(_ChatMessage.assistant('Chat con veterinario activado. Te llevo a la conversación.', includeInHistory: false));
+      _isSending = false;
+    });
+    _scrollToBottom();
+    context.go('/chat/${Uri.encodeComponent(sessionId)}');
   }
 
   Future<Map<String, dynamic>> _startSession(String kind, _AiChatTurnResult result) {
@@ -369,6 +429,11 @@ class _ChatScreenState extends State<ChatScreen> {
     return 'Para activar esta consulta necesitas pago o crédito adicional. Motivo: $reason';
   }
 
+  String _entitlementOfferMessage(String kind) {
+    final service = kind == 'video' ? 'videollamada' : 'chat';
+    return 'Ya no tienes $service disponible en tu plan actual. Puedes comprar una sesión única o mejorar tu suscripción.';
+  }
+
   String? _uuidOrNull(String value) {
     final trimmed = value.trim();
     return _uuidPattern.hasMatch(trimmed) ? trimmed : null;
@@ -416,55 +481,64 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Widget _buildThread(BuildContext context) {
     final topInset = MediaQuery.paddingOf(context).top;
+    final bottomInset = widget.embedded ? 0.0 : MediaQuery.paddingOf(context).bottom;
     final messageList = ListView.builder(
       controller: _scrollController,
       padding: EdgeInsets.fromLTRB(
         widget.embedded ? 0 : 22,
         widget.embedded ? 10 : topInset + 78,
         widget.embedded ? 0 : 22,
-        20,
+        widget.embedded ? 20 : bottomInset + 102,
       ),
-      itemCount: (widget.embedded ? 1 : 0) + _messages.length + (_isSending ? 1 : 0),
+      itemCount: (widget.embedded ? 1 : 0) + _messages.length,
       itemBuilder: (context, index) {
         final introCount = widget.embedded ? 1 : 0;
         if (widget.embedded && index == 0) {
           return const _EmbeddedChatIntro();
         }
         final messageIndex = index - introCount;
-        if (_isSending && messageIndex == _messages.length) {
-          return const _TypingBubble();
-        }
         final message = _messages[messageIndex];
+        final userTurnsBeforeOrAtMessage = _messages
+            .take(messageIndex + 1)
+            .where((message) => message.isUser)
+            .length;
         return _MessageBubble(
           message: message,
           embedded: widget.embedded,
           sending: _isSending,
+          canShowActions: userTurnsBeforeOrAtMessage >= 2,
           onServiceSelected: _activateService,
+          onOneOffPurchaseSelected: _purchaseSingleSession,
+          onUpgradeSelected: _openSubscriptionUpgrade,
         );
       },
     );
 
-    final threadColumn = Column(
-      children: [
-        Expanded(
-          child: widget.embedded ? messageList : _TopFadeMask(child: messageList),
-        ),
-        _ChatComposer(
-          controller: _inputCtrl,
-          focusNode: _focusNode,
-          sending: _isSending,
-          embedded: widget.embedded,
-          includeBottomInset: !widget.embedded,
-          onSend: _sendComposerMessage,
-        ),
-      ],
-    );
-
-    if (widget.embedded) return threadColumn;
+    if (widget.embedded) {
+      return Column(
+        children: [
+          Expanded(child: messageList),
+          _ChatComposer(
+            controller: _inputCtrl,
+            focusNode: _focusNode,
+            sending: _isSending,
+            embedded: true,
+            includeBottomInset: false,
+            onSend: _sendComposerMessage,
+          ),
+        ],
+      );
+    }
 
     return Stack(
       children: [
-        threadColumn,
+        Positioned.fill(
+          child: _MessageOpacityFade(
+            topFadeHeight: topInset + 128,
+            bottomFadeHeight: bottomInset + 150,
+            child: messageList,
+          ),
+        ),
         Positioned(
           top: 0,
           left: 0,
@@ -474,26 +548,52 @@ class _ChatScreenState extends State<ChatScreen> {
             child: _ChatHeader(onBack: () => context.go('/home')),
           ),
         ),
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          child: _ChatComposer(
+            controller: _inputCtrl,
+            focusNode: _focusNode,
+            sending: _isSending,
+            embedded: false,
+            includeBottomInset: true,
+            onSend: _sendComposerMessage,
+          ),
+        ),
       ],
     );
   }
 }
 
-class _TopFadeMask extends StatelessWidget {
-  const _TopFadeMask({required this.child});
+class _MessageOpacityFade extends StatelessWidget {
+  const _MessageOpacityFade({
+    required this.child,
+    required this.topFadeHeight,
+    required this.bottomFadeHeight,
+  });
 
   final Widget child;
+  final double topFadeHeight;
+  final double bottomFadeHeight;
 
   @override
   Widget build(BuildContext context) {
     return ShaderMask(
       blendMode: BlendMode.dstIn,
       shaderCallback: (bounds) {
-        return const LinearGradient(
+        final topStop = (topFadeHeight / bounds.height).clamp(0.12, 0.32).toDouble();
+        final bottomStart = (1 - (bottomFadeHeight / bounds.height)).clamp(0.68, 0.90).toDouble();
+        return LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [Colors.transparent, Colors.white, Colors.white],
-          stops: [0, 0.18, 1],
+          colors: const [
+            Colors.transparent,
+            Colors.white,
+            Colors.white,
+            Colors.transparent,
+          ],
+          stops: [0, topStop, bottomStart, 1],
         ).createShader(bounds);
       },
       child: child,
@@ -557,13 +657,19 @@ class _MessageBubble extends StatelessWidget {
     required this.message,
     required this.embedded,
     required this.sending,
+    required this.canShowActions,
     required this.onServiceSelected,
+    required this.onOneOffPurchaseSelected,
+    required this.onUpgradeSelected,
   });
 
   final _ChatMessage message;
   final bool embedded;
   final bool sending;
+  final bool canShowActions;
   final void Function(String service, _AiChatTurnResult result) onServiceSelected;
+  final void Function(String service, _AiChatTurnResult result) onOneOffPurchaseSelected;
+  final VoidCallback onUpgradeSelected;
 
   @override
   Widget build(BuildContext context) {
@@ -599,22 +705,24 @@ class _MessageBubble extends StatelessWidget {
                 child: Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 13),
                   child: Text(
-                    message.text,
+                    isUser ? message.text : _readableAssistantText(message.text),
                     style: const TextStyle(
                       color: textColor,
                       fontSize: 15,
                       fontWeight: FontWeight.w400,
-                      height: 1.25,
+                      height: 1.34,
                     ),
                   ),
                 ),
               ),
-              if (!isUser && message.result != null) ...[
+              if (!isUser && canShowActions && message.result?.payload.recommendedService != null) ...[
                 const SizedBox(height: 8),
                 _HandoffPanel(
                   result: message.result!,
                   sending: sending,
                   onServiceSelected: onServiceSelected,
+                  onOneOffPurchaseSelected: onOneOffPurchaseSelected,
+                  onUpgradeSelected: onUpgradeSelected,
                 ),
               ],
             ],
@@ -630,57 +738,58 @@ class _HandoffPanel extends StatelessWidget {
     required this.result,
     required this.sending,
     required this.onServiceSelected,
+    required this.onOneOffPurchaseSelected,
+    required this.onUpgradeSelected,
   });
 
   final _AiChatTurnResult result;
   final bool sending;
   final void Function(String service, _AiChatTurnResult result) onServiceSelected;
+  final void Function(String service, _AiChatTurnResult result) onOneOffPurchaseSelected;
+  final VoidCallback onUpgradeSelected;
 
   @override
   Widget build(BuildContext context) {
     final payload = result.payload;
     final recommended = payload.recommendedService;
-    final services = ['chat', 'video', 'scheduled_video'];
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
-            _StatusPill(text: _urgencyLabel(payload.urgency), urgent: payload.safetyEscalation),
-            if (result.specialtyName != null) _StatusPill(text: result.specialtyName!),
-            if (result.vetName != null) _StatusPill(text: result.vetName!),
-            if (result.remaining != null) _StatusPill(text: '${result.remaining} disponibles'),
-          ],
-        ),
-        if (recommended != null || payload.actionLabel != null) ...[
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: services.map((service) {
-              final selected = service == recommended;
-              return _ServiceButton(
-                label: selected && payload.actionLabel != null ? payload.actionLabel! : _serviceLabel(service),
-                selected: selected,
-                enabled: !sending,
-                onTap: () => onServiceSelected(service, result),
-              );
-            }).toList(growable: false),
+    if (recommended == null) return const SizedBox.shrink();
+    if (result.entitlementExhaustedForRecommendedService) {
+      final service = result.commerceService;
+      return Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          if (!result.noActiveSubscription)
+            _ServiceButton(
+              label: service == 'video' ? 'comprar video único' : 'comprar chat único',
+              selected: true,
+              enabled: !sending,
+              onTap: () => onOneOffPurchaseSelected(service, result),
+            ),
+          _ServiceButton(
+            label: 'mejorar plan',
+            selected: false,
+            enabled: !sending,
+            onTap: onUpgradeSelected,
           ),
         ],
-      ],
-    );
-  }
+      );
+    }
+    final services = ['chat', 'video', 'scheduled_video'];
 
-  String _urgencyLabel(String urgency) {
-    return switch (urgency) {
-      'emergency' => 'emergencia',
-      'urgent' => 'urgente',
-      _ => 'rutina',
-    };
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: services.map((service) {
+        final selected = service == recommended;
+        return _ServiceButton(
+          label: selected ? _productActionLabel(payload.actionLabel, service) : _serviceLabel(service),
+          selected: selected,
+          enabled: !sending,
+          onTap: () => onServiceSelected(service, result),
+        );
+      }).toList(growable: false),
+    );
   }
 
   String _serviceLabel(String service) {
@@ -690,34 +799,18 @@ class _HandoffPanel extends StatelessWidget {
       _ => 'chat',
     };
   }
-}
 
-class _StatusPill extends StatelessWidget {
-  const _StatusPill({required this.text, this.urgent = false});
-
-  final String text;
-  final bool urgent;
-
-  @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: urgent ? const Color(0xFFFFD6CF).withValues(alpha: 0.16) : Colors.white.withValues(alpha: 0.07),
-        borderRadius: BorderRadius.circular(30),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        child: Text(
-          text,
-          style: TextStyle(
-            color: urgent ? const Color(0xFFFFD6CF) : Colors.white.withValues(alpha: 0.78),
-            fontSize: 11,
-            fontWeight: FontWeight.w400,
-            height: 1,
-          ),
-        ),
-      ),
-    );
+  String _productActionLabel(String? label, String service) {
+    final fallback = _serviceLabel(service);
+    final normalized = (label ?? '').trim();
+    if (normalized.isEmpty) return fallback;
+    final lower = normalized.toLowerCase();
+    if (lower.contains('responder') || lower.contains('pregunta') || lower.contains('triaje')) {
+      return fallback;
+    }
+    final mentionsProduct = lower.contains('chat') || lower.contains('video') || lower.contains('videollamada') || lower.contains('agendar');
+    final isAction = lower.contains('iniciar') || lower.contains('empezar') || lower.contains('continuar') || lower.contains('agendar');
+    return mentionsProduct && isAction ? normalized : fallback;
   }
 }
 
@@ -764,33 +857,6 @@ class _ServiceButton extends StatelessWidget {
   }
 }
 
-class _TypingBubble extends StatelessWidget {
-  const _TypingBubble();
-
-  @override
-  Widget build(BuildContext context) {
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 14),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        decoration: BoxDecoration(
-          color: Colors.black,
-          borderRadius: BorderRadius.circular(22),
-        ),
-        child: const SizedBox(
-          width: 32,
-          child: LinearProgressIndicator(
-            minHeight: 2,
-            color: Colors.white,
-            backgroundColor: Color(0xFF3A3A3A),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _ChatComposer extends StatelessWidget {
   const _ChatComposer({
     required this.controller,
@@ -815,12 +881,15 @@ class _ChatComposer extends StatelessWidget {
       padding: EdgeInsets.fromLTRB(embedded ? 0 : 18, 8, embedded ? 0 : 18, 14 + bottomInset),
       child: ConstrainedBox(
         constraints: const BoxConstraints(minHeight: 46, maxHeight: 150),
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: Colors.transparent,
-            borderRadius: BorderRadius.circular(28),
-            border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
-          ),
+        child: AnimatedBuilder(
+          animation: focusNode,
+          builder: (context, child) {
+            return _ComposerFrame(
+              active: focusNode.hasFocus || sending,
+              thinking: sending,
+              child: child!,
+            );
+          },
           child: Padding(
             padding: const EdgeInsets.only(left: 18, right: 6, top: 3, bottom: 3),
             child: Row(
@@ -846,7 +915,7 @@ class _ChatComposer extends StatelessWidget {
                     ),
                     decoration: InputDecoration(
                       border: InputBorder.none,
-                      hintText: 'escribir mensaje...',
+                      hintText: sending ? 'Pensando...' : 'escribir mensaje...',
                       hintStyle: TextStyle(
                         color: Colors.white.withValues(alpha: 0.32),
                         fontSize: 14,
@@ -876,6 +945,124 @@ class _ChatComposer extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+class _ComposerFrame extends StatefulWidget {
+  const _ComposerFrame({
+    required this.child,
+    required this.active,
+    required this.thinking,
+  });
+
+  final Widget child;
+  final bool active;
+  final bool thinking;
+
+  @override
+  State<_ComposerFrame> createState() => _ComposerFrameState();
+}
+
+class _ComposerFrameState extends State<_ComposerFrame> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 14000),
+    );
+    if (widget.active) _controller.repeat();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ComposerFrame oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.active && !_controller.isAnimating) {
+      _controller.repeat();
+    } else if (!widget.active && _controller.isAnimating) {
+      _controller.stop();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) {
+        final phase = _controller.value * math.pi * 2;
+        final pulse = widget.active ? 0.72 + (math.sin(phase * 0.82) + 1) * 0.12 : 1.0;
+        final drift = widget.active ? math.sin(phase) * 7.5 + math.sin(phase * 2.15) * 2.0 : 0.0;
+        return DecoratedBox(
+          decoration: BoxDecoration(
+            color: Colors.transparent,
+            borderRadius: BorderRadius.circular(28),
+            boxShadow: widget.active
+                ? [
+                    BoxShadow(
+                      color: const Color(0xFF57546F).withValues(alpha: (widget.thinking ? 0.12 : 0.075) * pulse),
+                      blurRadius: widget.thinking ? 22 : 14,
+                      spreadRadius: -8,
+                      offset: Offset(drift, 0),
+                    ),
+                  ]
+                : null,
+          ),
+          child: CustomPaint(
+            foregroundPainter: _ComposerOutlinePainter(
+              progress: _controller.value,
+              thinking: widget.thinking,
+            ),
+            child: child,
+          ),
+        );
+      },
+      child: widget.child,
+    );
+  }
+}
+
+class _ComposerOutlinePainter extends CustomPainter {
+  const _ComposerOutlinePainter({required this.progress, required this.thinking});
+
+  final double progress;
+  final bool thinking;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    final rrect = RRect.fromRectAndRadius(rect.deflate(0.7), const Radius.circular(28));
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = thinking ? 1.15 : 1;
+
+    if (thinking) {
+      paint.shader = SweepGradient(
+        transform: GradientRotation(progress * math.pi * 2),
+        colors: const [
+          Color(0xCCFFFFFF),
+          Color(0x88648FD8),
+          Color(0x995A5578),
+          Color(0xCCFFFFFF),
+        ],
+      ).createShader(rect);
+    } else {
+      paint.color = Colors.white.withValues(alpha: 0.055);
+    }
+
+    canvas.drawRRect(rrect, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _ComposerOutlinePainter oldDelegate) {
+    return oldDelegate.progress != progress || oldDelegate.thinking != thinking;
   }
 }
 
@@ -922,6 +1109,9 @@ class _AiChatTurnResult {
     this.vetId,
     this.specialtyName,
     this.vetName,
+    this.serviceAccessType,
+    this.serviceCanUse,
+    this.serviceAccessReason,
     this.remaining,
   });
 
@@ -932,6 +1122,9 @@ class _AiChatTurnResult {
     String? vetId;
     String? specialtyName;
     String? vetName;
+    String? serviceAccessType;
+    bool? serviceCanUse;
+    String? serviceAccessReason;
     int? remaining;
     final toolNames = <String>[];
 
@@ -954,6 +1147,10 @@ class _AiChatTurnResult {
         vetName = firstVet?['full_name']?.toString();
       }
       if (name == 'check_service_access') {
+        serviceAccessType = output?['serviceType']?.toString();
+        final canUseValue = output?['canUse'];
+        serviceCanUse = canUseValue is bool ? canUseValue : null;
+        serviceAccessReason = output?['reason']?.toString();
         final value = output?['remaining'];
         remaining = value is num ? value.toInt() : int.tryParse(value?.toString() ?? '');
       }
@@ -962,7 +1159,8 @@ class _AiChatTurnResult {
     _aiChatLog(
       'AiChatTurnResult.fromJson payload={urgency:${payload.urgency}, recommendedService:${payload.recommendedService}, '
       'actionLabel:${payload.actionLabel}, safetyEscalation:${payload.safetyEscalation}, messageLength:${payload.message.length}} '
-      'toolNames=${toolNames.join(',')} petId=$petId specialty=$specialtyName specialtyId=$specialtyId vet=$vetName vetId=$vetId remaining=$remaining',
+      'toolNames=${toolNames.join(',')} petId=$petId specialty=$specialtyName specialtyId=$specialtyId vet=$vetName vetId=$vetId '
+      'serviceAccessType=$serviceAccessType canUse=$serviceCanUse reason=$serviceAccessReason remaining=$remaining',
     );
 
     return _AiChatTurnResult(
@@ -972,6 +1170,9 @@ class _AiChatTurnResult {
       vetId: vetId,
       specialtyName: specialtyName,
       vetName: vetName,
+      serviceAccessType: serviceAccessType,
+      serviceCanUse: serviceCanUse,
+      serviceAccessReason: serviceAccessReason,
       remaining: remaining,
     );
   }
@@ -982,7 +1183,48 @@ class _AiChatTurnResult {
   final String? vetId;
   final String? specialtyName;
   final String? vetName;
+  final String? serviceAccessType;
+  final bool? serviceCanUse;
+  final String? serviceAccessReason;
   final int? remaining;
+
+  String get commerceService {
+    final recommended = payload.recommendedService == 'scheduled_video' ? 'video' : payload.recommendedService;
+    final accessType = serviceAccessType == 'video' || serviceAccessType == 'chat' ? serviceAccessType : null;
+    return accessType ?? (recommended == 'video' ? 'video' : 'chat');
+  }
+
+  bool get noActiveSubscription => serviceAccessReason == 'no_active_subscription';
+
+  bool get entitlementExhaustedForRecommendedService {
+    final recommended = payload.recommendedService;
+    if (recommended != 'chat' && recommended != 'video' && recommended != 'scheduled_video') return false;
+    final target = recommended == 'scheduled_video' ? 'video' : recommended;
+    final accessType = serviceAccessType == 'scheduled_video' ? 'video' : serviceAccessType;
+    if (accessType != null && accessType != target) return false;
+    if (serviceCanUse == false) return true;
+    return remaining != null && remaining! <= 0;
+  }
+
+  _AiChatTurnResult withEntitlement({
+    required String serviceType,
+    required bool canUse,
+    required int remaining,
+    String? reason,
+  }) {
+    return _AiChatTurnResult(
+      payload: payload,
+      petId: petId,
+      specialtyId: specialtyId,
+      vetId: vetId,
+      specialtyName: specialtyName,
+      vetName: vetName,
+      serviceAccessType: serviceType,
+      serviceCanUse: canUse,
+      serviceAccessReason: reason,
+      remaining: remaining,
+    );
+  }
 }
 
 class _AiChatPayload {
@@ -1029,6 +1271,26 @@ Map<String, dynamic>? _asMap(Object? value) {
 
 List<Object?>? _asList(Object? value) {
   return value is List ? value : null;
+}
+
+String _readableAssistantText(String text) {
+  var formatted = text.trim().replaceAll('**', '');
+  formatted = formatted.replaceAll(RegExp(r'[ \t]+\n'), '\n');
+  formatted = formatted.replaceAll(RegExp(r'\n[ \t]+'), '\n');
+  formatted = formatted.replaceAll(RegExp(r'\n{3,}'), '\n\n');
+  formatted = formatted.replaceAllMapped(
+    RegExp(r'(:)\s+(\d+\.\s)'),
+    (match) => '${match[1]}\n\n${match[2]}',
+  );
+  formatted = formatted.replaceAllMapped(
+    RegExp(r'([^\n])\n(\d+\.\s)'),
+    (match) => '${match[1]}\n\n${match[2]}',
+  );
+  formatted = formatted.replaceAllMapped(
+    RegExp(r'([.!?])\s+(?=(Te recomiendo|Para |Si ves|Si empeora|Mientras|Respóndeme|¿))'),
+    (match) => '${match[1]}\n\n',
+  );
+  return formatted;
 }
 
 String? _uuidFrom(Object? value) {
