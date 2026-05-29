@@ -953,20 +953,58 @@ export class SubscriptionsController {
         const active = await q(`select id, plan_id from v_active_user_subscriptions where user_id = auth.uid() limit 1`);
         if (!active.rows[0]) return { notFound: true } as any;
         const plan = await q(
-          `select id, code, included_chats, included_videos, pets_included_default from subscription_plans where is_active and lower(code)=lower($1) limit 1`,
+          `select id, code, included_chats, included_videos, pets_included_default, billing_period from subscription_plans where is_active and lower(code)=lower($1) limit 1`,
           [code]
         );
         if (!plan.rows[0]) return { planNotFound: true } as any;
         if (plan.rows[0].id === active.rows[0].plan_id) return { samePlan: true } as any;
         const upd = await q(
-          `update user_subscriptions set plan_id = $1, pets_included = coalesce($2, pets_included)
-             where id = $3 returning id, plan_id`,
-          [plan.rows[0].id, body?.seats || plan.rows[0].pets_included_default, active.rows[0].id]
+          `update user_subscriptions
+              set plan_id = $1,
+                  pets_included = coalesce($2, pets_included),
+                  status = 'active',
+                  current_period_start = now(),
+                  current_period_end = case
+                    when lower(coalesce($3::text, 'month')) = 'year' then now() + interval '1 year'
+                    else now() + interval '1 month'
+                  end,
+                  cancel_at_period_end = false,
+                  auto_renew = true,
+                  updated_at = now()
+            where id = $4
+            returning id, plan_id, status, current_period_start, current_period_end, pets_included`,
+          [plan.rows[0].id, body?.seats || plan.rows[0].pets_included_default, plan.rows[0].billing_period, active.rows[0].id]
         );
-        // Adjust usage included counts for new plan (without reducing consumed counts)
         await q(
-          `update subscription_usage set included_chats = $1, included_videos = $2, updated_at = now() where subscription_id = $3`,
-          [plan.rows[0].included_chats, plan.rows[0].included_videos, active.rows[0].id]
+          `insert into subscription_usage (
+             id, subscription_id, period_start, period_end,
+             included_chats, included_videos,
+             consumed_chats, consumed_videos,
+             overage_chats, overage_videos,
+             updated_at
+           ) values (
+             gen_random_uuid(), $1, $2, $3,
+             $4, $5,
+             0, 0,
+             0, 0,
+             now()
+           )
+           on conflict (subscription_id, period_start, period_end)
+           do update set
+             included_chats = EXCLUDED.included_chats,
+             included_videos = EXCLUDED.included_videos,
+             consumed_chats = 0,
+             consumed_videos = 0,
+             overage_chats = 0,
+             overage_videos = 0,
+             updated_at = now()`,
+          [
+            upd.rows[0].id,
+            upd.rows[0].current_period_start,
+            upd.rows[0].current_period_end,
+            plan.rows[0].included_chats,
+            plan.rows[0].included_videos,
+          ]
         );
         return { sub: upd.rows[0], plan: plan.rows[0] };
       });
@@ -1033,10 +1071,15 @@ export class SubscriptionsController {
                     pets_included = coalesce($2, pets_included),
                     provider = coalesce(provider, 'internal'),
                     auto_renew = true,
+                    current_period_start = now(),
+                    current_period_end = case
+                      when lower(coalesce($4::text, 'month')) = 'year' then now() + interval '1 year'
+                      else now() + interval '1 month'
+                    end,
                     updated_at = now()
               where id = $3
               returning id, plan_id, status, current_period_start, current_period_end, pets_included`,
-            [planRow.id, seats, subId]
+            [planRow.id, seats, subId, planRow.billing_period]
           );
 
           await q(
@@ -1057,6 +1100,10 @@ export class SubscriptionsController {
              do update set
                included_chats = EXCLUDED.included_chats,
                included_videos = EXCLUDED.included_videos,
+               consumed_chats = 0,
+               consumed_videos = 0,
+               overage_chats = 0,
+               overage_videos = 0,
                updated_at = now()`,
             [
               subId,
