@@ -19,6 +19,7 @@ const _chatPlanOrder = [
   'pro-entrenador',
   'rancho-trabajo',
 ];
+const _noUpgradePlanAvailableMessage = 'No encontré un plan superior que libere disponibilidad para esta consulta.';
 int _chatMessageSequence = 0;
 
 String _nextChatMessageId() {
@@ -376,6 +377,29 @@ class _ChatScreenState extends State<ChatScreen> {
       _scrollToBottom();
     } catch (error) {
       _aiChatLog('openSubscriptionUpgrade failed: ${error.runtimeType} $error');
+      if (error is _ChatApiException && error.message == _noUpgradePlanAvailableMessage) {
+        final service = result.commerceService;
+        final includedLabel = service == 'video' ? 'videollamadas incluidas' : 'chats incluidos';
+        final oneOffLabel = service == 'video' ? 'una videollamada única' : 'un chat único';
+        final fallbackResult = result.withEntitlement(
+          serviceType: service,
+          canUse: false,
+          remaining: 0,
+          reason: 'no_${service}_entitlement_left',
+          upgradeUnavailable: true,
+        );
+        if (!mounted) return;
+        setState(() {
+          _messages.add(_ChatMessage.assistant(
+            'No hay un plan superior con más $includedLabel disponible. Para seguir con esta consulta, puedes comprar $oneOffLabel desde el botón del chat.',
+            result: fallbackResult,
+            includeInHistory: false,
+          ));
+          _isSending = false;
+        });
+        _scrollToBottom();
+        return;
+      }
       if (!mounted) return;
       setState(() {
         _messages.add(_ChatMessage.assistant(_friendlyError(error), includeInHistory: false));
@@ -482,7 +506,7 @@ class _ChatScreenState extends State<ChatScreen> {
     );
 
     if (targetPlan.code.isEmpty) {
-      throw const _ChatApiException('No encontré un plan superior que libere disponibilidad para esta consulta en el periodo actual.');
+      throw const _ChatApiException(_noUpgradePlanAvailableMessage);
     }
 
     return _SubscriptionUpgradeOption(currentPlan: currentPlan, targetPlan: targetPlan, usage: usage);
@@ -1107,12 +1131,13 @@ class _HandoffPanel extends StatelessWidget {
               enabled: !sending,
               onTap: () => onOneOffPurchaseSelected(service, result),
             ),
-          _ServiceButton(
-            label: 'mejorar plan',
-            selected: false,
-            enabled: !sending,
-            onTap: () => onUpgradeSelected(result),
-          ),
+          if (!result.upgradeUnavailable)
+            _ServiceButton(
+              label: 'mejorar plan',
+              selected: false,
+              enabled: !sending,
+              onTap: () => onUpgradeSelected(result),
+            ),
         ],
       );
     }
@@ -1458,6 +1483,7 @@ class _AiChatTurnResult {
     this.serviceAccessReason,
     this.commerceServiceOverride,
     this.upgradePlan,
+    this.upgradeUnavailable = false,
     this.remaining,
   });
 
@@ -1534,6 +1560,7 @@ class _AiChatTurnResult {
   final String? serviceAccessReason;
   final String? commerceServiceOverride;
   final _ChatSubscriptionPlan? upgradePlan;
+  final bool upgradeUnavailable;
   final int? remaining;
 
   String get commerceService {
@@ -1570,6 +1597,7 @@ class _AiChatTurnResult {
     required bool canUse,
     required int remaining,
     String? reason,
+    bool upgradeUnavailable = false,
   }) {
     return _AiChatTurnResult(
       payload: payload,
@@ -1583,6 +1611,7 @@ class _AiChatTurnResult {
       serviceAccessReason: reason,
       commerceServiceOverride: serviceType == 'video' ? 'video' : 'chat',
       upgradePlan: upgradePlan,
+      upgradeUnavailable: upgradeUnavailable,
       remaining: remaining,
     );
   }
@@ -1600,6 +1629,7 @@ class _AiChatTurnResult {
       serviceAccessReason: serviceAccessReason,
       commerceServiceOverride: commerceServiceOverride,
       upgradePlan: plan,
+      upgradeUnavailable: false,
       remaining: remaining,
     );
   }
