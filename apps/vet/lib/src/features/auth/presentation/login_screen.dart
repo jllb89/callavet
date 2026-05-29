@@ -1,0 +1,1253 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:country_picker/country_picker.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_libphonenumber/flutter_libphonenumber.dart';
+import 'package:flutter_svg/flutter_svg.dart';
+import 'package:go_router/go_router.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+
+import '../../../core/config/environment.dart';
+
+const bool _vetAuthDebug = bool.fromEnvironment('VET_AUTH_DEBUG') || bool.fromEnvironment('KYC_FLOW_DEBUG');
+const bool _bypassOtpValidationForDev = bool.fromEnvironment(
+  'BYPASS_OTP',
+  defaultValue: false,
+);
+const String _trustedDevPhoneDigits = '5542850675';
+
+void _vetAuthLog(String message) {
+  if (_vetAuthDebug) {
+    debugPrint('[VetAuth][Flow] $message');
+  }
+}
+
+String _digitsOnly(String input) => input.replaceAll(RegExp(r'[^0-9]'), '');
+
+bool _isTrustedDevPhone(String? phone) {
+  if (phone == null || phone.isEmpty) return false;
+  return _digitsOnly(phone).endsWith(_trustedDevPhoneDigits);
+}
+
+class LoginScreen extends StatefulWidget {
+  const LoginScreen({super.key});
+
+  @override
+  State<LoginScreen> createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends State<LoginScreen> {
+  final _phoneController = TextEditingController();
+  final _emailController = TextEditingController();
+  final _otpController = TextEditingController();
+  final _otpFocusNode = FocusNode();
+  String _countryCode = 'MX';
+  String _dialCode = '52';
+  String _flagEmoji = '🇲🇽';
+  CountryWithPhoneCode? _selectedCountryData;
+  bool _isPhoneValid = false;
+  String? _normalizedPhone;
+  Timer? _phoneValidationDebounce;
+  Timer? _emailValidationDebounce;
+  Timer? _resendTimer;
+
+  int _step = 0;
+  String? _phoneE164;
+  String? _emailForOtp;
+  String _otpChannel = 'sms';
+  int _resendSecondsLeft = 0;
+  bool _isSendingOtp = false;
+  bool _isVerifyingOtp = false;
+  String? _errorText;
+  bool _gatewayOtpUnavailable = false;
+  bool _showEmailValidationError = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initPhoneLibrary();
+  }
+
+  @override
+  void dispose() {
+    _phoneValidationDebounce?.cancel();
+    _emailValidationDebounce?.cancel();
+    _resendTimer?.cancel();
+    _phoneController.dispose();
+    _emailController.dispose();
+    _otpController.dispose();
+    _otpFocusNode.dispose();
+    super.dispose();
+  }
+
+  Future<void> _initPhoneLibrary() async {
+    await init(overrides: {'MX': _buildMexicoOverride()});
+    _syncSelectedCountryData();
+    if (mounted) setState(() {});
+    _schedulePhoneValidation();
+  }
+
+  CountryWithPhoneCode _buildMexicoOverride() {
+    return CountryWithPhoneCode(
+      countryCode: 'MX',
+      phoneCode: '52',
+      countryName: 'Mexico',
+      exampleNumberMobileNational: '55 1234 5678',
+      exampleNumberFixedLineNational: '55 1234 5678',
+      phoneMaskMobileNational: '00 0000 0000',
+      phoneMaskFixedLineNational: '00 0000 0000',
+      exampleNumberMobileInternational: '+52 55 1234 5678',
+      exampleNumberFixedLineInternational: '+52 55 1234 5678',
+      phoneMaskMobileInternational: '+00 00 0000 0000',
+      phoneMaskFixedLineInternational: '+00 00 0000 0000',
+    );
+  }
+
+  void _syncSelectedCountryData() {
+    final countries = CountryManager().countries;
+    if (countries.isEmpty) return;
+    final match = countries.firstWhere(
+      (country) => country.countryCode.toUpperCase() == _countryCode,
+      orElse: () => countries.first,
+    );
+    _selectedCountryData = match;
+  }
+
+  void _schedulePhoneValidation() {
+    _phoneValidationDebounce?.cancel();
+
+    final rawText = _phoneController.text.trim();
+    if (rawText.isEmpty) {
+      if (_isPhoneValid || _normalizedPhone != null) {
+        setState(() {
+          _isPhoneValid = false;
+          _normalizedPhone = null;
+        });
+      }
+      return;
+    }
+
+    final country = _selectedCountryData;
+    if (country == null) {
+      if (_isPhoneValid || _normalizedPhone != null) {
+        setState(() {
+          _isPhoneValid = false;
+          _normalizedPhone = null;
+        });
+      }
+      return;
+    }
+
+    _phoneValidationDebounce = Timer(const Duration(milliseconds: 300), () async {
+      final number = rawText.replaceAll(RegExp(r'\s+'), '');
+      bool isValid;
+      String? normalized;
+
+      try {
+        final result = await getFormattedParseResult(
+          number,
+          country,
+          phoneNumberFormat: PhoneNumberFormat.international,
+        );
+        isValid = result != null && result.e164.isNotEmpty;
+        normalized = result?.e164;
+      } catch (_) {
+        isValid = false;
+        normalized = null;
+      }
+
+      if (!mounted) return;
+      if (_isPhoneValid != isValid || _normalizedPhone != normalized) {
+        setState(() {
+          _isPhoneValid = isValid;
+          _normalizedPhone = normalized;
+        });
+      }
+    });
+  }
+
+  bool _isValidEmail(String input) {
+    final email = input.trim();
+    return RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$').hasMatch(email);
+  }
+
+  void _scheduleEmailValidation() {
+    _emailValidationDebounce?.cancel();
+    if (_showEmailValidationError) {
+      setState(() => _showEmailValidationError = false);
+    }
+    final text = _emailController.text.trim();
+    if (text.isEmpty) return;
+
+    _emailValidationDebounce = Timer(const Duration(milliseconds: 700), () {
+      if (!mounted) return;
+      final shouldShow = _emailController.text.trim().isNotEmpty && !_isValidEmail(_emailController.text.trim());
+      if (_showEmailValidationError != shouldShow) {
+        setState(() => _showEmailValidationError = shouldShow);
+      }
+    });
+  }
+
+  void _startResendCooldown([int seconds = 60]) {
+    _resendTimer?.cancel();
+    setState(() => _resendSecondsLeft = seconds);
+    _resendTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      if (_resendSecondsLeft <= 1) {
+        timer.cancel();
+        setState(() => _resendSecondsLeft = 0);
+        return;
+      }
+      setState(() => _resendSecondsLeft -= 1);
+    });
+  }
+
+  String _retryMessage(String message, int? retryAfterSeconds) {
+    if (retryAfterSeconds == null || retryAfterSeconds <= 0) return message;
+    final minutes = retryAfterSeconds ~/ 60;
+    final seconds = retryAfterSeconds % 60;
+    final waitText = minutes > 0 ? '${minutes}m ${seconds}s' : '${seconds}s';
+    return '$message (intenta de nuevo en $waitText)';
+  }
+
+  String _gatewayOtpErrorMessage(_GatewayOtpException err, {required String channel}) {
+    final code = (err.code ?? '').toLowerCase();
+    final message = err.message.toLowerCase();
+    final isNotFound = code.contains('not_found') ||
+        code.contains('user_not_found') ||
+        message.contains('not found') ||
+        message.contains('no existe') ||
+        message.contains('usuario no encontrado') ||
+        message.contains('account not found');
+
+    if (isNotFound) {
+      return channel == 'sms'
+          ? 'No encontramos una cuenta veterinaria con ese número.'
+          : 'No encontramos una cuenta veterinaria con ese correo.';
+    }
+
+    return _retryMessage(err.message, err.retryAfterSeconds);
+  }
+
+  Future<Map<String, dynamic>> _gatewayPost(String path, Map<String, dynamic> body) async {
+    final uri = Uri.parse('${Environment.apiBaseUrl}$path');
+    final client = HttpClient();
+    try {
+      final req = await client.postUrl(uri);
+      req.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+      req.add(utf8.encode(jsonEncode(body)));
+
+      final res = await req.close();
+      final text = await utf8.decoder.bind(res).join();
+      final data = text.isEmpty ? <String, dynamic>{} : (jsonDecode(text) as Map<String, dynamic>);
+
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        throw _GatewayOtpException(
+          message: data['message']?.toString() ?? 'No se pudo completar la solicitud.',
+          code: data['code']?.toString(),
+          retryAfterSeconds: (data['retryAfterSeconds'] as num?)?.toInt(),
+          statusCode: (data['statusCode'] as num?)?.toInt() ?? res.statusCode,
+        );
+      }
+      return data;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  bool _isGatewayRouteMissing(_GatewayOtpException err) {
+    final msg = err.message.toLowerCase();
+    return (err.statusCode == 404) &&
+        (msg.contains('cannot post /auth/otp/') ||
+            msg.contains('cannot post /api/auth/otp/') ||
+            msg.contains('cannot post /v1/auth/otp/'));
+  }
+
+  Future<Map<String, dynamic>> _sendOtpDirectSupabase({
+    required String channel,
+    String? phone,
+    String? email,
+  }) async {
+    final client = Supabase.instance.client;
+    if (channel == 'sms') {
+      await client.auth.signInWithOtp(
+        phone: phone,
+        shouldCreateUser: false,
+        channel: OtpChannel.sms,
+      );
+    } else {
+      await client.auth.signInWithOtp(
+        email: email,
+        shouldCreateUser: false,
+      );
+    }
+    return {
+      'ok': true,
+      'cooldownSeconds': 60,
+      'message': channel == 'sms' ? 'Código enviado por SMS.' : 'Código enviado a tu correo.',
+    };
+  }
+
+  Future<Map<String, dynamic>> _sendOtpViaGateway({
+    required String channel,
+    String? phone,
+    String? email,
+  }) async {
+    if (channel == 'sms' && _isTrustedDevPhone(phone)) {
+      _vetAuthLog('Trusted dev phone detected; using direct Supabase OTP for phone=$phone');
+      return _sendOtpDirectSupabase(channel: channel, phone: phone, email: email);
+    }
+    if (_gatewayOtpUnavailable) {
+      return _sendOtpDirectSupabase(channel: channel, phone: phone, email: email);
+    }
+    try {
+      return await _gatewayPost('/auth/otp/send', {
+        'channel': channel,
+        if (phone != null) 'phone': phone,
+        if (email != null) 'email': email,
+        'shouldCreateUser': false,
+      });
+    } on _GatewayOtpException catch (err) {
+      if (_isGatewayRouteMissing(err)) {
+        _vetAuthLog('Gateway OTP routes unavailable. Falling back to direct Supabase OTP.');
+        _gatewayOtpUnavailable = true;
+        return _sendOtpDirectSupabase(channel: channel, phone: phone, email: email);
+      }
+      rethrow;
+    }
+  }
+
+  Future<void> _checkVerifyLock() async {
+    if (_gatewayOtpUnavailable) return;
+    final destination = _otpChannel == 'sms' ? _phoneE164 : _emailForOtp;
+    if (destination == null || destination.isEmpty) return;
+    try {
+      await _gatewayPost('/auth/otp/verify-lock', {
+        'channel': _otpChannel,
+        if (_otpChannel == 'sms') 'phone': destination,
+        if (_otpChannel == 'email') 'email': destination,
+      });
+    } on _GatewayOtpException catch (err) {
+      if (_isGatewayRouteMissing(err)) {
+        _gatewayOtpUnavailable = true;
+        return;
+      }
+      rethrow;
+    }
+  }
+
+  Future<void> _recordVerifyAttempt(bool success) async {
+    if (_gatewayOtpUnavailable) return;
+    final destination = _otpChannel == 'sms' ? _phoneE164 : _emailForOtp;
+    if (destination == null || destination.isEmpty) return;
+    try {
+      await _gatewayPost('/auth/otp/verify-attempt', {
+        'channel': _otpChannel,
+        if (_otpChannel == 'sms') 'phone': destination,
+        if (_otpChannel == 'email') 'email': destination,
+        'success': success,
+      });
+    } on _GatewayOtpException catch (err) {
+      if (_isGatewayRouteMissing(err)) {
+        _gatewayOtpUnavailable = true;
+      }
+    } catch (_) {
+      // Best-effort guardrail telemetry.
+    }
+  }
+
+  Future<void> _verifyVetAccess() async {
+    final token = Supabase.instance.client.auth.currentSession?.accessToken;
+    if (token == null || token.isEmpty) {
+      throw const _VetAccessException('No se creó una sesión válida. Intenta de nuevo.');
+    }
+
+    final uri = Uri.parse('${Environment.apiBaseUrl}/vets/me/status');
+    final client = HttpClient();
+    try {
+      final req = await client.getUrl(uri);
+      req.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+
+      final res = await req.close();
+      final text = await utf8.decoder.bind(res).join();
+      _vetAuthLog('GET /vets/me/status status=${res.statusCode} body=$text');
+      if (res.statusCode >= 200 && res.statusCode < 300) return;
+
+      if (res.statusCode == 403) {
+        throw const _VetAccessException('Esta cuenta no tiene rol veterinario. Usa una cuenta aprobada para Call a Vet Pro.');
+      }
+      if (res.statusCode == 400 || res.statusCode == 404) {
+        throw const _VetAccessException('Esta cuenta no tiene un perfil veterinario configurado.');
+      }
+      throw _VetAccessException('No pude validar el perfil veterinario (${res.statusCode}).');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  void _pickCountry() {
+    showCountryPicker(
+      context: context,
+      countryListTheme: CountryListThemeData(
+        backgroundColor: const Color(0xFF101010),
+        borderRadius: BorderRadius.circular(24),
+        textStyle: const TextStyle(
+          color: Colors.white,
+          fontSize: 14,
+          fontFamily: 'ABCDiatype',
+          fontWeight: FontWeight.w500,
+        ),
+        searchTextStyle: const TextStyle(
+          color: Colors.white,
+          fontSize: 14,
+          fontFamily: 'ABCDiatype',
+          fontWeight: FontWeight.w500,
+        ),
+        inputDecoration: const InputDecoration(
+          hintText: 'buscar país',
+          hintStyle: TextStyle(
+            color: Color(0x99FFFFFF),
+            fontSize: 14,
+            fontFamily: 'ABCDiatype',
+            fontWeight: FontWeight.w400,
+          ),
+          enabledBorder: UnderlineInputBorder(
+            borderSide: BorderSide(color: Color(0x44FFFFFF)),
+          ),
+          focusedBorder: UnderlineInputBorder(
+            borderSide: BorderSide(color: Colors.white),
+          ),
+        ),
+      ),
+      favorite: const ['MX', 'US'],
+      showPhoneCode: true,
+      onSelect: (country) {
+        setState(() {
+          _countryCode = country.countryCode;
+          _dialCode = country.phoneCode;
+          _flagEmoji = country.flagEmoji;
+        });
+        _syncSelectedCountryData();
+        _schedulePhoneValidation();
+      },
+    );
+  }
+
+  Future<void> _routeToDashboardAfterVetGate() async {
+    await _verifyVetAccess();
+    if (!mounted) return;
+    context.go('/dashboard');
+  }
+
+  Future<void> _sendOtp() async {
+    if (_isSendingOtp) return;
+    final normalized = _normalizedPhone;
+    if (normalized == null || !_isPhoneValid) return;
+    setState(() {
+      _isSendingOtp = true;
+      _errorText = null;
+    });
+
+    try {
+      if (_bypassOtpValidationForDev) {
+        final currentSession = Supabase.instance.client.auth.currentSession;
+        final currentUser = currentSession?.user;
+        final enteredDigits = _digitsOnly(normalized);
+        final sessionPhoneDigits = _digitsOnly(currentUser?.phone ?? '');
+
+        if (currentSession == null || currentUser == null) {
+          setState(() {
+            _errorText = 'BYPASS_OTP requiere una sesión activa. Inicia sesión primero o desactiva el bypass.';
+          });
+          return;
+        }
+        if (sessionPhoneDigits.isEmpty || sessionPhoneDigits != enteredDigits) {
+          setState(() {
+            _errorText = 'El teléfono no coincide con la sesión activa. Cierra sesión o usa OTP normal.';
+          });
+          return;
+        }
+        await _routeToDashboardAfterVetGate();
+        return;
+      }
+
+      _vetAuthLog('Requesting OTP for vet phone=$normalized');
+      final response = await _sendOtpViaGateway(channel: 'sms', phone: normalized);
+      final cooldownSeconds = (response['cooldownSeconds'] as num?)?.toInt() ?? 60;
+
+      setState(() {
+        _phoneE164 = normalized;
+        _otpChannel = 'sms';
+        _otpController.clear();
+        _step = 1;
+      });
+      _startResendCooldown(cooldownSeconds);
+      Future.delayed(const Duration(milliseconds: 120), () {
+        if (mounted) FocusScope.of(context).requestFocus(_otpFocusNode);
+      });
+    } on _GatewayOtpException catch (err) {
+      setState(() => _errorText = _gatewayOtpErrorMessage(err, channel: 'sms'));
+    } on AuthException catch (err) {
+      setState(() => _errorText = err.message);
+    } on _VetAccessException catch (err) {
+      await Supabase.instance.client.auth.signOut(scope: SignOutScope.local);
+      setState(() => _errorText = err.message);
+    } catch (err) {
+      setState(() => _errorText = 'No se pudo enviar el código: $err');
+    } finally {
+      if (mounted) setState(() => _isSendingOtp = false);
+    }
+  }
+
+  Future<void> _sendEmailOtp() async {
+    if (_isSendingOtp) return;
+    final email = _emailController.text.trim().toLowerCase();
+    if (!_isValidEmail(email)) return;
+
+    setState(() {
+      _isSendingOtp = true;
+      _errorText = null;
+    });
+
+    try {
+      if (_bypassOtpValidationForDev) {
+        await _routeToDashboardAfterVetGate();
+        return;
+      }
+
+      final response = await _sendOtpViaGateway(channel: 'email', email: email);
+      final cooldownSeconds = (response['cooldownSeconds'] as num?)?.toInt() ?? 60;
+
+      setState(() {
+        _otpChannel = 'email';
+        _emailForOtp = email;
+        _otpController.clear();
+        _step = 1;
+      });
+      _startResendCooldown(cooldownSeconds);
+      Future.delayed(const Duration(milliseconds: 120), () {
+        if (mounted) FocusScope.of(context).requestFocus(_otpFocusNode);
+      });
+    } on _GatewayOtpException catch (err) {
+      setState(() => _errorText = _gatewayOtpErrorMessage(err, channel: 'email'));
+    } on _VetAccessException catch (err) {
+      await Supabase.instance.client.auth.signOut(scope: SignOutScope.local);
+      setState(() => _errorText = err.message);
+    } catch (err) {
+      setState(() => _errorText = 'No se pudo enviar el código: $err');
+    } finally {
+      if (mounted) setState(() => _isSendingOtp = false);
+    }
+  }
+
+  Future<void> _resendCode() async {
+    if (_isSendingOtp || _resendSecondsLeft > 0) return;
+
+    setState(() {
+      _isSendingOtp = true;
+      _errorText = null;
+    });
+
+    try {
+      Map<String, dynamic> response;
+      if (_otpChannel == 'email') {
+        final email = _emailForOtp;
+        if (email == null || email.isEmpty) {
+          setState(() => _errorText = 'falta el correo electrónico.');
+          return;
+        }
+        response = await _sendOtpViaGateway(channel: 'email', email: email);
+      } else {
+        final phone = _phoneE164;
+        if (phone == null || phone.isEmpty) {
+          setState(() => _errorText = 'falta el número de teléfono.');
+          return;
+        }
+        response = await _sendOtpViaGateway(channel: 'sms', phone: phone);
+      }
+
+      final cooldownSeconds = (response['cooldownSeconds'] as num?)?.toInt() ?? 60;
+      _startResendCooldown(cooldownSeconds);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('código reenviado.')),
+      );
+    } on _GatewayOtpException catch (err) {
+      setState(() => _errorText = _retryMessage(err.message, err.retryAfterSeconds));
+    } catch (err) {
+      setState(() => _errorText = 'No se pudo reenviar: $err');
+    } finally {
+      if (mounted) setState(() => _isSendingOtp = false);
+    }
+  }
+
+  Future<void> _verifyOtpAndLogin() async {
+    if (_isVerifyingOtp) return;
+    final phone = _phoneE164;
+    final email = _emailForOtp;
+    final token = _otpController.text.trim();
+    if ((_otpChannel == 'sms' && (phone == null || phone.isEmpty)) ||
+        (_otpChannel == 'email' && (email == null || email.isEmpty)) ||
+        token.length != 6) {
+      return;
+    }
+
+    setState(() {
+      _isVerifyingOtp = true;
+      _errorText = null;
+    });
+
+    try {
+      final client = Supabase.instance.client;
+      await _checkVerifyLock();
+      final result = await client.auth.verifyOTP(
+        type: _otpChannel == 'sms' ? OtpType.sms : OtpType.email,
+        token: token,
+        phone: _otpChannel == 'sms' ? phone : null,
+        email: _otpChannel == 'email' ? email : null,
+      );
+      await _recordVerifyAttempt(true);
+      final userId = result.user?.id ?? client.auth.currentUser?.id;
+      _vetAuthLog('verifyOTP success. session=${result.session != null} userId=$userId');
+
+      if (userId == null) {
+        setState(() => _errorText = 'No se creó sesión de usuario.');
+        return;
+      }
+
+      await _routeToDashboardAfterVetGate();
+    } on _GatewayOtpException catch (err) {
+      setState(() => _errorText = _retryMessage(err.message, err.retryAfterSeconds));
+    } on AuthException catch (err) {
+      await _recordVerifyAttempt(false);
+      setState(() => _errorText = err.message);
+    } on _VetAccessException catch (err) {
+      await _recordVerifyAttempt(false);
+      await Supabase.instance.client.auth.signOut(scope: SignOutScope.local);
+      setState(() => _errorText = err.message);
+    } catch (err) {
+      setState(() => _errorText = 'No se pudo iniciar sesión: $err');
+    } finally {
+      if (mounted) setState(() => _isVerifyingOtp = false);
+    }
+  }
+
+  Widget _buildPhoneStep() {
+    final phoneReady = _isPhoneValid && _normalizedPhone != null;
+    final showInvalidPhoneHint = _phoneController.text.trim().isNotEmpty && !_isPhoneValid && _errorText == null;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 24),
+        const SizedBox(
+          width: 351,
+          child: Text(
+            'bienvenido a call a vet pro.\npor favor introduce tu número de teléfono veterinario para iniciar sesión:',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 14,
+              fontFamily: 'ABC Diatype',
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
+        const SizedBox(height: 34),
+        Row(
+          children: [
+            InkWell(
+              onTap: _pickCountry,
+              borderRadius: BorderRadius.circular(20),
+              child: Container(
+                width: 94,
+                height: 62,
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.06),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Row(
+                  children: [
+                    CircleAvatar(
+                      radius: 12.5,
+                      backgroundColor: const Color(0xFF2E2E2E),
+                      child: Text(_flagEmoji, style: const TextStyle(fontSize: 14)),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '+$_dialCode',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        fontFamily: 'ABC Diatype',
+                        fontWeight: FontWeight.w400,
+                        height: 1.85,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(width: 11),
+            Expanded(
+              child: Container(
+                height: 62,
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.06),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                alignment: Alignment.centerLeft,
+                child: TextField(
+                  controller: _phoneController,
+                  keyboardType: TextInputType.phone,
+                  onChanged: (_) => _schedulePhoneValidation(),
+                  inputFormatters: _selectedCountryData == null
+                      ? null
+                      : [
+                          LibPhonenumberTextFormatter(
+                            country: _selectedCountryData!,
+                            phoneNumberType: PhoneNumberType.mobile,
+                            phoneNumberFormat: PhoneNumberFormat.national,
+                            inputContainsCountryCode: false,
+                          ),
+                        ],
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 15,
+                    fontFamily: 'ABC Diatype',
+                    fontWeight: FontWeight.w400,
+                  ),
+                  decoration: const InputDecoration(
+                    border: InputBorder.none,
+                    hintText: '55 1234 5678',
+                    hintStyle: TextStyle(
+                      color: Color(0xFF3A3A3A),
+                      fontSize: 15,
+                      fontFamily: 'ABC Diatype',
+                      fontWeight: FontWeight.w400,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+        if (showInvalidPhoneHint) ...[
+          const SizedBox(height: 10),
+          const Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              'introduce un número de teléfono válido.',
+              style: TextStyle(
+                color: Color(0xFFFF8A80),
+                fontSize: 12,
+                fontFamily: 'ABC Diatype',
+                fontWeight: FontWeight.w400,
+              ),
+            ),
+          ),
+        ],
+        if (_errorText != null) ...[
+          const SizedBox(height: 12),
+          Text(
+            _errorText!,
+            style: const TextStyle(
+              color: Color(0xFFFF8A80),
+              fontSize: 12,
+              fontFamily: 'ABC Diatype',
+              fontWeight: FontWeight.w400,
+            ),
+          ),
+        ],
+        const Spacer(),
+        _RoundActionRow(label: 'continuar', busy: _isSendingOtp, enabled: phoneReady && !_isSendingOtp, onPressed: _sendOtp),
+      ],
+    );
+  }
+
+  Widget _buildOtpStep() {
+    final canSubmit = _otpController.text.trim().length == 6 && !_isVerifyingOtp;
+    final destinationLabel = _otpChannel == 'sms' ? _phoneE164 : _emailForOtp;
+    final emailFallbackEnabled = _resendSecondsLeft == 0 && !_isSendingOtp;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 24),
+        const SizedBox(
+          width: 351,
+          child: Text(
+            'introduce el código de confirmación:',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 16,
+              fontFamily: 'ABC Diatype',
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
+        if (destinationLabel != null && destinationLabel.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: SizedBox(
+              width: 351,
+              child: Text(
+                'enviado a $destinationLabel',
+                style: const TextStyle(
+                  color: Color(0x99FFFFFF),
+                  fontSize: 12,
+                  fontFamily: 'ABC Diatype',
+                  fontWeight: FontWeight.w400,
+                ),
+              ),
+            ),
+          ),
+        const SizedBox(height: 24),
+        Center(
+          child: SizedBox(
+            width: 351,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    _OtpGroupBox(digits: _otpController.text, startIndex: 0),
+                    const SizedBox(width: 20),
+                    _OtpGroupBox(digits: _otpController.text, startIndex: 3),
+                  ],
+                ),
+                Opacity(
+                  opacity: 0,
+                  child: TextField(
+                    controller: _otpController,
+                    focusNode: _otpFocusNode,
+                    keyboardType: TextInputType.number,
+                    inputFormatters: [
+                      FilteringTextInputFormatter.digitsOnly,
+                      LengthLimitingTextInputFormatter(6),
+                    ],
+                    onChanged: (_) => setState(() {}),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        if (_errorText != null) ...[
+          const SizedBox(height: 12),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              _errorText!,
+              style: const TextStyle(
+                color: Color(0xFFFF8A80),
+                fontSize: 12,
+                fontFamily: 'ABC Diatype',
+                fontWeight: FontWeight.w400,
+              ),
+            ),
+          ),
+        ],
+        const SizedBox(height: 10),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(
+            onPressed: (_resendSecondsLeft == 0 && !_isSendingOtp) ? _resendCode : null,
+            style: TextButton.styleFrom(foregroundColor: Colors.white),
+            child: Text(
+              _isSendingOtp
+                  ? 'reenviando...'
+                  : _resendSecondsLeft > 0
+                      ? 'reenviar código (${_resendSecondsLeft}s)'
+                      : 'reenviar código',
+              style: TextStyle(
+                color: (_resendSecondsLeft == 0 && !_isSendingOtp) ? Colors.white : const Color(0x99FFFFFF),
+                fontSize: 12,
+                fontFamily: 'ABC Diatype',
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+        ),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(
+            onPressed: emailFallbackEnabled
+                ? () => setState(() {
+                      _step = 2;
+                      _errorText = null;
+                    })
+                : null,
+            style: TextButton.styleFrom(foregroundColor: Colors.white),
+            child: Text(
+              'enviarlo por correo electrónico',
+              style: TextStyle(
+                color: emailFallbackEnabled ? Colors.white : const Color(0x99FFFFFF),
+                fontSize: 12,
+                fontFamily: 'ABC Diatype',
+                fontWeight: FontWeight.w500,
+                decoration: TextDecoration.underline,
+              ),
+            ),
+          ),
+        ),
+        const Spacer(),
+        _RoundActionRow(label: 'iniciar', busy: _isVerifyingOtp, enabled: canSubmit, onPressed: _verifyOtpAndLogin),
+      ],
+    );
+  }
+
+  Widget _buildEmailStep() {
+    final email = _emailController.text.trim();
+    final isEmailValid = _isValidEmail(email);
+    final showInvalidEmailHint = _showEmailValidationError && _errorText == null;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 24),
+        const SizedBox(
+          width: 351,
+          child: Text(
+            'bienvenido a call a vet pro.\npor favor introduce tu correo veterinario para iniciar sesión:',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 14,
+              fontFamily: 'ABC Diatype',
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
+        const SizedBox(height: 34),
+        Container(
+          height: 62,
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.06),
+            borderRadius: BorderRadius.circular(20),
+          ),
+          alignment: Alignment.centerLeft,
+          child: TextField(
+            controller: _emailController,
+            keyboardType: TextInputType.emailAddress,
+            onChanged: (_) {
+              setState(() {});
+              _scheduleEmailValidation();
+            },
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 15,
+              fontFamily: 'ABC Diatype',
+              fontWeight: FontWeight.w400,
+            ),
+            decoration: const InputDecoration(
+              border: InputBorder.none,
+              hintText: 'correo@dominio.com',
+              hintStyle: TextStyle(
+                color: Color(0xFF3A3A3A),
+                fontSize: 15,
+                fontFamily: 'ABC Diatype',
+                fontWeight: FontWeight.w400,
+              ),
+            ),
+          ),
+        ),
+        if (showInvalidEmailHint) ...[
+          const SizedBox(height: 10),
+          const Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              'introduce un correo electrónico válido.',
+              style: TextStyle(
+                color: Color(0xFFFF8A80),
+                fontSize: 12,
+                fontFamily: 'ABC Diatype',
+                fontWeight: FontWeight.w400,
+              ),
+            ),
+          ),
+        ],
+        if (_errorText != null) ...[
+          const SizedBox(height: 12),
+          Text(
+            _errorText!,
+            style: const TextStyle(
+              color: Color(0xFFFF8A80),
+              fontSize: 12,
+              fontFamily: 'ABC Diatype',
+              fontWeight: FontWeight.w400,
+            ),
+          ),
+        ],
+        const SizedBox(height: 14),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(
+            onPressed: () => setState(() {
+              _step = 0;
+              _errorText = null;
+            }),
+            style: TextButton.styleFrom(foregroundColor: Colors.white),
+            child: const Text(
+              'usar teléfono',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontFamily: 'ABC Diatype',
+                fontWeight: FontWeight.w500,
+                decoration: TextDecoration.underline,
+              ),
+            ),
+          ),
+        ),
+        const Spacer(),
+        _RoundActionRow(label: 'continuar', busy: _isSendingOtp, enabled: isEmailValid && !_isSendingOtp, onPressed: _sendEmailOtp),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final headerAction = _step == 0
+        ? const SizedBox(height: 38)
+        : TextButton(
+            onPressed: () {
+              final currentStep = _step;
+              setState(() {
+                _step = currentStep == 2 ? 1 : 0;
+                _errorText = null;
+                if (currentStep == 1) {
+                  _otpController.clear();
+                }
+              });
+            },
+            style: TextButton.styleFrom(foregroundColor: Colors.white),
+            child: const Text(
+              'volver',
+              textAlign: TextAlign.right,
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 13,
+                fontFamily: 'ABC Diatype',
+                fontWeight: FontWeight.w500,
+                decoration: TextDecoration.underline,
+              ),
+            ),
+          );
+
+    return Scaffold(
+      body: DecoratedBox(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment(0.50, -0.00),
+            end: Alignment(0.50, 1.00),
+            colors: [Color(0xFF141417), Color(0xFF070707)],
+          ),
+        ),
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    const Spacer(),
+                    headerAction,
+                  ],
+                ),
+                const SizedBox(height: 24),
+                Row(
+                  children: [
+                    const SizedBox(width: 8),
+                    SvgPicture.asset(
+                      'assets/icons/call a vet.svg',
+                      width: 118,
+                      fit: BoxFit.contain,
+                    ),
+                  ],
+                ),
+                Expanded(
+                  child: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 280),
+                    switchInCurve: Curves.easeOut,
+                    switchOutCurve: Curves.easeIn,
+                    transitionBuilder: (child, animation) {
+                      final slide = Tween<Offset>(
+                        begin: const Offset(0.04, 0),
+                        end: Offset.zero,
+                      ).animate(animation);
+                      return FadeTransition(
+                        opacity: animation,
+                        child: SlideTransition(position: slide, child: child),
+                      );
+                    },
+                    child: KeyedSubtree(
+                      key: ValueKey<int>(_step),
+                      child: _step == 0
+                          ? _buildPhoneStep()
+                          : _step == 1
+                              ? _buildOtpStep()
+                              : _buildEmailStep(),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RoundActionRow extends StatelessWidget {
+  const _RoundActionRow({
+    required this.label,
+    required this.busy,
+    required this.enabled,
+    required this.onPressed,
+  });
+
+  final String label;
+  final bool busy;
+  final bool enabled;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.end,
+        children: [
+          Text(
+            label,
+            textAlign: TextAlign.right,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 13,
+              fontFamily: 'ABC Diatype',
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(width: 10),
+          SizedBox(
+            width: 45,
+            height: 45,
+            child: ElevatedButton(
+              onPressed: enabled ? onPressed : null,
+              style: ElevatedButton.styleFrom(
+                shape: const CircleBorder(),
+                padding: EdgeInsets.zero,
+                backgroundColor: Colors.white,
+                foregroundColor: const Color(0xFF101010),
+                disabledBackgroundColor: Colors.white.withValues(alpha: 0.2),
+              ),
+              child: busy
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF101010)),
+                      ),
+                    )
+                  : const Icon(Icons.arrow_forward, size: 18),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _OtpGroupBox extends StatelessWidget {
+  const _OtpGroupBox({required this.digits, required this.startIndex});
+
+  final String digits;
+  final int startIndex;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 148,
+      height: 62,
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: List.generate(3, (index) {
+          final digitIndex = startIndex + index;
+          final value = digitIndex < digits.length ? digits[digitIndex] : '';
+          return _OtpDigitSlot(value: value, isActive: digitIndex == digits.length);
+        }),
+      ),
+    );
+  }
+}
+
+class _OtpDigitSlot extends StatelessWidget {
+  const _OtpDigitSlot({
+    required this.value,
+    required this.isActive,
+  });
+
+  final String value;
+  final bool isActive;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 25,
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text(
+            value,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 16,
+              fontFamily: 'ABC Diatype',
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Container(
+            height: 1,
+            color: isActive ? Colors.white : const Color(0xFF3A3A3A),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _GatewayOtpException implements Exception {
+  const _GatewayOtpException({
+    required this.message,
+    this.code,
+    this.retryAfterSeconds,
+    this.statusCode,
+  });
+
+  final String message;
+  final String? code;
+  final int? retryAfterSeconds;
+  final int? statusCode;
+}
+
+class _VetAccessException implements Exception {
+  const _VetAccessException(this.message);
+
+  final String message;
+}

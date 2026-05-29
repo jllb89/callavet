@@ -273,19 +273,26 @@ export class VetsController {
   async updateMyProfile(
     @Body()
     body: {
-      license_number?: string;
-      country?: string;
-      bio?: string;
-      years_experience?: number;
+      license_number?: string | null;
+      country?: string | null;
+      bio?: string | null;
+      years_experience?: number | null;
       specialties?: string[];
       languages?: string[];
     }
   ) {
     const actor = await this.currentActor();
     if (actor.role !== 'vet') throw new ForbiddenException('vet_role_required');
-    const specialties = this.validator.parseUuidArray(body?.specialties, 'specialties');
-    const languages = this.validator.parseStringArray(body?.languages, 'languages');
-    const yearsExperience = body?.years_experience == null ? null : Number(body.years_experience);
+    const payload = body || {};
+    const hasLicenseNumber = Object.prototype.hasOwnProperty.call(payload, 'license_number');
+    const hasCountry = Object.prototype.hasOwnProperty.call(payload, 'country');
+    const hasBio = Object.prototype.hasOwnProperty.call(payload, 'bio');
+    const hasYearsExperience = Object.prototype.hasOwnProperty.call(payload, 'years_experience');
+    const hasSpecialties = Object.prototype.hasOwnProperty.call(payload, 'specialties');
+    const hasLanguages = Object.prototype.hasOwnProperty.call(payload, 'languages');
+    const specialties = this.validator.parseUuidArray(payload.specialties, 'specialties');
+    const languages = this.validator.parseStringArray(payload.languages, 'languages');
+    const yearsExperience = payload.years_experience == null ? null : Number(payload.years_experience);
     if (yearsExperience != null && (!Number.isInteger(yearsExperience) || yearsExperience < 0)) {
       throw new BadRequestException('years_experience must be a non-negative integer');
     }
@@ -300,21 +307,27 @@ export class VetsController {
         `insert into vets (id, license_number, country, bio, years_experience, is_approved, specialties, languages, created_at, updated_at)
          values ($1::uuid, $2, $3, $4, $5, false, $6::uuid[], $7::text[], now(), now())
          on conflict (id) do update set
-           license_number = coalesce(excluded.license_number, vets.license_number),
-           country = coalesce(excluded.country, vets.country),
-           bio = coalesce(excluded.bio, vets.bio),
-           years_experience = coalesce(excluded.years_experience, vets.years_experience),
-           specialties = case when cardinality($6::uuid[]) > 0 then $6::uuid[] else vets.specialties end,
-           languages = case when cardinality($7::text[]) > 0 then $7::text[] else vets.languages end,
+           license_number = case when $8::boolean then excluded.license_number else vets.license_number end,
+           country = case when $9::boolean then excluded.country else vets.country end,
+           bio = case when $10::boolean then excluded.bio else vets.bio end,
+           years_experience = case when $11::boolean then excluded.years_experience else vets.years_experience end,
+           specialties = case when $12::boolean then $6::uuid[] else vets.specialties end,
+           languages = case when $13::boolean then $7::text[] else vets.languages end,
            updated_at = now()`,
         [
           actor.id,
-          body?.license_number?.trim() || null,
-          body?.country?.trim() || null,
-          body?.bio?.trim() || null,
+          hasLicenseNumber ? String(payload.license_number || '').trim() || null : null,
+          hasCountry ? String(payload.country || '').trim() || null : null,
+          hasBio ? String(payload.bio || '').trim() || null : null,
           yearsExperience,
           specialties,
           languages,
+          hasLicenseNumber,
+          hasCountry,
+          hasBio,
+          hasYearsExperience,
+          hasSpecialties,
+          hasLanguages,
         ]
       );
     });
