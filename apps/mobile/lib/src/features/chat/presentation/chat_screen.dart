@@ -262,11 +262,18 @@ class _ChatScreenState extends State<ChatScreen> {
       final start = await _startSession(kind, result);
       _aiChatLog('activateService /sessions/start response keys=${start.keys.join(',')}');
       if (start['overage'] == true) {
+        final exhaustedResult = result.withEntitlement(
+          serviceType: kind,
+          canUse: false,
+          remaining: 0,
+          reason: start['overageReason']?.toString(),
+        );
+        final offerMessage = await _aiEntitlementOfferMessage(kind, start, exhaustedResult);
         if (!mounted) return;
         setState(() {
           _messages.add(_ChatMessage.assistant(
-            _entitlementOfferMessage(kind),
-            result: result.withEntitlement(serviceType: kind, canUse: false, remaining: 0, reason: start['overageReason']?.toString()),
+            offerMessage,
+            result: exhaustedResult,
             includeInHistory: false,
           ));
           _isSending = false;
@@ -331,10 +338,161 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  void _openSubscriptionUpgrade() {
+  Future<void> _openSubscriptionUpgrade(_AiChatTurnResult result) async {
     if (_isSending) return;
-    _aiChatLog('openSubscriptionUpgrade route=/subscription-plans');
-    context.go('/subscription-plans');
+    _aiChatLog('openSubscriptionUpgrade in-chat start');
+    setState(() {
+      _messages.add(_ChatMessage.user('Mejorar mi suscripción.'));
+      _isSending = true;
+    });
+    _scrollToBottom();
+
+    try {
+      final option = await _fetchSubscriptionUpgradeOption();
+      final message = await _aiUpgradePlanMessage(option, result);
+      if (!mounted) return;
+      setState(() {
+        _messages.add(_ChatMessage.assistant(
+          message,
+          result: result.withUpgradePlan(option.targetPlan),
+          includeInHistory: false,
+        ));
+        _isSending = false;
+      });
+      _scrollToBottom();
+    } catch (error) {
+      _aiChatLog('openSubscriptionUpgrade failed: ${error.runtimeType} $error');
+      if (!mounted) return;
+      setState(() {
+        _messages.add(_ChatMessage.assistant(_friendlyError(error), includeInHistory: false));
+        _isSending = false;
+      });
+      _scrollToBottom();
+    }
+  }
+
+  Future<void> _confirmSubscriptionUpgrade(_ChatSubscriptionPlan plan, _AiChatTurnResult result) async {
+    if (_isSending) return;
+    _aiChatLog('confirmSubscriptionUpgrade start plan=${plan.code} service=${result.commerceService}');
+    setState(() {
+      _messages.add(_ChatMessage.user('Actualizar a ${plan.displayName}.'));
+      _isSending = true;
+    });
+    _scrollToBottom();
+
+    try {
+      var upgrade = await _postGatewayJson('/subscriptions/change-plan', {'code': plan.code});
+      if (upgrade['ok'] != true && upgrade['reason']?.toString() == 'no_active_subscription') {
+        upgrade = await _postGatewayJson('/subscriptions/activate-plan', {'code': plan.code});
+      }
+      if (upgrade['ok'] != true) {
+        throw _ChatApiException('No pude actualizar el plan: ${upgrade['reason']?.toString() ?? 'respuesta inválida'}');
+      }
+
+      final message = await _aiUpgradeConfirmedMessage(plan, result);
+      if (!mounted) return;
+      setState(() {
+        _messages.add(_ChatMessage.assistant(message, includeInHistory: false));
+        _isSending = false;
+      });
+      _scrollToBottom();
+
+      if (result.canRetryActivationAfterUpgrade) {
+        await _activateService(result.commerceService, result, addUserBubble: false);
+      }
+    } catch (error) {
+      _aiChatLog('confirmSubscriptionUpgrade failed: ${error.runtimeType} $error');
+      if (!mounted) return;
+      setState(() {
+        _messages.add(_ChatMessage.assistant(_friendlyError(error), includeInHistory: false));
+        _isSending = false;
+      });
+      _scrollToBottom();
+    }
+  }
+
+  Future<_SubscriptionUpgradeOption> _fetchSubscriptionUpgradeOption() async {
+    final subscriptions = await _getGatewayJson('/subscriptions/my');
+    final plansResponse = await _getGatewayJson('/plans');
+    final plans = (_asList(plansResponse['items']) ?? const [])
+        .map(_asMap)
+        .whereType<Map<String, dynamic>>()
+        .map(_ChatSubscriptionPlan.fromJson)
+        .where((plan) => plan.code.isNotEmpty)
+        .toList();
+
+    plans.sort((a, b) {
+      final price = a.monthlyCents.compareTo(b.monthlyCents);
+      return price != 0 ? price : a.code.compareTo(b.code);
+    });
+    if (plans.isEmpty) {
+      throw const _ChatApiException('No pude cargar los planes disponibles. Inténtalo de nuevo.');
+    }
+
+    Map<String, dynamic>? activeRow;
+    for (final item in _asList(subscriptions['data']) ?? const []) {
+      final row = _asMap(item);
+      if (row != null && _truthy(row['is_active_now'])) {
+        activeRow = row;
+        break;
+      }
+    }
+
+    final currentCode = _asMap(activeRow?['plan'])?['code']?.toString().toLowerCase();
+    final currentPlan = currentCode == null ? null : _findPlanByCode(plans, currentCode);
+    final currentIndex = currentPlan == null ? -1 : plans.indexWhere((plan) => plan.code.toLowerCase() == currentPlan.code.toLowerCase());
+    final targetPlan = currentIndex >= 0 && currentIndex < plans.length - 1
+        ? plans[currentIndex + 1]
+        : plans.firstWhere(
+            (plan) => currentPlan == null || plan.monthlyCents > currentPlan.monthlyCents,
+            orElse: () => const _ChatSubscriptionPlan.empty(),
+          );
+
+    if (targetPlan.code.isEmpty) {
+      throw const _ChatApiException('Ya estás en el plan más alto disponible.');
+    }
+
+    return _SubscriptionUpgradeOption(currentPlan: currentPlan, targetPlan: targetPlan);
+  }
+
+  Future<String> _aiUpgradePlanMessage(_SubscriptionUpgradeOption option, _AiChatTurnResult result) async {
+    final service = result.commerceService == 'video' ? 'videollamada' : 'chat';
+    final prompt = [
+      'Contexto interno de Call a Vet: el usuario tocó mejorar plan dentro del chat porque necesita más acceso a $service.',
+      'Plan actual: ${option.currentPlan?.aiSummary ?? 'sin plan activo identificado en la app'}.',
+      'Plan superior recomendado: ${option.targetPlan.aiSummary}.',
+      'Escribe solo el mensaje visible para el usuario, en español, máximo dos frases.',
+      'Describe beneficios concretos del plan superior sobre el actual con los datos de planes provistos.',
+      'Cierra indicando que puede actualizar desde el botón del chat.',
+      'No inventes precios, descuentos, beneficios, pagos, ni disponibilidad. No hagas preguntas de triaje.',
+    ].join(' ');
+    try {
+      final response = await _runAiTurn(prompt, const []);
+      final generated = _AiChatTurnResult.fromJson(response).payload.message.trim();
+      if (generated.isNotEmpty) return generated;
+    } catch (error) {
+      _aiChatLog('aiUpgradePlanMessage fallback after ${error.runtimeType}: $error');
+    }
+    return '${option.targetPlan.displayName} te da ${option.targetPlan.includedChats} chats y ${option.targetPlan.includedVideos} videollamadas incluidas para tener más margen de atención. Puedes actualizar desde el botón del chat.';
+  }
+
+  Future<String> _aiUpgradeConfirmedMessage(_ChatSubscriptionPlan plan, _AiChatTurnResult result) async {
+    final service = result.commerceService == 'video' ? 'videollamada' : 'chat';
+    final prompt = [
+      'Contexto interno de Call a Vet: el usuario actualizó su suscripción al plan ${plan.displayName} dentro del chat.',
+      'Plan actualizado: ${plan.aiSummary}.',
+      'Escribe solo el mensaje visible para el usuario, en español, una frase breve.',
+      'Confirma la actualización y explica que ahora volverás a validar la disponibilidad de $service si aplica.',
+      'No menciones IDs ni detalles técnicos.',
+    ].join(' ');
+    try {
+      final response = await _runAiTurn(prompt, const []);
+      final generated = _AiChatTurnResult.fromJson(response).payload.message.trim();
+      if (generated.isNotEmpty) return generated;
+    } catch (error) {
+      _aiChatLog('aiUpgradeConfirmedMessage fallback after ${error.runtimeType}: $error');
+    }
+    return 'Tu suscripción se actualizó a ${plan.displayName}; voy a volver a validar la disponibilidad de $service.';
   }
 
   Future<void> _completeStartedSession(String kind, Map<String, dynamic> start) async {
@@ -419,6 +577,44 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  Future<Map<String, dynamic>> _getGatewayJson(String path) async {
+    final token = Supabase.instance.client.auth.currentSession?.accessToken;
+    if (token == null || token.isEmpty) {
+      throw const _ChatApiException('Tu sesión expiró. Vuelve a iniciar sesión.');
+    }
+
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    final startedAt = DateTime.now();
+    try {
+      final uri = Uri.parse('${Environment.apiBaseUrl}$path');
+      _aiChatLog('gateway GET $uri');
+      final request = await client.getUrl(uri).timeout(const Duration(seconds: 10));
+      request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+
+      final response = await request.close().timeout(const Duration(seconds: 30));
+      final rawBody = await utf8.decoder.bind(response).join();
+      _aiChatLog(
+        'gateway GET $path status=${response.statusCode} elapsedMs=${DateTime.now().difference(startedAt).inMilliseconds} '
+        'bodyPreview="${_preview(rawBody, max: 420)}"',
+      );
+      final decoded = rawBody.trim().isEmpty ? <String, dynamic>{} : jsonDecode(rawBody);
+      final data = _asMap(decoded) ?? <String, dynamic>{};
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw _ChatApiException(_errorMessage(data, response.statusCode));
+      }
+      return data;
+    } on TimeoutException {
+      throw const _ChatApiException('La conexión tardó demasiado. Inténtalo otra vez.');
+    } on FormatException {
+      throw const _ChatApiException('El servidor respondió con datos inválidos.');
+    } on SocketException {
+      throw const _ChatApiException('No hay conexión con Call a Vet en este momento.');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   String _paymentRequiredMessage(Map<String, dynamic> response) {
     final payment = _asMap(response['payment']);
     final url = payment?['url']?.toString();
@@ -429,9 +625,27 @@ class _ChatScreenState extends State<ChatScreen> {
     return 'Para activar esta consulta necesitas pago o crédito adicional. Motivo: $reason';
   }
 
-  String _entitlementOfferMessage(String kind) {
+  Future<String> _aiEntitlementOfferMessage(String kind, Map<String, dynamic> start, _AiChatTurnResult result) async {
     final service = kind == 'video' ? 'videollamada' : 'chat';
-    return 'Ya no tienes $service disponible en tu plan actual. Puedes comprar una sesión única o mejorar tu suscripción.';
+    final reason = start['overageReason']?.toString() ?? result.serviceAccessReason ?? 'no_entitlement';
+    final prompt = [
+      'Contexto interno de Call a Vet: el usuario intentó activar una $service, pero el servidor confirmó que no tiene disponibilidad incluida en su suscripción.',
+      'Motivo técnico: $reason.',
+      'Redacta solo el mensaje visible para el usuario, en español, máximo dos frases.',
+      'Debe ofrecer comprar una $service única o mejorar su suscripción.',
+      'No menciones IDs, checkout, herramientas, pagos externos, ni que este mensaje viene de contexto interno.',
+      'No hagas más preguntas de triaje.',
+    ].join(' ');
+
+    try {
+      final response = await _runAiTurn(prompt, const []);
+      final generated = _AiChatTurnResult.fromJson(response).payload.message.trim();
+      if (generated.isNotEmpty) return generated;
+    } catch (error) {
+      _aiChatLog('aiEntitlementOfferMessage fallback after ${error.runtimeType}: $error');
+    }
+
+    return 'Tu plan ya no tiene $service incluida disponible. Puedes comprar una $service única o mejorar tu suscripción.';
   }
 
   String? _uuidOrNull(String value) {
@@ -510,6 +724,7 @@ class _ChatScreenState extends State<ChatScreen> {
           onServiceSelected: _activateService,
           onOneOffPurchaseSelected: _purchaseSingleSession,
           onUpgradeSelected: _openSubscriptionUpgrade,
+          onPlanUpgradeConfirmed: _confirmSubscriptionUpgrade,
         );
       },
     );
@@ -661,6 +876,7 @@ class _MessageBubble extends StatelessWidget {
     required this.onServiceSelected,
     required this.onOneOffPurchaseSelected,
     required this.onUpgradeSelected,
+    required this.onPlanUpgradeConfirmed,
   });
 
   final _ChatMessage message;
@@ -669,7 +885,8 @@ class _MessageBubble extends StatelessWidget {
   final bool canShowActions;
   final void Function(String service, _AiChatTurnResult result) onServiceSelected;
   final void Function(String service, _AiChatTurnResult result) onOneOffPurchaseSelected;
-  final VoidCallback onUpgradeSelected;
+  final void Function(_AiChatTurnResult result) onUpgradeSelected;
+  final void Function(_ChatSubscriptionPlan plan, _AiChatTurnResult result) onPlanUpgradeConfirmed;
 
   @override
   Widget build(BuildContext context) {
@@ -715,7 +932,7 @@ class _MessageBubble extends StatelessWidget {
                   ),
                 ),
               ),
-              if (!isUser && canShowActions && message.result?.payload.recommendedService != null) ...[
+              if (!isUser && canShowActions && (message.result?.payload.recommendedService != null || message.result?.upgradePlan != null)) ...[
                 const SizedBox(height: 8),
                 _HandoffPanel(
                   result: message.result!,
@@ -723,6 +940,7 @@ class _MessageBubble extends StatelessWidget {
                   onServiceSelected: onServiceSelected,
                   onOneOffPurchaseSelected: onOneOffPurchaseSelected,
                   onUpgradeSelected: onUpgradeSelected,
+                  onPlanUpgradeConfirmed: onPlanUpgradeConfirmed,
                 ),
               ],
             ],
@@ -740,25 +958,54 @@ class _HandoffPanel extends StatelessWidget {
     required this.onServiceSelected,
     required this.onOneOffPurchaseSelected,
     required this.onUpgradeSelected,
+    required this.onPlanUpgradeConfirmed,
   });
 
   final _AiChatTurnResult result;
   final bool sending;
   final void Function(String service, _AiChatTurnResult result) onServiceSelected;
   final void Function(String service, _AiChatTurnResult result) onOneOffPurchaseSelected;
-  final VoidCallback onUpgradeSelected;
+  final void Function(_AiChatTurnResult result) onUpgradeSelected;
+  final void Function(_ChatSubscriptionPlan plan, _AiChatTurnResult result) onPlanUpgradeConfirmed;
 
   @override
   Widget build(BuildContext context) {
     final payload = result.payload;
-    final recommended = payload.recommendedService;
-    if (recommended == null) return const SizedBox.shrink();
-    if (result.entitlementExhaustedForRecommendedService) {
-      final service = result.commerceService;
+    final upgradePlan = result.upgradePlan;
+    if (upgradePlan != null) {
       return Wrap(
         spacing: 8,
         runSpacing: 8,
         children: [
+          _ServiceButton(
+            label: 'actualizar a ${upgradePlan.displayName}',
+            selected: true,
+            enabled: !sending,
+            onTap: () => onPlanUpgradeConfirmed(upgradePlan, result),
+          ),
+        ],
+      );
+    }
+    final recommended = payload.recommendedService;
+    if (recommended == null) return const SizedBox.shrink();
+    if (result.entitlementExhaustedForRecommendedService) {
+      final service = result.commerceService;
+      final recommendedService = payload.recommendedService == 'scheduled_video' ? 'video' : payload.recommendedService;
+      final canAlsoUseRecommended = result.commerceServiceOverride == null &&
+          recommendedService != null &&
+          recommendedService != service &&
+          (recommendedService == 'chat' || recommendedService == 'video');
+      return Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          if (canAlsoUseRecommended)
+            _ServiceButton(
+              label: _productActionLabel(payload.actionLabel, recommendedService),
+              selected: true,
+              enabled: !sending,
+              onTap: () => onServiceSelected(recommendedService, result),
+            ),
           if (!result.noActiveSubscription)
             _ServiceButton(
               label: service == 'video' ? 'comprar video único' : 'comprar chat único',
@@ -770,7 +1017,7 @@ class _HandoffPanel extends StatelessWidget {
             label: 'mejorar plan',
             selected: false,
             enabled: !sending,
-            onTap: onUpgradeSelected,
+            onTap: () => onUpgradeSelected(result),
           ),
         ],
       );
@@ -1112,6 +1359,8 @@ class _AiChatTurnResult {
     this.serviceAccessType,
     this.serviceCanUse,
     this.serviceAccessReason,
+    this.commerceServiceOverride,
+    this.upgradePlan,
     this.remaining,
   });
 
@@ -1186,9 +1435,12 @@ class _AiChatTurnResult {
   final String? serviceAccessType;
   final bool? serviceCanUse;
   final String? serviceAccessReason;
+  final String? commerceServiceOverride;
+  final _ChatSubscriptionPlan? upgradePlan;
   final int? remaining;
 
   String get commerceService {
+    if (commerceServiceOverride == 'video' || commerceServiceOverride == 'chat') return commerceServiceOverride!;
     final recommended = payload.recommendedService == 'scheduled_video' ? 'video' : payload.recommendedService;
     final accessType = serviceAccessType == 'video' || serviceAccessType == 'chat' ? serviceAccessType : null;
     return accessType ?? (recommended == 'video' ? 'video' : 'chat');
@@ -1196,14 +1448,24 @@ class _AiChatTurnResult {
 
   bool get noActiveSubscription => serviceAccessReason == 'no_active_subscription';
 
+  bool get canRetryActivationAfterUpgrade {
+    return serviceCanUse == false &&
+        (commerceService == 'chat' || commerceService == 'video') &&
+        petId != null &&
+        vetId != null &&
+        specialtyId != null;
+  }
+
   bool get entitlementExhaustedForRecommendedService {
+    final exhausted = serviceCanUse == false || (serviceAccessType != null && remaining != null && remaining! <= 0);
+    if (!exhausted) return false;
+    if (commerceServiceOverride != null) return true;
+    if (serviceCanUse == false && (serviceAccessType == 'chat' || serviceAccessType == 'video')) return true;
     final recommended = payload.recommendedService;
-    if (recommended != 'chat' && recommended != 'video' && recommended != 'scheduled_video') return false;
+    if (recommended == null) return serviceAccessType == 'chat' || serviceAccessType == 'video';
     final target = recommended == 'scheduled_video' ? 'video' : recommended;
     final accessType = serviceAccessType == 'scheduled_video' ? 'video' : serviceAccessType;
-    if (accessType != null && accessType != target) return false;
-    if (serviceCanUse == false) return true;
-    return remaining != null && remaining! <= 0;
+    return accessType == null || accessType == target;
   }
 
   _AiChatTurnResult withEntitlement({
@@ -1222,6 +1484,25 @@ class _AiChatTurnResult {
       serviceAccessType: serviceType,
       serviceCanUse: canUse,
       serviceAccessReason: reason,
+      commerceServiceOverride: serviceType == 'video' ? 'video' : 'chat',
+      upgradePlan: upgradePlan,
+      remaining: remaining,
+    );
+  }
+
+  _AiChatTurnResult withUpgradePlan(_ChatSubscriptionPlan plan) {
+    return _AiChatTurnResult(
+      payload: payload,
+      petId: petId,
+      specialtyId: specialtyId,
+      vetId: vetId,
+      specialtyName: specialtyName,
+      vetName: vetName,
+      serviceAccessType: serviceAccessType,
+      serviceCanUse: serviceCanUse,
+      serviceAccessReason: serviceAccessReason,
+      commerceServiceOverride: commerceServiceOverride,
+      upgradePlan: plan,
       remaining: remaining,
     );
   }
@@ -1253,6 +1534,99 @@ class _AiChatPayload {
   final bool safetyEscalation;
 }
 
+class _SubscriptionUpgradeOption {
+  const _SubscriptionUpgradeOption({required this.currentPlan, required this.targetPlan});
+
+  final _ChatSubscriptionPlan? currentPlan;
+  final _ChatSubscriptionPlan targetPlan;
+}
+
+class _ChatSubscriptionPlan {
+  const _ChatSubscriptionPlan({
+    required this.code,
+    required this.name,
+    required this.monthlyCents,
+    required this.currency,
+    required this.includedChats,
+    required this.includedVideos,
+    required this.petsIncludedDefault,
+    required this.descriptionMain,
+    required this.descriptionIncluded,
+  });
+
+  const _ChatSubscriptionPlan.empty()
+      : code = '',
+        name = '',
+        monthlyCents = 0,
+        currency = '',
+        includedChats = 0,
+        includedVideos = 0,
+        petsIncludedDefault = 0,
+        descriptionMain = '',
+        descriptionIncluded = const [];
+
+  factory _ChatSubscriptionPlan.fromJson(Map<String, dynamic> json) {
+    final marketing = _marketingMap(json['description_json']);
+    final included = marketing['included'];
+    final includedList = included is List
+        ? included.map((item) => item.toString()).where((item) => item.trim().isNotEmpty).toList()
+        : const <String>[];
+    return _ChatSubscriptionPlan(
+      code: json['code']?.toString() ?? '',
+      name: json['name']?.toString() ?? '',
+      monthlyCents: _toInt(json['price_monthly_cents']) ?? _toInt(json['price_cents']) ?? 0,
+      currency: (json['currency']?.toString() ?? 'MXN').toUpperCase(),
+      includedChats: _toInt(json['included_chats']) ?? 0,
+      includedVideos: _toInt(json['included_videos']) ?? 0,
+      petsIncludedDefault: _toInt(json['pets_included_default']) ?? 1,
+      descriptionMain: (marketing['main']?.toString() ?? json['description']?.toString() ?? '').trim(),
+      descriptionIncluded: includedList,
+    );
+  }
+
+  final String code;
+  final String name;
+  final int monthlyCents;
+  final String currency;
+  final int includedChats;
+  final int includedVideos;
+  final int petsIncludedDefault;
+  final String descriptionMain;
+  final List<String> descriptionIncluded;
+
+  String get displayName {
+    final key = code.toLowerCase();
+    return switch (key) {
+      'starter' => 'starter',
+      'plus' => 'plus',
+      'cuadra' => 'cuadra 5',
+      'cuadra-15' => 'cuadra 15',
+      'pro-entrenador' => 'entrenador',
+      'rancho-trabajo' => 'rancho de trabajo',
+      _ => name.isEmpty ? code : name.toLowerCase(),
+    };
+  }
+
+  String get monthlyPriceLabel {
+    if (monthlyCents <= 0) return 'precio no disponible';
+    final amount = monthlyCents % 100 == 0 ? (monthlyCents ~/ 100).toString() : (monthlyCents / 100).toStringAsFixed(2);
+    return '$currency $amount al mes';
+  }
+
+  String get aiSummary {
+    final details = <String>[
+      '$displayName ($code)',
+      monthlyPriceLabel,
+      '$includedChats chats incluidos',
+      '$includedVideos videollamadas incluidas',
+      '$petsIncludedDefault caballos incluidos',
+      if (descriptionMain.isNotEmpty) descriptionMain,
+      if (descriptionIncluded.isNotEmpty) 'Incluye: ${descriptionIncluded.take(3).join('; ')}',
+    ];
+    return details.join(', ');
+  }
+}
+
 class _ChatApiException implements Exception {
   const _ChatApiException(this.message);
 
@@ -1271,6 +1645,39 @@ Map<String, dynamic>? _asMap(Object? value) {
 
 List<Object?>? _asList(Object? value) {
   return value is List ? value : null;
+}
+
+_ChatSubscriptionPlan? _findPlanByCode(List<_ChatSubscriptionPlan> plans, String code) {
+  final normalized = code.toLowerCase();
+  for (final plan in plans) {
+    if (plan.code.toLowerCase() == normalized) return plan;
+  }
+  return null;
+}
+
+Map<String, dynamic> _marketingMap(Object? value) {
+  final direct = _asMap(value);
+  if (direct != null) return direct;
+  final raw = value?.toString().trim();
+  if (raw == null || raw.isEmpty) return const {};
+  try {
+    final decoded = jsonDecode(raw);
+    return _asMap(decoded) ?? const {};
+  } catch (_) {
+    return const {};
+  }
+}
+
+bool _truthy(Object? value) {
+  if (value is bool) return value;
+  final normalized = value?.toString().toLowerCase();
+  return normalized == 'true' || normalized == 't' || normalized == '1';
+}
+
+int? _toInt(Object? value) {
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  return int.tryParse(value?.toString() ?? '');
 }
 
 String _readableAssistantText(String text) {

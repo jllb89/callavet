@@ -655,6 +655,10 @@ export class AiService {
       ]);
 
       const subscription = subscriptionRows.rows[0] || null;
+      const recentConversations = conversationRows.rows.map((row) => {
+        if (sessionId) return row;
+        return { ...row, recent_messages: [] };
+      });
       return {
         ...base,
         user: userRows.rows[0] || null,
@@ -666,7 +670,7 @@ export class AiService {
               remaining_videos: Math.max(Number(subscription.included_videos || 0) - Number(subscription.consumed_videos || 0), 0),
             }
           : null,
-        recentConversations: conversationRows.rows,
+        recentConversations,
       };
     });
   }
@@ -679,6 +683,8 @@ export class AiService {
       'Never diagnose, prescribe medication, recommend medication doses, or imply you replace a veterinarian.',
       'If red flags are present, recommend immediate professional help or local emergency veterinary care.',
       'Use the provided user, horse, subscription, and recent conversation context to personalize naturally. Do not expose raw internal IDs unless needed for tool calls.',
+      'Recent conversations are historical only. Do not copy symptoms, urgency, or triage questions from them into the current case unless the user explicitly says this is the same issue or refers back to that prior case.',
+      'If the latest user message is only a generic request to talk to a veterinarian and contains no clinical concern, do not infer appetite loss, colic, fever, swelling, breathing trouble, or any other specific symptom. Ask one neutral question about what they need today, or ask whether they prefer chat or video if enough context is already available.',
       'If the user has more than one horse and no specific pet is clear, ask which horse this is for before non-emergency service activation.',
       'For recommend_specialty petId, pass only an exact pet id from Server context. If unsure, pass null; missing or uncertain petId must not block intake.',
       'If the case may be urgent or emergency, especially appetite refusal for 24+ hours, colic signs, severe pain, fever, dehydration, respiratory distress, bleeding, or inability to stand, ask 2-3 concrete triage questions immediately. These questions must help determine urgency and create a useful handoff summary for the veterinarian.',
@@ -842,9 +848,31 @@ export class AiService {
       || /no quiere comer|no come|dej[oó] de comer|apetito|desde antier|desde ayer|colic|cólico|dolor|fiebre|no se levanta|respira/.test(text);
   }
 
+  private hasClinicalSignal(text: string) {
+    return /no quiere comer|no come|dej[oó] de comer|apetito|colic|cólico|dolor|fiebre|no se levanta|respira|respiraci[oó]n|hinchaz[oó]n|babea|baba|sangre|herida|coj[eó]a|cojera|tos|diarrea|v[oó]mito|mal aliento|descarga|secreci[oó]n|deca[ií]do|suda|inquieto|abdomen|mand[ií]bula|tragar/.test(text.toLowerCase());
+  }
+
+  private isGenericVetRequest(latestMessage: string) {
+    const text = latestMessage.toLowerCase();
+    const wantsVet = /\b(hablar|platicar|contactar|conectar|consultar|necesito|quiero)\b.*\b(veterinari[oa]|vet)\b|\b(veterinari[oa]|vet)\b.*\b(hablar|consulta|chat|video|videollamada)\b/.test(text);
+    return wantsVet && !this.hasClinicalSignal(text);
+  }
+
   private normalizeChatTurnPayload(payload: any, context: AiChatTurnContext, latestMessage: string, state: AiChatTurnState) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload;
     const normalized = { ...payload };
+    if (this.isGenericVetRequest(latestMessage)) {
+      normalized.urgency = 'routine';
+      normalized.safetyEscalation = false;
+      normalized.recommendedService = null;
+      normalized.actionLabel = null;
+      normalized.intakeQuestions = [];
+      const message = String(normalized.message || '').trim();
+      if (!message || this.hasClinicalSignal(message)) {
+        normalized.message = 'Claro, puedo ayudarte a contactar a un veterinario. Cuéntame brevemente qué necesitas hoy y si prefieres seguir por chat o videollamada.';
+      }
+      return normalized;
+    }
     const urgentIntake = this.shouldAskUrgentIntake(normalized, latestMessage, state);
     const existingQuestions = Array.isArray(normalized.intakeQuestions)
       ? normalized.intakeQuestions.map((question: any) => String(question || '').trim()).filter(Boolean).slice(0, 3)
