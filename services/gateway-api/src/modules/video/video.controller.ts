@@ -5,6 +5,7 @@ import { RateLimit } from '../rate-limit/rate-limit.decorator';
 import { ValidatorService } from '../config/validator.service';
 import { DbService } from '../db/db.service';
 import { RequestContext } from '../auth/request-context.service';
+import { EntitlementService } from '../subscriptions/entitlement.service';
 import { LiveKitParticipantRole, LiveKitService } from './livekit.service';
 
 @UseGuards(AuthGuard)
@@ -15,6 +16,7 @@ export class VideoController {
     private readonly db: DbService,
     private readonly rc: RequestContext,
     private readonly livekit: LiveKitService,
+    private readonly entitlements: EntitlementService,
   ) {}
 
   private async getAuthorizedVideoSession(sessionId: string) {
@@ -89,13 +91,7 @@ export class VideoController {
       throw new HttpException({ ok: false, reason: 'video_entitlement_not_reserved' }, HttpStatus.PAYMENT_REQUIRED);
     }
     if (!session.user_id) throw new BadRequestException('session_owner_missing');
-    const result = await this.db.runInTx(async (q) => {
-      const { rows } = await q<{ ok: boolean; consumption_id: string | null; msg: string | null }>(
-        `select * from fn_reserve_video($1::uuid, $2::uuid)`,
-        [session.user_id, session.id]
-      );
-      return rows[0] || null;
-    });
+    const result = await this.db.runInTx(async (q) => this.entitlements.reserveForUser(q, 'video', session.user_id!, session.id));
     if (result?.ok && result.consumption_id) return result.consumption_id;
     throw new HttpException({ ok: false, reason: result?.msg || 'video_entitlement_required' }, HttpStatus.PAYMENT_REQUIRED);
   }

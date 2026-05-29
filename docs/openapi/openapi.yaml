@@ -1373,55 +1373,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Session" }
 
-  /sessions/start:
-    post:
-      tags: [Sessions]
-      summary: Start a chat or video session
-      security: [{ bearerAuth: [] }]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                type: { type: string, enum: [chat, video] }
-                kind: { type: string, enum: [chat, video] }
-                sessionId: { type: string, format: uuid }
-                petId: { type: string, format: uuid, nullable: true }
-                pet_id: { type: string, format: uuid, nullable: true }
-                vetId: { type: string, format: uuid, nullable: true }
-                vet_id: { type: string, format: uuid, nullable: true }
-                specialtyId: { type: string, format: uuid, nullable: true }
-                specialty_id: { type: string, format: uuid, nullable: true }
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/SessionStartResponse" }
-
-  /sessions/end:
-    post:
-      tags: [Sessions]
-      summary: End a session and optionally commit consumption
-      security: [{ bearerAuth: [] }]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                sessionId: { type: string, format: uuid }
-                consumptionId: { type: string, format: uuid, nullable: true }
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/SessionEndResponse" }
-
   /payments:
     get:
       tags: [Payments & Invoices]
@@ -1486,7 +1437,7 @@ paths:
           schema:
             type: string
       requestBody: { $ref: "#/components/requestBodies/EndSession" }
-      responses: { "200": { $ref: "#/components/responses/Session" } }
+      responses: { "200": { $ref: "#/components/responses/SessionEnd" } }
 
   /sessions:
     get:
@@ -2215,6 +2166,8 @@ paths:
     post:
       tags: [Plans & Subscriptions]
       summary: Reserve chat entitlement for existing session
+      deprecated: true
+      description: Legacy compatibility endpoint. Prefer POST /sessions/start for activation or POST /entitlements/reserve for direct reservation.
       security: [{ bearerAuth: [] }]
       requestBody:
         content:
@@ -2232,6 +2185,8 @@ paths:
     post:
       tags: [Plans & Subscriptions]
       summary: Reserve video entitlement for existing session
+      deprecated: true
+      description: Legacy compatibility endpoint. Prefer POST /sessions/start for activation or POST /entitlements/reserve for direct reservation.
       security: [{ bearerAuth: [] }]
       requestBody:
         content:
@@ -3034,7 +2989,7 @@ components:
             properties:
               type: { type: string, enum: [chat, video] }
               sessionId: { type: string, format: uuid }
-            required: [type]
+            required: [type, sessionId]
     EntitlementCommit:
       content:
         application/json:
@@ -3426,6 +3381,9 @@ components:
     SessionStart:
       description: Session started
       content: { application/json: { schema: { $ref: "#/components/schemas/SessionStart" } } }
+    SessionEnd:
+      description: Session ended
+      content: { application/json: { schema: { $ref: "#/components/schemas/SessionEndResponse" } } }
     Session:
       description: Session
       content: { application/json: { schema: { $ref: "#/components/schemas/Session" } } }
@@ -3778,9 +3736,16 @@ components:
           stub: { type: boolean },
           status: { type: string },
           type: { type: string },
+          url: { type: string, format: uri, nullable: true },
+          checkout_session_id: { type: string, nullable: true },
           currency: { type: string },
           amount: { type: integer, nullable: true },
           reason: { type: string, nullable: true }
+        } }
+        credit: { type: object, nullable: true, properties: {
+          used: { type: boolean },
+          code: { type: string, nullable: true },
+          remaining: { type: integer, nullable: true }
         } }
         video: { type: object, nullable: true, properties: { roomId: { type: string }, token: { type: string } } }
     Session:

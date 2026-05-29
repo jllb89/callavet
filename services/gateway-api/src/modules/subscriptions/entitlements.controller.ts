@@ -1,6 +1,7 @@
 import { Body, Controller, Post, UseGuards, HttpException, HttpStatus } from '@nestjs/common';
 import { DbService } from '../db/db.service';
 import { AuthGuard } from '../auth/auth.guard';
+import { EntitlementService } from './entitlement.service';
 
 interface ReserveBody { type: 'chat' | 'video'; sessionId: string }
 interface ConsumptionBody { consumptionId: string }
@@ -8,7 +9,10 @@ interface ConsumptionBody { consumptionId: string }
 @Controller('entitlements')
 @UseGuards(AuthGuard)
 export class EntitlementsController {
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly entitlements: EntitlementService,
+  ) {}
 
   @Post('reserve')
   async reserve(@Body() body: ReserveBody) {
@@ -19,10 +23,8 @@ export class EntitlementsController {
     }
     try {
       const result = await this.db.runInTx(async (q) => {
-        const fn = type === 'chat' ? 'fn_reserve_chat' : type === 'video' ? 'fn_reserve_video' : null;
-        if (!fn) throw new Error('unsupported_type');
-        const { rows } = await q(`select * from ${fn}(auth.uid(), trim($1)::uuid)`, [sessionId]);
-        return rows[0] || null;
+        if (type !== 'chat' && type !== 'video') throw new Error('unsupported_type');
+        return this.entitlements.reserveForAuthUser(q, type, sessionId);
       });
       if (!result) {
         return { ok: false, type, reserved: false, reason: 'no_row_returned' };

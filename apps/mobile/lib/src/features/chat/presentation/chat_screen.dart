@@ -237,6 +237,138 @@ class _ChatScreenState extends State<ChatScreen> {
     _sendUserMessage(text);
   }
 
+  Future<void> _activateService(String service, _AiChatTurnResult result) async {
+    if (service == 'scheduled_video') {
+      _sendQuickReply(service);
+      return;
+    }
+    if (_isSending) {
+      _aiChatLog('activateService ignored while busy service=$service');
+      return;
+    }
+    final kind = service == 'video' ? 'video' : 'chat';
+    _aiChatLog(
+      'activateService start kind=$kind petId=${result.petId} vetId=${result.vetId} specialtyId=${result.specialtyId}',
+    );
+    setState(() {
+      _messages.add(_ChatMessage.user(kind == 'video' ? 'Iniciar videollamada ahora.' : 'Iniciar chat con el veterinario.'));
+      _isSending = true;
+    });
+    _scrollToBottom();
+
+    try {
+      final start = await _startSession(kind, result);
+      _aiChatLog('activateService /sessions/start response keys=${start.keys.join(',')}');
+      if (start['overage'] == true) {
+        if (!mounted) return;
+        setState(() {
+          _messages.add(_ChatMessage.assistant(_paymentRequiredMessage(start), includeInHistory: false));
+          _isSending = false;
+        });
+        _scrollToBottom();
+        return;
+      }
+
+      final sessionId = _uuidOrNull(start['sessionId']?.toString() ?? '');
+      if (sessionId == null) {
+        throw const _ChatApiException('No pude activar la consulta: el servidor no devolvió una sesión válida.');
+      }
+
+      if (kind == 'video') {
+        final room = await _createVideoRoom(sessionId);
+        final roomName = room['roomName']?.toString() ?? room['roomId']?.toString() ?? sessionId;
+        _aiChatLog('activateService video room created sessionId=$sessionId roomName=$roomName');
+        if (!mounted) return;
+        setState(() {
+          _messages.add(_ChatMessage.assistant('Videollamada activada. Sala: $roomName', includeInHistory: false));
+          _isSending = false;
+        });
+        _scrollToBottom();
+        return;
+      }
+
+      _aiChatLog('activateService chat session active sessionId=$sessionId; navigating');
+      if (!mounted) return;
+      setState(() {
+        _messages.add(_ChatMessage.assistant('Chat con veterinario activado. Te llevo a la conversación.', includeInHistory: false));
+        _isSending = false;
+      });
+      _scrollToBottom();
+      context.go('/chat/${Uri.encodeComponent(sessionId)}');
+    } catch (error) {
+      _aiChatLog('activateService failed: ${error.runtimeType} $error');
+      if (!mounted) return;
+      setState(() {
+        _messages.add(_ChatMessage.assistant(_friendlyError(error), includeInHistory: false));
+        _isSending = false;
+      });
+      _scrollToBottom();
+    }
+  }
+
+  Future<Map<String, dynamic>> _startSession(String kind, _AiChatTurnResult result) {
+    return _postGatewayJson('/sessions/start', {
+      'kind': kind,
+      if (result.petId != null) 'petId': result.petId,
+      if (result.vetId != null) 'vetId': result.vetId,
+      if (result.specialtyId != null) 'specialtyId': result.specialtyId,
+    });
+  }
+
+  Future<Map<String, dynamic>> _createVideoRoom(String sessionId) {
+    return _postGatewayJson('/video/rooms', {'sessionId': sessionId});
+  }
+
+  Future<Map<String, dynamic>> _postGatewayJson(String path, Map<String, dynamic> body) async {
+    final token = Supabase.instance.client.auth.currentSession?.accessToken;
+    if (token == null || token.isEmpty) {
+      throw const _ChatApiException('Tu sesión expiró. Vuelve a iniciar sesión.');
+    }
+
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    final startedAt = DateTime.now();
+    try {
+      final uri = Uri.parse('${Environment.apiBaseUrl}$path');
+      _aiChatLog('gateway POST $uri bodyKeys=${body.keys.join(',')}');
+      final request = await client.postUrl(uri).timeout(const Duration(seconds: 10));
+      request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+      request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      request.add(utf8.encode(jsonEncode(body)));
+
+      final response = await request.close().timeout(const Duration(seconds: 30));
+      final rawBody = await utf8.decoder.bind(response).join();
+      _aiChatLog(
+        'gateway POST $path status=${response.statusCode} elapsedMs=${DateTime.now().difference(startedAt).inMilliseconds} '
+        'bodyPreview="${_preview(rawBody, max: 420)}"',
+      );
+      final decoded = rawBody.trim().isEmpty ? <String, dynamic>{} : jsonDecode(rawBody);
+      final data = _asMap(decoded) ?? <String, dynamic>{};
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw _ChatApiException(_errorMessage(data, response.statusCode));
+      }
+      return data;
+    } on TimeoutException {
+      throw const _ChatApiException('La conexión tardó demasiado. Inténtalo otra vez.');
+    } on FormatException {
+      throw const _ChatApiException('El servidor respondió con datos inválidos.');
+    } on SocketException {
+      throw const _ChatApiException('No hay conexión con Call a Vet en este momento.');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  String _paymentRequiredMessage(Map<String, dynamic> response) {
+    final payment = _asMap(response['payment']);
+    final url = payment?['url']?.toString();
+    if (url != null && url.isNotEmpty) {
+      return 'Para activar esta consulta necesitas completar el pago. Link de checkout: $url';
+    }
+    final reason = response['overageReason']?.toString() ?? 'no_entitlement';
+    return 'Para activar esta consulta necesitas pago o crédito adicional. Motivo: $reason';
+  }
+
   String? _uuidOrNull(String value) {
     final trimmed = value.trim();
     return _uuidPattern.hasMatch(trimmed) ? trimmed : null;
@@ -277,40 +409,45 @@ class _ChatScreenState extends State<ChatScreen> {
             colors: [Color(0xFF161616), Color(0xFF050505)],
           ),
         ),
-        child: SafeArea(
-          child: thread,
-        ),
+        child: thread,
       ),
     );
   }
 
   Widget _buildThread(BuildContext context) {
-    return Column(
+    final topInset = MediaQuery.paddingOf(context).top;
+    final messageList = ListView.builder(
+      controller: _scrollController,
+      padding: EdgeInsets.fromLTRB(
+        widget.embedded ? 0 : 22,
+        widget.embedded ? 10 : topInset + 78,
+        widget.embedded ? 0 : 22,
+        20,
+      ),
+      itemCount: (widget.embedded ? 1 : 0) + _messages.length + (_isSending ? 1 : 0),
+      itemBuilder: (context, index) {
+        final introCount = widget.embedded ? 1 : 0;
+        if (widget.embedded && index == 0) {
+          return const _EmbeddedChatIntro();
+        }
+        final messageIndex = index - introCount;
+        if (_isSending && messageIndex == _messages.length) {
+          return const _TypingBubble();
+        }
+        final message = _messages[messageIndex];
+        return _MessageBubble(
+          message: message,
+          embedded: widget.embedded,
+          sending: _isSending,
+          onServiceSelected: _activateService,
+        );
+      },
+    );
+
+    final threadColumn = Column(
       children: [
-        if (!widget.embedded) _ChatHeader(onBack: () => context.go('/home')),
         Expanded(
-          child: ListView.builder(
-            controller: _scrollController,
-            padding: EdgeInsets.fromLTRB(widget.embedded ? 0 : 22, widget.embedded ? 10 : 18, widget.embedded ? 0 : 22, 20),
-            itemCount: (widget.embedded ? 1 : 0) + _messages.length + (_isSending ? 1 : 0),
-            itemBuilder: (context, index) {
-              final introCount = widget.embedded ? 1 : 0;
-              if (widget.embedded && index == 0) {
-                return const _EmbeddedChatIntro();
-              }
-              final messageIndex = index - introCount;
-              if (_isSending && messageIndex == _messages.length) {
-                return const _TypingBubble();
-              }
-              final message = _messages[messageIndex];
-              return _MessageBubble(
-                message: message,
-                embedded: widget.embedded,
-                sending: _isSending,
-                onQuickReply: _sendQuickReply,
-              );
-            },
-          ),
+          child: widget.embedded ? messageList : _TopFadeMask(child: messageList),
         ),
         _ChatComposer(
           controller: _inputCtrl,
@@ -321,6 +458,45 @@ class _ChatScreenState extends State<ChatScreen> {
           onSend: _sendComposerMessage,
         ),
       ],
+    );
+
+    if (widget.embedded) return threadColumn;
+
+    return Stack(
+      children: [
+        threadColumn,
+        Positioned(
+          top: 0,
+          left: 0,
+          right: 0,
+          child: SafeArea(
+            bottom: false,
+            child: _ChatHeader(onBack: () => context.go('/home')),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _TopFadeMask extends StatelessWidget {
+  const _TopFadeMask({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return ShaderMask(
+      blendMode: BlendMode.dstIn,
+      shaderCallback: (bounds) {
+        return const LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Colors.transparent, Colors.white, Colors.white],
+          stops: [0, 0.18, 1],
+        ).createShader(bounds);
+      },
+      child: child,
     );
   }
 }
@@ -360,40 +536,17 @@ class _ChatHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(10, 8, 18, 10),
-      child: Row(
-        children: [
-          IconButton(
-            onPressed: onBack,
-            icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 19),
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: IconButton(
+          onPressed: onBack,
+          icon: const Icon(
+            Icons.arrow_back_ios_new_rounded,
+            color: Colors.white,
+            size: 22,
           ),
-          const Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                Text(
-                  'Call a Vet AI',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w500,
-                    height: 1.1,
-                  ),
-                ),
-                SizedBox(height: 3),
-                Text(
-                  'asistencia veterinaria',
-                  style: TextStyle(
-                    color: Color(0xFF8F8F8F),
-                    fontSize: 11,
-                    fontWeight: FontWeight.w300,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 48),
-        ],
+        ),
       ),
     );
   }
@@ -404,19 +557,19 @@ class _MessageBubble extends StatelessWidget {
     required this.message,
     required this.embedded,
     required this.sending,
-    required this.onQuickReply,
+    required this.onServiceSelected,
   });
 
   final _ChatMessage message;
   final bool embedded;
   final bool sending;
-  final ValueChanged<String> onQuickReply;
+  final void Function(String service, _AiChatTurnResult result) onServiceSelected;
 
   @override
   Widget build(BuildContext context) {
     final isUser = message.isUser;
-    final bubbleColor = isUser ? Colors.white : Colors.white.withValues(alpha: 0.07);
-    final textColor = isUser ? Colors.black : Colors.white;
+    final bubbleColor = isUser ? const Color(0xFF242426) : Colors.black;
+    const textColor = Colors.white;
     final viewportWidth = MediaQuery.sizeOf(context).width;
     final widthFactor = isUser ? (embedded ? 0.90 : 0.78) : (embedded ? 0.96 : 0.86);
     final fixedCap = isUser ? (embedded ? 360.0 : 420.0) : (embedded ? 390.0 : 460.0);
@@ -447,7 +600,7 @@ class _MessageBubble extends StatelessWidget {
                   padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 13),
                   child: Text(
                     message.text,
-                    style: TextStyle(
+                    style: const TextStyle(
                       color: textColor,
                       fontSize: 15,
                       fontWeight: FontWeight.w400,
@@ -461,7 +614,7 @@ class _MessageBubble extends StatelessWidget {
                 _HandoffPanel(
                   result: message.result!,
                   sending: sending,
-                  onQuickReply: onQuickReply,
+                  onServiceSelected: onServiceSelected,
                 ),
               ],
             ],
@@ -476,12 +629,12 @@ class _HandoffPanel extends StatelessWidget {
   const _HandoffPanel({
     required this.result,
     required this.sending,
-    required this.onQuickReply,
+    required this.onServiceSelected,
   });
 
   final _AiChatTurnResult result;
   final bool sending;
-  final ValueChanged<String> onQuickReply;
+  final void Function(String service, _AiChatTurnResult result) onServiceSelected;
 
   @override
   Widget build(BuildContext context) {
@@ -489,46 +642,36 @@ class _HandoffPanel extends StatelessWidget {
     final recommended = payload.recommendedService;
     final services = ['chat', 'video', 'scheduled_video'];
 
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.045),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
           children: [
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                _StatusPill(text: _urgencyLabel(payload.urgency), urgent: payload.safetyEscalation),
-                if (result.specialtyName != null) _StatusPill(text: result.specialtyName!),
-                if (result.vetName != null) _StatusPill(text: result.vetName!),
-                if (result.remaining != null) _StatusPill(text: '${result.remaining} disponibles'),
-              ],
-            ),
-            if (recommended != null || payload.actionLabel != null) ...[
-              const SizedBox(height: 12),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: services.map((service) {
-                  final selected = service == recommended;
-                  return _ServiceButton(
-                    label: selected && payload.actionLabel != null ? payload.actionLabel! : _serviceLabel(service),
-                    selected: selected,
-                    enabled: !sending,
-                    onTap: () => onQuickReply(service),
-                  );
-                }).toList(growable: false),
-              ),
-            ],
+            _StatusPill(text: _urgencyLabel(payload.urgency), urgent: payload.safetyEscalation),
+            if (result.specialtyName != null) _StatusPill(text: result.specialtyName!),
+            if (result.vetName != null) _StatusPill(text: result.vetName!),
+            if (result.remaining != null) _StatusPill(text: '${result.remaining} disponibles'),
           ],
         ),
-      ),
+        if (recommended != null || payload.actionLabel != null) ...[
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: services.map((service) {
+              final selected = service == recommended;
+              return _ServiceButton(
+                label: selected && payload.actionLabel != null ? payload.actionLabel! : _serviceLabel(service),
+                selected: selected,
+                enabled: !sending,
+                onTap: () => onServiceSelected(service, result),
+              );
+            }).toList(growable: false),
+          ),
+        ],
+      ],
     );
   }
 
@@ -600,15 +743,15 @@ class _ServiceButton extends StatelessWidget {
         opacity: enabled ? 1 : 0.45,
         child: DecoratedBox(
           decoration: BoxDecoration(
-            color: selected ? Colors.white : Colors.white.withValues(alpha: 0.08),
+            color: Colors.white,
             borderRadius: BorderRadius.circular(30),
           ),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 9),
             child: Text(
               label,
-              style: TextStyle(
-                color: selected ? Colors.black : Colors.white,
+              style: const TextStyle(
+                color: Colors.black,
                 fontSize: 12,
                 fontWeight: FontWeight.w500,
                 height: 1,
@@ -632,7 +775,7 @@ class _TypingBubble extends StatelessWidget {
         margin: const EdgeInsets.only(bottom: 14),
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.07),
+          color: Colors.black,
           borderRadius: BorderRadius.circular(22),
         ),
         child: const SizedBox(
@@ -674,7 +817,7 @@ class _ChatComposer extends StatelessWidget {
         constraints: const BoxConstraints(minHeight: 46, maxHeight: 150),
         child: DecoratedBox(
           decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.07),
+            color: Colors.transparent,
             borderRadius: BorderRadius.circular(28),
             border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
           ),
@@ -774,6 +917,9 @@ class _ChatMessage {
 class _AiChatTurnResult {
   const _AiChatTurnResult({
     required this.payload,
+    this.petId,
+    this.specialtyId,
+    this.vetId,
     this.specialtyName,
     this.vetName,
     this.remaining,
@@ -781,6 +927,9 @@ class _AiChatTurnResult {
 
   factory _AiChatTurnResult.fromJson(Map<String, dynamic> json) {
     final payload = _AiChatPayload.fromJson(_asMap(json['payload']) ?? <String, dynamic>{});
+    String? petId;
+    String? specialtyId;
+    String? vetId;
     String? specialtyName;
     String? vetName;
     int? remaining;
@@ -792,11 +941,16 @@ class _AiChatTurnResult {
       if (name != null) toolNames.add(name);
       final output = _asMap(tool?['output']);
       if (name == 'recommend_specialty') {
-        specialtyName = _asMap(output?['specialty'])?['name']?.toString();
+        petId ??= _uuidFrom(output?['petId']);
+        final specialty = _asMap(output?['specialty']);
+        specialtyId ??= _uuidFrom(specialty?['id']);
+        specialtyName = specialty?['name']?.toString();
       }
       if (name == 'find_vets') {
+        specialtyId ??= _uuidFrom(output?['specialtyId']);
         final vets = _asList(output?['vets']);
         final firstVet = vets == null || vets.isEmpty ? null : _asMap(vets.first);
+        vetId ??= _uuidFrom(firstVet?['id']);
         vetName = firstVet?['full_name']?.toString();
       }
       if (name == 'check_service_access') {
@@ -808,11 +962,14 @@ class _AiChatTurnResult {
     _aiChatLog(
       'AiChatTurnResult.fromJson payload={urgency:${payload.urgency}, recommendedService:${payload.recommendedService}, '
       'actionLabel:${payload.actionLabel}, safetyEscalation:${payload.safetyEscalation}, messageLength:${payload.message.length}} '
-      'toolNames=${toolNames.join(',')} specialty=$specialtyName vet=$vetName remaining=$remaining',
+      'toolNames=${toolNames.join(',')} petId=$petId specialty=$specialtyName specialtyId=$specialtyId vet=$vetName vetId=$vetId remaining=$remaining',
     );
 
     return _AiChatTurnResult(
       payload: payload,
+      petId: petId,
+      specialtyId: specialtyId,
+      vetId: vetId,
       specialtyName: specialtyName,
       vetName: vetName,
       remaining: remaining,
@@ -820,6 +977,9 @@ class _AiChatTurnResult {
   }
 
   final _AiChatPayload payload;
+  final String? petId;
+  final String? specialtyId;
+  final String? vetId;
   final String? specialtyName;
   final String? vetName;
   final int? remaining;
@@ -869,6 +1029,12 @@ Map<String, dynamic>? _asMap(Object? value) {
 
 List<Object?>? _asList(Object? value) {
   return value is List ? value : null;
+}
+
+String? _uuidFrom(Object? value) {
+  final raw = value?.toString().trim();
+  if (raw == null || raw.isEmpty) return null;
+  return _ChatScreenState._uuidPattern.hasMatch(raw) ? raw : null;
 }
 
 String _errorMessage(Map<String, dynamic> data, int statusCode) {

@@ -3,6 +3,7 @@ import { DbService } from '../db/db.service';
 import { RequestContext } from '../auth/request-context.service';
 import { ValidatorService } from '../config/validator.service';
 import { VectorTargetService } from '../config/vector-target.service';
+import { EntitlementKind, EntitlementService } from '../subscriptions/entitlement.service';
 
 type AiDraftType = 'triage' | 'referral' | 'note' | 'care_plan';
 type AiReviewStatus = 'reviewed' | 'accepted' | 'rejected' | 'superseded';
@@ -114,6 +115,7 @@ export class AiService {
     private readonly rc: RequestContext,
     private readonly validator: ValidatorService,
     private readonly vectorTargets: VectorTargetService,
+    private readonly entitlements: EntitlementService,
   ) {}
 
   private providerConfig(prompt?: PromptVersion, dryRun = false): AiProviderConfig {
@@ -618,8 +620,7 @@ export class AiService {
               and su.period_start = us.current_period_start
               and su.period_end = us.current_period_end
             where us.user_id = $1::uuid
-              and us.status = 'active'
-              and coalesce(us.current_period_end, now()) > now()
+              and ${this.entitlements.activeSubscriptionSql('us')}
             order by us.current_period_end desc nulls last
             limit 1`,
           [actorUserId]
@@ -950,43 +951,7 @@ export class AiService {
   private async checkServiceAccessTool(args: Record<string, any>, context: AiChatTurnContext) {
     const serviceType = String(args.serviceType || '').trim().toLowerCase();
     if (serviceType !== 'chat' && serviceType !== 'video') throw new BadRequestException('serviceType_invalid');
-    const { rows } = await this.db.query<any>(
-      `select us.id as subscription_id,
-              p.code as plan_code,
-              coalesce(su.included_chats, p.included_chats, 0)::int as included_chats,
-              coalesce(su.included_videos, p.included_videos, 0)::int as included_videos,
-              coalesce(su.consumed_chats, 0)::int as consumed_chats,
-              coalesce(su.consumed_videos, 0)::int as consumed_videos
-         from user_subscriptions us
-         join subscription_plans p on p.id = us.plan_id
-    left join subscription_usage su
-           on su.subscription_id = us.id
-          and su.period_start = us.current_period_start
-          and su.period_end = us.current_period_end
-        where us.user_id = $1::uuid
-          and us.status = 'active'
-          and coalesce(us.current_period_end, now()) > now()
-        order by us.current_period_end desc nulls last
-        limit 1`,
-      [context.actorUserId]
-    );
-    const row = rows[0];
-    if (!row) {
-      return { ok: true, serviceType, canUse: false, reason: 'no_active_subscription' };
-    }
-    const included = serviceType === 'chat' ? Number(row.included_chats || 0) : Number(row.included_videos || 0);
-    const consumed = serviceType === 'chat' ? Number(row.consumed_chats || 0) : Number(row.consumed_videos || 0);
-    return {
-      ok: true,
-      serviceType,
-      canUse: consumed < included,
-      reason: consumed < included ? 'available' : `no_${serviceType}_entitlement_left`,
-      subscriptionId: row.subscription_id,
-      planCode: row.plan_code,
-      included,
-      consumed,
-      remaining: Math.max(included - consumed, 0),
-    };
+    return this.entitlements.checkServiceAccessForUser(context.actorUserId, serviceType as EntitlementKind);
   }
 
   private async getAvailableSlotsTool(args: Record<string, any>) {

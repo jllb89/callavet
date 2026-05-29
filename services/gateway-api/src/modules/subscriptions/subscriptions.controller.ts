@@ -4,6 +4,7 @@ import { DbService } from '../db/db.service';
 import { AuthGuard } from '../auth/auth.guard';
 import { RequestContext } from '../auth/request-context.service';
 import { EnumService } from '../config/enum.service';
+import { EntitlementService } from './entitlement.service';
 
 @Controller('subscriptions')
 @UseGuards(AuthGuard)
@@ -13,6 +14,7 @@ export class SubscriptionsController {
     private readonly rc: RequestContext,
     private readonly prices: PriceService,
     private readonly enumService: EnumService,
+    private readonly entitlements: EntitlementService,
   ) {}
 
   @Post('apple/verify')
@@ -436,17 +438,8 @@ export class SubscriptionsController {
       const sessionId = (body?.original_session_id || '').trim();
       const res = await this.db.runInTx(async (q) => {
         // Active subscription required to attach consumption
-        const { rows: subs } = await q<{ id: string }>(
-          `select id
-             from user_subscriptions
-            where user_id = auth.uid()
-              and status = 'active'
-              and coalesce(current_period_end, now()) > now()
-            order by current_period_end desc nulls last
-            limit 1 for update`
-        );
-        if (!subs[0]) return { noSub: true } as any;
-        const subId = subs[0].id;
+        const subId = await this.entitlements.activeSubscriptionIdForAuthUser(q, { forUpdate: true });
+        if (!subId) return { noSub: true } as any;
 
         // Attempt to find an unconsumed paid purchase for this item & optional session binding
         const { rows: purchaseRows } = await q<{ id: string }>(
@@ -924,12 +917,11 @@ export class SubscriptionsController {
       const row = await this.db.runInTx(async (q) => {
         const stripeManagedActive = await q<any>(
           `select id, provider, status, current_period_end
-             from user_subscriptions
-            where user_id = auth.uid()
-              and provider = 'stripe'
-              and status in ('trialing','active')
-              and coalesce(current_period_end, now()) > now()
-            order by current_period_end desc nulls last
+             from user_subscriptions us
+            where us.user_id = auth.uid()
+              and us.provider = 'stripe'
+              and ${this.entitlements.activeSubscriptionSql('us')}
+            order by us.current_period_end desc nulls last
             limit 1`
         );
         if (stripeManagedActive.rows[0]) {
@@ -950,11 +942,10 @@ export class SubscriptionsController {
 
         const active = await q<any>(
           `select id, plan_id, current_period_start, current_period_end
-             from user_subscriptions
-            where user_id = auth.uid()
-              and status in ('trialing','active')
-              and coalesce(current_period_end, now()) > now()
-            order by current_period_end desc nulls last
+             from user_subscriptions us
+            where us.user_id = auth.uid()
+              and ${this.entitlements.activeSubscriptionSql('us')}
+            order by us.current_period_end desc nulls last
             limit 1`
         );
 
@@ -1087,13 +1078,7 @@ export class SubscriptionsController {
       if (this.db.isStub) {
         return { ok: true, mode: 'stub', reserved: true, type: 'chat', ...body };
       }
-      const result = await this.db.runInTx(async (q) => {
-        const { rows } = await q(
-          `select * from fn_reserve_chat(auth.uid(), trim($1)::uuid)`,
-          [body.sessionId]
-        );
-        return rows[0];
-      });
+      const result = await this.db.runInTx(async (q) => this.entitlements.reserveForAuthUser(q, 'chat', body.sessionId));
       return { ok: true, result };
     } catch (e: any) {
       throw new HttpException(e?.message || 'reserve_chat_failed', HttpStatus.BAD_REQUEST);
@@ -1106,13 +1091,7 @@ export class SubscriptionsController {
       if (this.db.isStub) {
         return { ok: true, mode: 'stub', reserved: true, type: 'video', ...body };
       }
-      const result = await this.db.runInTx(async (q) => {
-        const { rows } = await q(
-          `select * from fn_reserve_video(auth.uid(), trim($1)::uuid)`,
-          [body.sessionId]
-        );
-        return rows[0];
-      });
+      const result = await this.db.runInTx(async (q) => this.entitlements.reserveForAuthUser(q, 'video', body.sessionId));
       return { ok: true, result };
     } catch (e: any) {
       throw new HttpException(e?.message || 'reserve_video_failed', HttpStatus.BAD_REQUEST);
@@ -1153,22 +1132,7 @@ export class SubscriptionsController {
       if (this.db.isStub) {
         return { ok: true, mode: 'stub', usage: { included_chats: 2, consumed_chats: 0, included_videos: 1, consumed_videos: 0, overage_chats: 0, overage_videos: 0 } };
       }
-      const usage = await this.db.runInTx(async (q) => {
-        // Use underlying table to include scheduled-cancel subs until period end
-        const { rows: subs } = await q<{ id: string }>(
-          `select id
-             from user_subscriptions
-            where user_id = auth.uid()
-              and status = 'active'
-              and coalesce(current_period_end, now()) > now()
-            order by current_period_end desc nulls last
-            limit 1`
-        );
-        if (!subs[0]) return null;
-        const subId = subs[0].id;
-        const { rows } = await q<any>(`select * from fn_current_usage(trim($1)::uuid)`, [subId]);
-        return rows[0] || null;
-      });
+      const usage = await this.db.runInTx((q) => this.entitlements.currentUsageForAuthUser(q));
       if (!usage) {
         return { ok: false, reason: 'no_active_subscription', message: 'No active subscription. Acquire a plan to access usage.', usage: null };
       }
@@ -1204,7 +1168,8 @@ export class SubscriptionsController {
              p.included_videos as plan_included_videos,
              p.pets_included_default as plan_pets_included_default,
              p.tax_rate as plan_tax_rate,
-             p.is_active as plan_is_active
+             p.is_active as plan_is_active,
+             (${this.entitlements.activeSubscriptionSql('s')}) as is_active_now
            from user_subscriptions s
            join subscription_plans p on p.id = s.plan_id
           where s.user_id = auth.uid()
@@ -1217,6 +1182,7 @@ export class SubscriptionsController {
           current_period_end: r.current_period_end,
           cancel_at_period_end: r.cancel_at_period_end,
           pets_included: r.pets_included,
+          is_active_now: r.is_active_now === true,
           plan: {
             id: r.plan_id,
             code: r.plan_code,
@@ -1326,30 +1292,7 @@ export class SubscriptionsController {
       if (this.db.isStub) {
         return { ok: true, usage: { included_chats: 0, consumed_chats: 0, included_videos: 0, consumed_videos: 0, period_start: new Date().toISOString(), period_end: new Date().toISOString() }, msg: 'stub' } as any;
       }
-      const usage = await this.db.runInTx(async (q) => {
-        // Use underlying table to include scheduled-cancel subs until period end
-        const { rows: subs } = await q<{ id: string }>(
-          `select id
-             from user_subscriptions
-            where user_id = auth.uid()
-              and status = 'active'
-              and coalesce(current_period_end, now()) > now()
-            order by current_period_end desc nulls last
-            limit 1`
-        );
-        if (!subs[0]) return null;
-        const subId = subs[0].id;
-        const { rows } = await q<any>(`select * from fn_current_usage(trim($1)::uuid)`, [subId]);
-        const u = rows[0] || null;
-        return u ? {
-          included_chats: u.included_chats,
-          consumed_chats: u.consumed_chats,
-          included_videos: u.included_videos,
-          consumed_videos: u.consumed_videos,
-          period_start: u.period_start,
-          period_end: u.period_end,
-        } : null;
-      });
+      const usage = await this.db.runInTx((q) => this.entitlements.currentUsageForAuthUser(q));
       if (!usage) {
         return { ok: false, reason: 'no_active_subscription', message: 'No active subscription. Acquire a plan to access usage.', usage: null } as any;
       }

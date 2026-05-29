@@ -2,6 +2,14 @@ bool isSubscriptionActiveNow(
   Map<dynamic, dynamic> row, {
   DateTime? now,
 }) {
+  final serverActive = row['is_active_now'];
+  if (serverActive is bool) return serverActive;
+  if (serverActive is String) {
+    final normalized = serverActive.toLowerCase();
+    if (normalized == 'true' || normalized == 't') return true;
+    if (normalized == 'false' || normalized == 'f') return false;
+  }
+
   final status = (row['status']?.toString() ?? '').toLowerCase();
   if (status != 'active' && status != 'trialing') {
     return false;

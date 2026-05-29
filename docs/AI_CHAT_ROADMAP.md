@@ -12,6 +12,7 @@ The AI must not diagnose, prescribe, or try to complete the consultation. Its jo
 - AI draft flows already exist for triage, referral recommendation, notes, care plans, embeddings, events, and reviewable drafts.
 - Realtime chat already exists as a separate Socket.IO chat service with room join, sync, send, typing, edit, delete, receipts, and persistent messages.
 - Session creation already reserves chat/video entitlement through `fn_reserve_chat` and `fn_reserve_video`, and handles overage/payment fallback.
+- AI preview checks, session activation, subscription usage/reserve endpoints, and video-room activation now share the gateway `EntitlementService` active-period rule.
 - LiveKit room creation already checks video session access and reserves/validates video entitlement.
 - Vet specialties, vet search, referrals, appointments, availability slots, and vet queue primitives already exist.
 - Mobile chat UI is still a placeholder and does not yet connect to Socket.IO.
@@ -97,6 +98,28 @@ Validation completed:
 - OpenAPI YAML parses successfully.
 - `git diff --check` passed for roadmap, OpenAPI, and session routing files.
 
+### 2A. Entitlement Rule Consolidation
+
+Status: complete on 2026-05-29.
+
+Needed behavior:
+- AI `check_service_access`, session activation, subscription usage/reservation, overage consumption, and video room access must use one active subscription definition.
+- Active entitlement means `trialing` or `active` and `now()` inside the subscription current period.
+- Scheduled cancellation must not remove access before the paid/current period ends.
+- Direct reserve endpoints remain available for compatibility, but product activation should use `/sessions/start` and `/video/rooms`.
+
+Completed:
+- Added `EntitlementService` and `EntitlementModule` in the gateway subscriptions module.
+- Refactored AI, sessions, subscriptions, entitlements, and video controllers/modules to use the shared service for checks, current usage, and chat/video reservations.
+- Added migration `0054_entitlement_active_period_rule.sql` to both migration tracks to align `v_active_user_subscriptions`, `fn_reserve_chat`, and `fn_reserve_video` with the same current-period rule.
+- Applied migration `0054_entitlement_active_period_rule.sql` to staging.
+- Updated `/subscriptions/my` responses with server-provided `is_active_now` and made mobile prefer that value when present.
+
+Validation completed:
+- `pnpm run build` in `services/gateway-api` passes.
+- Staging `v_active_user_subscriptions` now includes `trialing|active` current-period subscriptions without excluding `cancel_at_period_end` rows.
+- Staging dev user `ff15556d-e6ac-47f8-b6d3-1a91e966ecc1` has 6 chats and 2 videos available in the active current period.
+
 ### 3. Mobile AI Concierge Chat
 
 Status: core complete on 2026-05-28.
@@ -120,7 +143,9 @@ Needed behavior:
 - Completed: `find_vets` now returns `next_available_at` and `available_slots_next_7d` so AI routing can confirm matching vets have scheduled-video availability before presenting options.
 - Completed: staging dev user `dev.callavet@gmail.com` is an approved vet profile covering all 12 active specialties with a 7-day availability template for routing tests.
 - Completed: embedded mobile chat no longer pins the greeting/question above the thread; `¿Cómo podemos asistirte hoy?` scrolls with the conversation, and bubbles keep the wider margins with a fixed maximum width.
-- Deferred to points 4 and 5: service activation navigation, realtime human chat transport, immediate video, scheduling, and payment-required checkout UX.
+- Completed: service action buttons now activate chat/video server-side through `/sessions/start`, using the pet/specialty/vet IDs returned by AI tools.
+- Completed: immediate video activation calls `/video/rooms` after video session activation so entitlement enforcement and LiveKit room/token creation stay server-side.
+- Deferred to points 4 and 5: realtime human chat transport, dedicated immediate video UI, scheduling slot confirmation, and polished payment checkout UX.
 
 Validation completed:
 - `pnpm run build` in `services/gateway-api` passes after the Responses API loop fix.
@@ -131,6 +156,7 @@ Validation completed:
 - `flutter analyze lib/src/features/chat/presentation/chat_screen.dart` passes.
 - `flutter analyze lib/src/features/chat/presentation/chat_screen.dart lib/src/features/home/presentation/home_v2_screen.dart` passes after the embedded header and bubble max-width polish.
 - `flutter analyze lib/src/features/chat/presentation/chat_screen.dart lib/src/features/home/presentation/home_v2_screen.dart lib/src/core/router/app_router.dart` passes.
+- `flutter analyze lib/src/features/chat/presentation/chat_screen.dart lib/src/features/subscriptions/data/subscription_status.dart --no-fatal-warnings --no-fatal-infos` passes after mobile activation wiring.
 
 Mobile test setup:
 - Run the Flutter app with valid `SUPABASE_URL` and `SUPABASE_ANON_KEY` dart-defines so the user can authenticate and the gateway receives a Supabase bearer token.
@@ -156,7 +182,8 @@ Needed behavior:
 Wire AI recommendations to existing video/appointment primitives.
 
 Needed behavior:
-- Immediate video: activate or reuse video session, then call `/video/rooms` for LiveKit token.
+- Completed: immediate video activates a video session, then calls `/video/rooms` for LiveKit room/token creation.
+- Next: add a dedicated LiveKit mobile room UI and route instead of showing a placeholder room confirmation in chat.
 - Scheduled video: show slots, book `/appointments`, then display appointment/session details.
 - Payment/entitlement failure: show overage checkout or plan upgrade path.
 - Urgent cases: bias toward immediate video and show emergency disclaimer copy.
@@ -176,9 +203,10 @@ Production checks:
 1. Completed: add `POST /ai/chat/turn` and tool-call loop.
 2. Completed: add routed session activation support for `petId` and `vetId`.
 3. Completed: build mobile AI chat UI against `/ai/chat/turn`.
-4. Next: add Socket.IO client and human chat transport.
-5. Wire immediate video and scheduled video cards.
-6. Run smoke tests and tune prompts/tools.
+4. Completed: centralize entitlement active-period/usage checks and wire AI chat/video activation to `/sessions/start`.
+5. Next: add Socket.IO client and human chat transport.
+6. Wire dedicated immediate video UI and scheduled-video slot booking.
+7. Run smoke tests and tune prompts/tools.
 
 ## Non-Negotiable Safety Prompt Rules
 

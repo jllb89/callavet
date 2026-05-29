@@ -6,6 +6,7 @@ import { EndpointRateLimitGuard } from '../rate-limit/endpoint-rate-limit.guard'
 import { RateLimit } from '../rate-limit/rate-limit.decorator';
 import { ValidatorService } from '../config/validator.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { EntitlementService } from '../subscriptions/entitlement.service';
 
 type SessionStartBody = {
   userId?: string;
@@ -29,6 +30,7 @@ export class SessionsController {
     private readonly rc: RequestContext,
     private readonly validator: ValidatorService,
     private readonly notifications: NotificationsService,
+    private readonly entitlements: EntitlementService,
   ) {}
 
   @Get()
@@ -222,12 +224,7 @@ export class SessionsController {
         const routedPetId = r2?.[0]?.pet_id || null;
         const routedVetId = r2?.[0]?.vet_id || null;
         // 2) Reserve entitlement referencing the created session id
-        const reserveFn = kind === 'video' ? 'fn_reserve_video' : 'fn_reserve_chat';
-        const { rows: r1 } = await q<{ ok: boolean; subscription_id: string; consumption_id: string; msg: string }>(
-          `select * from ${reserveFn}(auth.uid(), trim($1)::uuid)`,
-          [dbSessionId]
-        );
-        const reserve = r1?.[0];
+        const reserve = await this.entitlements.reserveForAuthUser(q, kind, dbSessionId);
         const ok = reserve?.ok === true;
         const consumptionId = reserve?.consumption_id || undefined;
         const msg = reserve?.msg;
@@ -236,18 +233,9 @@ export class SessionsController {
         let creditUsedCode: string | null = null;
         let creditRemaining: number | null = null;
         // Ensure we have a subscription id before trying credits
-        let subIdForCredit: string | undefined = reserve?.subscription_id;
+        let subIdForCredit: string | undefined = reserve?.subscription_id || undefined;
         if (overage && !subIdForCredit) {
-          const { rows: subs } = await q<{ id: string }>(
-            `select id
-               from user_subscriptions
-              where user_id = auth.uid()
-                and status = 'active'
-                and coalesce(current_period_end, now()) > now()
-              order by current_period_end desc nulls last
-              limit 1`
-          );
-          subIdForCredit = subs[0]?.id;
+          subIdForCredit = await this.entitlements.activeSubscriptionIdForAuthUser(q) || undefined;
         }
         // Try auto credit draw when out of entitlement
         if (overage && subIdForCredit) {

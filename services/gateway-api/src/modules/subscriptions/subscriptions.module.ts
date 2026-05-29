@@ -5,9 +5,10 @@ import { SubscriptionsController } from './subscriptions.controller';
 import { AdminPricingController } from './admin-pricing.controller';
 import { PlansController } from './plans.controller';
 import { EntitlementsController } from './entitlements.controller';
+import { EntitlementModule } from './entitlement.module';
 import { DbModule } from '../db/db.module';
 import { AuthModule } from '../auth/auth.module';
 import { ConfigModule } from '../config/config.module';
 
-@Module({ imports: [DbModule, AuthModule, ConfigModule], controllers: [SubscriptionsController, PlansController, EntitlementsController, AdminPricingController], providers: [PriceService, StripeSyncService] })
+@Module({ imports: [DbModule, AuthModule, ConfigModule, EntitlementModule], controllers: [SubscriptionsController, PlansController, EntitlementsController, AdminPricingController], providers: [PriceService, StripeSyncService] })
 export class SubscriptionsModule {}
