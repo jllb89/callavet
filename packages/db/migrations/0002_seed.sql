@@ -29,10 +29,10 @@ ON CONFLICT (code) DO NOTHING;
 -- Vet specialties
 INSERT INTO vet_specialties (id,name,description)
 VALUES
-  (gen_random_uuid(),'Equine GP','General practice for horses'),
-  (gen_random_uuid(),'Surgery','Surgical procedures and pre/post op'),
-  (gen_random_uuid(),'Dermatology','Skin conditions and allergies')
-ON CONFLICT (id) DO NOTHING;
+  ('10000000-0000-0000-0000-000000000001','Medicina general equina','Atención primaria, triaje, prevención y consultas generales para caballos'),
+  ('10000000-0000-0000-0000-000000000006','Cirugía equina','Procedimientos quirúrgicos, heridas, trauma y cuidado pre/postoperatorio'),
+  ('10000000-0000-0000-0000-000000000009','Dermatología equina','Piel, alergias, comezón, heridas superficiales, pelo, pelaje y parásitos externos')
+ON CONFLICT DO NOTHING;
 
 -- Knowledge base
 INSERT INTO kb_items (id,title,body,species,tags,version,created_by)

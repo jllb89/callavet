@@ -708,24 +708,52 @@ export class AiService {
       if (!rows[0]) throw new BadRequestException('pet_not_found_for_user');
     }
     const { rows } = await this.db.query<any>(
-      `select id, name, description
+      `select distinct on (lower(btrim(name))) id, name, description, coalesce(is_active, true) as is_active
          from vet_specialties
-        order by lower(name) asc`
+        where nullif(btrim(name), '') is not null
+        order by lower(btrim(name)), coalesce(is_active, true) desc, length(coalesce(description, '')) desc, id asc`
     );
     const haystack = symptoms.toLowerCase();
+    const boostedTerms = [
+      { terms: ['no quiere comer', 'no come', 'dejo de comer', 'dejó de comer', 'apetito', 'colico', 'cólico', 'diarrea', 'gastro'], targets: ['gastro', 'interna', 'internal', 'general', 'urgenc', 'critical', 'crítico'] },
+      { terms: ['cojea', 'cojera', 'lameness', 'renguera', 'pata', 'tendon', 'tendón', 'articular'], targets: ['cojera', 'ortopedia', 'lameness', 'orthopedic', 'deportiva', 'rehabilit'] },
+      { terms: ['piel', 'dermat', 'alergia', 'comezon', 'comezón', 'picazón', 'rash', 'herida superficial'], targets: ['dermat', 'piel'] },
+      { terms: ['ojo', 'vision', 'visión', 'lagrimeo', 'cornea', 'córnea'], targets: ['oftal', 'ophthalm', 'ojo'] },
+      { terms: ['diente', 'boca', 'masticar', 'dent'], targets: ['odonto', 'dent'] },
+      { terms: ['parto', 'preñada', 'prenada', 'gestacion', 'gestación', 'fertilidad', 'reprodu'], targets: ['repro', 'fertilidad'] },
+      { terms: ['sangre', 'no se levanta', 'respira', 'emergencia', 'urgente', 'dolor fuerte'], targets: ['urgenc', 'emergency', 'critical', 'crítico', 'general'] },
+      { terms: ['vacuna', 'vacunar', 'chequeo', 'revision', 'revisión', 'preventivo'], targets: ['general', 'prevent'] },
+      { terms: ['dieta', 'alimento', 'forraje', 'suplemento', 'peso', 'nutric'], targets: ['nutri', 'aliment'] },
+    ];
+    const isActiveSpecialty = (specialty: any) => specialty?.is_active !== false;
     const scored = rows.map((specialty) => {
       const name = String(specialty.name || '').toLowerCase();
       const description = String(specialty.description || '').toLowerCase();
       const terms = `${name} ${description}`.split(/[^a-z0-9áéíóúüñ]+/i).filter((term) => term.length > 3);
-      const score = terms.reduce((sum, term) => sum + (haystack.includes(term.toLowerCase()) ? 1 : 0), 0) + (haystack.includes(name) ? 5 : 0);
+      const baseScore = terms.reduce((sum, term) => sum + (haystack.includes(term.toLowerCase()) ? 1 : 0), 0) + (haystack.includes(name) ? 5 : 0);
+      const boost = boostedTerms.reduce((sum, group) => {
+        const symptomMatches = group.terms.some((term) => haystack.includes(term));
+        const specialtyMatches = group.targets.some((target) => name.includes(target) || description.includes(target));
+        return sum + (symptomMatches && specialtyMatches ? 4 : 0);
+      }, 0);
+      const score = baseScore + boost;
       return { specialty, score };
     }).sort((left, right) => right.score - left.score);
-    const selected = scored[0]?.specialty || rows[0] || null;
+    const generalFallback = scored.find((item) => {
+      const name = String(item.specialty?.name || '').toLowerCase();
+      return isActiveSpecialty(item.specialty) && (name.includes('medicina general') || name.includes('general practice'));
+    })?.specialty || rows.find(isActiveSpecialty) || null;
+    const bestMatch = scored.find((item) => item.score > 0) || null;
+    const selected = bestMatch
+      ? (isActiveSpecialty(bestMatch.specialty) ? bestMatch.specialty : generalFallback)
+      : generalFallback;
+    const usedFallback = !!selected && (!bestMatch || bestMatch.specialty.id !== selected.id);
     return {
       ok: !!selected,
       specialty: selected,
       candidates: scored.slice(0, 5).map((item) => ({ ...item.specialty, score: item.score })),
-      confidence: scored[0]?.score > 0 ? 'medium' : 'low',
+      confidence: usedFallback ? 'low' : scored[0]?.score >= 5 ? 'high' : scored[0]?.score > 0 ? 'medium' : 'low',
+      fallbackUsed: usedFallback,
       petId: requestedPetId,
     };
   }

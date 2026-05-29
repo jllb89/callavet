@@ -72,9 +72,10 @@ export class AppointmentsController {
       const row = await this.db.runInTx(async (q) => {
         // Validate vet approval and requested specialty coverage.
         const { rows: vetRows } = await q<{ ok: boolean; is_approved: boolean }>(
-          `select array_position(specialties, $1::uuid) is not null as ok,
+          `select array_position(coalesce(v.specialties, '{}'::uuid[]), $1::uuid) is not null
+               and exists (select 1 from vet_specialties vs where vs.id = $1::uuid and coalesce(vs.is_active, true)) as ok,
                   is_approved
-             from vets
+             from vets v
             where id = $2::uuid
             limit 1`,
           [body.specialtyId, body.vetId]

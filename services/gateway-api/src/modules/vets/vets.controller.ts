@@ -92,10 +92,10 @@ export class VetsController {
   private async loadSpecialtyDetails(specialtyIds: string[]) {
     if (!specialtyIds.length) return [] as any[];
     const { rows } = await this.db.query<any>(
-      `select id, name, description
+      `select id, name, description, coalesce(is_active, true) as is_active, sort_order
          from vet_specialties
         where id = any($1::uuid[])
-        order by lower(name) asc`,
+        order by sort_order asc, lower(name) asc`,
       [specialtyIds]
     );
     return rows;
@@ -205,9 +205,9 @@ export class VetsController {
   async listSpecialties() {
     if (this.db.isStub) return { data: [] } as any;
     const { rows } = await this.db.query(
-      `select id, name, description
+      `select id, name, description, coalesce(is_active, true) as is_active, sort_order
          from vet_specialties
-        order by lower(name) asc`
+        order by coalesce(is_active, true) desc, sort_order asc, lower(name) asc`
     );
     return { data: rows };
   }

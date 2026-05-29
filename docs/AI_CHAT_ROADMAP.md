@@ -113,12 +113,18 @@ Needed behavior:
 - Completed: gateway chat turns now include bounded user profile, horse KYC/health profile, active subscription allowance, and recent conversation context.
 - Completed: prompt behavior asks for the affected horse and minimum handoff context before recommending a service when the case is not an emergency.
 - Completed: inline chat margins are wider and the composer spans the available width while growing up to six lines.
+- Completed: specialty routing now deduplicates DB specialty names, respects active/inactive specialties, falls back to Medicina general equina when needed, and boosts equine symptom matches such as appetite/colic toward gastro/internal/urgent care instead of unrelated specialties.
+- Completed: `0053_vet_specialty_hygiene.sql` deduplicates legacy randomized specialty seeds, preserves vet/referral references, adds `is_active` and `sort_order`, adds a normalized unique index, and seeds an active Spanish equine specialty catalog with stable IDs.
+- Completed: embedded mobile chat no longer pins the greeting/question above the thread; `¿Cómo podemos asistirte hoy?` scrolls with the conversation, and bubbles keep the wider margins with a fixed maximum width.
 - Deferred to points 4 and 5: service activation navigation, realtime human chat transport, immediate video, scheduling, and payment-required checkout UX.
 
 Validation completed:
 - `pnpm run build` in `services/gateway-api` passes after the Responses API loop fix.
 - `pnpm run build` in `services/gateway-api` passes after the richer AI chat context loader.
+- `pnpm run build` in `services/gateway-api` passes after the specialty matcher guardrail.
+- `git diff --check` passes for the specialty matcher and specialty hygiene migrations.
 - `flutter analyze lib/src/features/chat/presentation/chat_screen.dart` passes.
+- `flutter analyze lib/src/features/chat/presentation/chat_screen.dart lib/src/features/home/presentation/home_v2_screen.dart` passes after the embedded header and bubble max-width polish.
 - `flutter analyze lib/src/features/chat/presentation/chat_screen.dart lib/src/features/home/presentation/home_v2_screen.dart lib/src/core/router/app_router.dart` passes.
 
 Mobile test setup:

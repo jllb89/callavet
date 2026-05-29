@@ -153,35 +153,38 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
                   phase: _aiPhase,
                   onBack: _exitAiMode,
                 ),
-                AnimatedContainer(
-                  duration: const Duration(milliseconds: 560),
-                  curve: Curves.easeOutCubic,
-                  height: isAiActive ? 24 : 96,
-                ),
-                Text(
-                  '¡Hola, $displayName!',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 20,
-                    fontFamily: 'ABCDiatype',
-                    fontWeight: FontWeight.w400,
+                if (!isConversation) ...[
+                  AnimatedContainer(
+                    duration: const Duration(milliseconds: 560),
+                    curve: Curves.easeOutCubic,
+                    height: isAiActive ? 24 : 96,
                   ),
-                ),
-                const SizedBox(height: 8),
-                const SizedBox(
-                  width: 340,
-                  child: Text(
-                    '¿Cómo podemos asistirte hoy?',
-                    style: TextStyle(
+                  Text(
+                    '¡Hola, $displayName!',
+                    style: const TextStyle(
                       color: Colors.white,
-                      fontSize: 36,
+                      fontSize: 20,
                       fontFamily: 'ABCDiatype',
                       fontWeight: FontWeight.w400,
-                      height: 1.02,
                     ),
                   ),
-                ),
-                const SizedBox(height: 34),
+                  const SizedBox(height: 8),
+                  const SizedBox(
+                    width: 340,
+                    child: Text(
+                      '¿Cómo podemos asistirte hoy?',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 36,
+                        fontFamily: 'ABCDiatype',
+                        fontWeight: FontWeight.w400,
+                        height: 1.02,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 34),
+                ] else
+                  const SizedBox(height: 16),
                 Expanded(
                   child: isConversation
                       ? ChatScreen(

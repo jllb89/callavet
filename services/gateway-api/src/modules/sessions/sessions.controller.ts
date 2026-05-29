@@ -189,7 +189,7 @@ export class SessionsController {
 
         if (specialtyId) {
           const { rows: specialtyRows } = await q<{ id: string }>(
-            `select id from vet_specialties where id = $1::uuid limit 1`,
+            `select id from vet_specialties where id = $1::uuid and coalesce(is_active, true) limit 1`,
             [specialtyId]
           );
           if (!specialtyRows[0]) throw new HttpException('specialty_not_found', HttpStatus.BAD_REQUEST);

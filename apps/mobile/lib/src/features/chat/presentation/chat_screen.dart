@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -290,12 +292,17 @@ class _ChatScreenState extends State<ChatScreen> {
           child: ListView.builder(
             controller: _scrollController,
             padding: EdgeInsets.fromLTRB(widget.embedded ? 0 : 22, widget.embedded ? 10 : 18, widget.embedded ? 0 : 22, 20),
-            itemCount: _messages.length + (_isSending ? 1 : 0),
+            itemCount: (widget.embedded ? 1 : 0) + _messages.length + (_isSending ? 1 : 0),
             itemBuilder: (context, index) {
-              if (_isSending && index == _messages.length) {
+              final introCount = widget.embedded ? 1 : 0;
+              if (widget.embedded && index == 0) {
+                return const _EmbeddedChatIntro();
+              }
+              final messageIndex = index - introCount;
+              if (_isSending && messageIndex == _messages.length) {
                 return const _TypingBubble();
               }
-              final message = _messages[index];
+              final message = _messages[messageIndex];
               return _MessageBubble(
                 message: message,
                 embedded: widget.embedded,
@@ -314,6 +321,33 @@ class _ChatScreenState extends State<ChatScreen> {
           onSend: _sendComposerMessage,
         ),
       ],
+    );
+  }
+}
+
+class _EmbeddedChatIntro extends StatelessWidget {
+  const _EmbeddedChatIntro();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Padding(
+      padding: EdgeInsets.only(bottom: 28),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: SizedBox(
+          width: 340,
+          child: Text(
+            '¿Cómo podemos asistirte hoy?',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 36,
+              fontFamily: 'ABCDiatype',
+              fontWeight: FontWeight.w400,
+              height: 1.02,
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -383,6 +417,10 @@ class _MessageBubble extends StatelessWidget {
     final isUser = message.isUser;
     final bubbleColor = isUser ? Colors.white : Colors.white.withValues(alpha: 0.07);
     final textColor = isUser ? Colors.black : Colors.white;
+    final viewportWidth = MediaQuery.sizeOf(context).width;
+    final widthFactor = isUser ? (embedded ? 0.90 : 0.78) : (embedded ? 0.96 : 0.86);
+    final fixedCap = isUser ? (embedded ? 360.0 : 420.0) : (embedded ? 390.0 : 460.0);
+    final maxBubbleWidth = math.min(viewportWidth * widthFactor, fixedCap);
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 14),
@@ -390,7 +428,7 @@ class _MessageBubble extends StatelessWidget {
         alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
         child: ConstrainedBox(
           constraints: BoxConstraints(
-            maxWidth: MediaQuery.sizeOf(context).width * (isUser ? (embedded ? 0.90 : 0.78) : (embedded ? 0.96 : 0.86)),
+            maxWidth: maxBubbleWidth,
           ),
           child: Column(
             crossAxisAlignment: isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
