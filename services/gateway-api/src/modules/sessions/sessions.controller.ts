@@ -7,6 +7,20 @@ import { RateLimit } from '../rate-limit/rate-limit.decorator';
 import { ValidatorService } from '../config/validator.service';
 import { NotificationsService } from '../notifications/notifications.service';
 
+type SessionStartBody = {
+  userId?: string;
+  kind?: 'chat'|'video';
+  mode?: 'chat'|'video';
+  type?: 'chat'|'video';
+  sessionId?: string;
+  petId?: string;
+  pet_id?: string;
+  vetId?: string;
+  vet_id?: string;
+  specialtyId?: string;
+  specialty_id?: string;
+};
+
 @Controller('sessions')
 @UseGuards(AuthGuard)
 export class SessionsController {
@@ -144,25 +158,69 @@ export class SessionsController {
   @Post('start')
   @UseGuards(EndpointRateLimitGuard)
   @RateLimit({ key: 'sessions.start', limit: 6, windowMs: 60_000 })
-  async start(@Body() body: { userId?: string; kind?: 'chat'|'video'; mode?: 'chat'|'video'; type?: 'chat'|'video'; sessionId?: string }) {
+  async start(@Body() body: SessionStartBody) {
     try {
       // Support `kind`, `mode`, or `type` field from clients; default chat
       const incoming = (body.kind || body.mode || body.type || 'chat')?.toString().toLowerCase();
       const kind: 'chat'|'video' = incoming === 'video' ? 'video' : 'chat';
       if (body.sessionId) this.validator.validateUUID(body.sessionId, 'sessionId');
+      const petId = (body.petId || body.pet_id || '').toString().trim() || null;
+      const vetId = (body.vetId || body.vet_id || '').toString().trim() || null;
+      const specialtyId = (body.specialtyId || body.specialty_id || '').toString().trim() || null;
+      if (petId) this.validator.validateUUID(petId, 'petId');
+      if (vetId) this.validator.validateUUID(vetId, 'vetId');
+      if (specialtyId) this.validator.validateUUID(specialtyId, 'specialtyId');
       if (this.db.isStub) {
         const sessionId = body.sessionId || `sess_${Date.now()}`;
-        return { ok: true, mode: 'stub', sessionId, kind };
+        return { ok: true, mode: 'stub', sessionId, kind, petId, vetId, specialtyId };
       }
       const result = await this.db.runInTx(async (q) => {
+        if (petId) {
+          const { rows: petRows } = await q<{ id: string }>(
+            `select id
+               from pets
+              where id = $1::uuid
+                and user_id = auth.uid()
+              limit 1`,
+            [petId]
+          );
+          if (!petRows[0]) throw new HttpException('pet_not_found_for_user', HttpStatus.BAD_REQUEST);
+        }
+
+        if (specialtyId) {
+          const { rows: specialtyRows } = await q<{ id: string }>(
+            `select id from vet_specialties where id = $1::uuid limit 1`,
+            [specialtyId]
+          );
+          if (!specialtyRows[0]) throw new HttpException('specialty_not_found', HttpStatus.BAD_REQUEST);
+        }
+
+        if (vetId) {
+          const { rows: vetRows } = await q<{ id: string; is_approved: boolean; specialty_ok: boolean }>(
+            `select id,
+                    is_approved,
+                    ($2::uuid is null or array_position(coalesce(specialties, '{}'::uuid[]), $2::uuid) is not null) as specialty_ok
+               from vets
+              where id = $1::uuid
+              limit 1`,
+            [vetId, specialtyId]
+          );
+          const vet = vetRows[0];
+          if (!vet) throw new HttpException('vet_not_found', HttpStatus.BAD_REQUEST);
+          if (!vet.is_approved) throw new HttpException('vet_not_approved', HttpStatus.BAD_REQUEST);
+          if (!vet.specialty_ok) throw new HttpException('vet_missing_specialty', HttpStatus.BAD_REQUEST);
+        }
+
         // 1) Create session first (FK target) using auth.uid() for user_id
-        const { rows: r2 } = await q<{ id: string }>(
-          `insert into chat_sessions (id, user_id, status, mode, started_at)
-           values (gen_random_uuid(), auth.uid(), $1, $2, now())
-           returning id`,
-          ['active', kind]
+        const { rows: r2 } = await q<{ id: string; pet_id: string | null; vet_id: string | null }>(
+          `insert into chat_sessions (id, user_id, vet_id, pet_id, status, mode, started_at)
+           values (gen_random_uuid(), auth.uid(), $1::uuid, $2::uuid, $3, $4, now())
+           returning id, pet_id, vet_id`,
+          [vetId, petId, 'active', kind]
         );
         const dbSessionId = r2?.[0]?.id as string;
+        const routedPetId = r2?.[0]?.pet_id || null;
+        const routedVetId = r2?.[0]?.vet_id || null;
         // 2) Reserve entitlement referencing the created session id
         const reserveFn = kind === 'video' ? 'fn_reserve_video' : 'fn_reserve_chat';
         const { rows: r1 } = await q<{ ok: boolean; subscription_id: string; consumption_id: string; msg: string }>(
@@ -273,12 +331,15 @@ export class SessionsController {
             }
           }
         }
-        return { dbSessionId, consumptionId, overage, msg, creditConsumptionId, creditUsedCode, creditRemaining, checkout };
+        return { dbSessionId, petId: routedPetId, vetId: routedVetId, specialtyId, consumptionId, overage, msg, creditConsumptionId, creditUsedCode, creditRemaining, checkout };
       });
       if (result.overage) {
         return {
           ok: true,
           sessionId: result.dbSessionId,
+          petId: result.petId,
+          vetId: result.vetId,
+          specialtyId: result.specialtyId,
           kind,
           overage: true,
           overageReason: result.msg || 'no_entitlement',
@@ -302,6 +363,9 @@ export class SessionsController {
       return {
         ok: true,
         sessionId: result.dbSessionId,
+        petId: result.petId,
+        vetId: result.vetId,
+        specialtyId: result.specialtyId,
         consumptionId: finalConsumption,
         kind,
         overage: false,

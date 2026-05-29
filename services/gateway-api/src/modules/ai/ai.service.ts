@@ -38,6 +38,38 @@ type AiEmbeddingInput = {
   regenerate?: boolean;
 };
 
+type AiChatRole = 'user' | 'assistant' | 'ai';
+
+type AiChatMessageInput = {
+  role?: AiChatRole;
+  content?: string;
+};
+
+type AiChatTurnInput = {
+  conversationId?: string;
+  petId?: string;
+  sessionId?: string;
+  message?: string;
+  messages?: AiChatMessageInput[];
+  dryRun?: boolean;
+};
+
+type AiChatToolName = 'recommend_specialty' | 'find_vets' | 'check_service_access' | 'get_available_slots';
+
+type AiChatToolCall = {
+  type: 'function_call';
+  call_id: string;
+  name: AiChatToolName | string;
+  arguments: string;
+};
+
+type AiChatTurnContext = {
+  actorUserId: string;
+  petId: string | null;
+  sessionId: string | null;
+  conversationId: string | null;
+};
+
 type PromptVersion = {
   id: string;
   prompt_key: string;
@@ -376,6 +408,92 @@ export class AiService {
     };
   }
 
+  private chatTurnResponseFormat() {
+    return {
+      type: 'json_schema',
+      name: 'ai_chat_turn',
+      strict: true,
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['message', 'urgency', 'recommendedService', 'actionLabel', 'safetyEscalation'],
+        properties: {
+          message: { type: 'string' },
+          urgency: { type: 'string', enum: ['routine', 'urgent', 'emergency'] },
+          recommendedService: { type: ['string', 'null'], enum: ['chat', 'video', 'scheduled_video', null] },
+          actionLabel: { type: ['string', 'null'] },
+          safetyEscalation: { type: 'boolean' },
+        },
+      },
+    };
+  }
+
+  private chatTurnTools() {
+    return [
+      {
+        type: 'function',
+        name: 'recommend_specialty',
+        description: 'Choose the best existing veterinary specialty for the user need. Use this before offering human chat, video, or scheduling.',
+        strict: true,
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['symptoms', 'petId'],
+          properties: {
+            symptoms: { type: 'string', description: 'User-described need, symptoms, or reason for contacting a veterinarian.' },
+            petId: { type: ['string', 'null'], description: 'Known pet UUID when available; otherwise null.' },
+          },
+        },
+      },
+      {
+        type: 'function',
+        name: 'find_vets',
+        description: 'Find approved vets that cover a selected specialty. Use only after a specialty is known.',
+        strict: true,
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['specialtyId', 'limit'],
+          properties: {
+            specialtyId: { type: ['string', 'null'], description: 'Specialty UUID from recommend_specialty, or null to list approved vets.' },
+            limit: { type: 'integer', minimum: 1, maximum: 5, description: 'Maximum vets to return.' },
+          },
+        },
+      },
+      {
+        type: 'function',
+        name: 'check_service_access',
+        description: 'Preflight whether the current user appears to have subscription allowance for chat or video. This does not reserve or consume entitlement.',
+        strict: true,
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['serviceType'],
+          properties: {
+            serviceType: { type: 'string', enum: ['chat', 'video'], description: 'Service the user wants to activate.' },
+          },
+        },
+      },
+      {
+        type: 'function',
+        name: 'get_available_slots',
+        description: 'Find available future appointment slots for an approved vet. Use when the user wants to schedule a video call.',
+        strict: true,
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['vetId', 'since', 'until', 'durationMin'],
+          properties: {
+            vetId: { type: 'string', description: 'Approved vet UUID.' },
+            since: { type: ['string', 'null'], description: 'ISO date-time lower bound, or null for now.' },
+            until: { type: ['string', 'null'], description: 'ISO date-time upper bound, or null for seven days from now.' },
+            durationMin: { type: ['integer', 'null'], minimum: 10, maximum: 240, description: 'Requested slot length in minutes, or null for 30.' },
+          },
+        },
+      },
+    ];
+  }
+
   private async postProviderJson(cfg: AiProviderConfig, path: string, body: Record<string, any>, errorPrefix: string) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
@@ -421,6 +539,330 @@ export class AiService {
       return JSON.parse(content);
     } catch {
       throw new BadGatewayException('ai_provider_invalid_json');
+    }
+  }
+
+  private chatTurnInstructions(context: AiChatTurnContext) {
+    return [
+      'You are Call a Vet AI concierge for equine veterinary care.',
+      'Reply in Spanish unless the user clearly uses another language.',
+      'Your purpose is intake, urgency detection, routing, entitlement-aware service handoff, and concise coordination with professional human vets.',
+      'Never diagnose, prescribe medication, recommend medication doses, or imply you replace a veterinarian.',
+      'If red flags are present, recommend immediate professional help or local emergency veterinary care.',
+      'Use function tools to choose an existing specialty, find approved vets, check service access, and inspect availability.',
+      'Do not invent specialty IDs, vet IDs, appointment slots, entitlements, prices, or session IDs.',
+      'Before recommending chat or video activation, call check_service_access for the relevant service type.',
+      'Keep final responses short and action-oriented. Offer chat, immediate video, or scheduled video when enough context is available.',
+      `Server context: ${JSON.stringify(context)}`,
+    ].join('\n');
+  }
+
+  private normalizeChatMessages(input: AiChatTurnInput) {
+    const messages = Array.isArray(input.messages) ? input.messages : [];
+    const normalized = messages
+      .map((message) => {
+        const content = String(message?.content || '').trim();
+        if (!content) return null;
+        const role = message?.role === 'assistant' || message?.role === 'ai' ? 'assistant' : 'user';
+        return { role, content };
+      })
+      .filter(Boolean) as Array<{ role: 'user' | 'assistant'; content: string }>;
+    const currentMessage = String(input.message || '').trim();
+    if (currentMessage) normalized.push({ role: 'user', content: currentMessage });
+    return normalized.slice(-12);
+  }
+
+  private parseToolArguments(raw: string) {
+    try {
+      const parsed = JSON.parse(raw || '{}');
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, any> : {};
+    } catch {
+      throw new BadGatewayException('ai_tool_arguments_invalid_json');
+    }
+  }
+
+  private async recommendSpecialtyTool(args: Record<string, any>, context: AiChatTurnContext) {
+    const symptoms = String(args.symptoms || '').trim();
+    const requestedPetId = this.normalizeOptionalUuid(String(args.petId || context.petId || ''), 'petId');
+    if (requestedPetId && requestedPetId !== context.petId) {
+      const { rows } = await this.db.query<{ id: string }>(
+        `select id from pets where id = $1::uuid and user_id = $2::uuid limit 1`,
+        [requestedPetId, context.actorUserId]
+      );
+      if (!rows[0]) throw new BadRequestException('pet_not_found_for_user');
+    }
+    const { rows } = await this.db.query<any>(
+      `select id, name, description
+         from vet_specialties
+        order by lower(name) asc`
+    );
+    const haystack = symptoms.toLowerCase();
+    const scored = rows.map((specialty) => {
+      const name = String(specialty.name || '').toLowerCase();
+      const description = String(specialty.description || '').toLowerCase();
+      const terms = `${name} ${description}`.split(/[^a-z0-9áéíóúüñ]+/i).filter((term) => term.length > 3);
+      const score = terms.reduce((sum, term) => sum + (haystack.includes(term.toLowerCase()) ? 1 : 0), 0) + (haystack.includes(name) ? 5 : 0);
+      return { specialty, score };
+    }).sort((left, right) => right.score - left.score);
+    const selected = scored[0]?.specialty || rows[0] || null;
+    return {
+      ok: !!selected,
+      specialty: selected,
+      candidates: scored.slice(0, 5).map((item) => ({ ...item.specialty, score: item.score })),
+      confidence: scored[0]?.score > 0 ? 'medium' : 'low',
+      petId: requestedPetId,
+    };
+  }
+
+  private async findVetsTool(args: Record<string, any>) {
+    const specialtyId = this.normalizeOptionalUuid(String(args.specialtyId || ''), 'specialtyId');
+    const limit = Math.min(Math.max(Number(args.limit || 3) || 3, 1), 5);
+    const { rows } = await this.db.query<any>(
+      `select v.id,
+              u.full_name,
+              v.bio,
+              v.years_experience,
+              coalesce(v.languages, '{}'::text[]) as languages,
+              coalesce(avg(r.score)::numeric(10,2), 0) as rating_average,
+              count(r.id)::int as rating_count,
+              (select count(*)::int
+                 from chat_sessions s
+                where s.vet_id = v.id
+                  and s.status = 'active') as active_consults
+         from vets v
+         join users u on u.id = v.id
+         left join ratings r on r.vet_id = v.id
+        where v.is_approved = true
+          and ($1::uuid is null or array_position(v.specialties, $1::uuid) is not null)
+        group by v.id, u.full_name, v.bio, v.years_experience, v.languages
+        order by active_consults asc, count(r.id) desc, coalesce(avg(r.score), 0) desc, u.full_name asc
+        limit $2`,
+      [specialtyId, limit]
+    );
+    return { ok: true, specialtyId, vets: rows };
+  }
+
+  private async checkServiceAccessTool(args: Record<string, any>, context: AiChatTurnContext) {
+    const serviceType = String(args.serviceType || '').trim().toLowerCase();
+    if (serviceType !== 'chat' && serviceType !== 'video') throw new BadRequestException('serviceType_invalid');
+    const { rows } = await this.db.query<any>(
+      `select us.id as subscription_id,
+              p.code as plan_code,
+              coalesce(su.included_chats, p.included_chats, 0)::int as included_chats,
+              coalesce(su.included_videos, p.included_videos, 0)::int as included_videos,
+              coalesce(su.consumed_chats, 0)::int as consumed_chats,
+              coalesce(su.consumed_videos, 0)::int as consumed_videos
+         from user_subscriptions us
+         join subscription_plans p on p.id = us.plan_id
+    left join subscription_usage su
+           on su.subscription_id = us.id
+          and su.period_start = us.current_period_start
+          and su.period_end = us.current_period_end
+        where us.user_id = $1::uuid
+          and us.status = 'active'
+          and coalesce(us.current_period_end, now()) > now()
+        order by us.current_period_end desc nulls last
+        limit 1`,
+      [context.actorUserId]
+    );
+    const row = rows[0];
+    if (!row) {
+      return { ok: true, serviceType, canUse: false, reason: 'no_active_subscription' };
+    }
+    const included = serviceType === 'chat' ? Number(row.included_chats || 0) : Number(row.included_videos || 0);
+    const consumed = serviceType === 'chat' ? Number(row.consumed_chats || 0) : Number(row.consumed_videos || 0);
+    return {
+      ok: true,
+      serviceType,
+      canUse: consumed < included,
+      reason: consumed < included ? 'available' : `no_${serviceType}_entitlement_left`,
+      subscriptionId: row.subscription_id,
+      planCode: row.plan_code,
+      included,
+      consumed,
+      remaining: Math.max(included - consumed, 0),
+    };
+  }
+
+  private async getAvailableSlotsTool(args: Record<string, any>) {
+    const vetId = this.normalizeOptionalUuid(String(args.vetId || ''), 'vetId');
+    if (!vetId) throw new BadRequestException('vetId_required');
+    const durationMin = Math.min(Math.max(Number(args.durationMin || 30) || 30, 10), 240);
+    const since = args.since ? new Date(String(args.since)) : new Date();
+    const until = args.until ? new Date(String(args.until)) : new Date(since.getTime() + 7 * 24 * 60 * 60 * 1000);
+    if (Number.isNaN(since.getTime()) || Number.isNaN(until.getTime()) || until <= since) {
+      throw new BadRequestException('slot_window_invalid');
+    }
+    const { rows } = await this.db.query<any>(
+      `with params as (
+         select $1::uuid as vet_id,
+                $2::timestamptz as since,
+                $3::timestamptz as until,
+                $4::int as dur
+       ),
+       days as (
+         select generate_series(date_trunc('day', (select since from params)), date_trunc('day', (select until from params)), interval '1 day')::date as day
+       ),
+       avail as (
+         select d.day,
+                va.start_time as start_t,
+                va.end_time as end_t
+           from days d
+           join vet_availability va on va.weekday = extract(dow from d.day) and va.vet_id = (select vet_id from params)
+       ),
+       ranges as (
+         select make_timestamptz(extract(year from a.day)::int, extract(month from a.day)::int, extract(day from a.day)::int, extract(hour from a.start_t)::int, extract(minute from a.start_t)::int, 0) as start_at,
+                make_timestamptz(extract(year from a.day)::int, extract(month from a.day)::int, extract(day from a.day)::int, extract(hour from a.end_t)::int, extract(minute from a.end_t)::int, 0) as end_at
+           from avail a
+       ),
+       slots as (
+         select gs as slot_start, gs + make_interval(mins => (select dur from params)) as slot_end
+           from ranges r,
+                generate_series(r.start_at, r.end_at - make_interval(mins => (select dur from params)), make_interval(mins => (select dur from params))) as gs
+       ),
+       booked as (
+         select tstzrange(starts_at, ends_at) as appt_range
+           from appointments
+          where vet_id = (select vet_id from params)
+            and status = any(array['scheduled','active','confirmed']::text[])
+       )
+       select slot_start, slot_end
+         from slots s
+        where s.slot_start >= (select since from params)
+          and s.slot_end <= (select until from params)
+          and not exists (select 1 from booked b where tstzrange(s.slot_start, s.slot_end) && b.appt_range)
+        order by slot_start asc
+        limit 5`,
+      [vetId, since.toISOString(), until.toISOString(), durationMin]
+    );
+    return { ok: true, vetId, durationMin, slots: rows.map((row) => ({ start: row.slot_start, end: row.slot_end })) };
+  }
+
+  private async executeChatTool(call: AiChatToolCall, context: AiChatTurnContext) {
+    const args = this.parseToolArguments(call.arguments);
+    switch (call.name) {
+      case 'recommend_specialty':
+        return this.recommendSpecialtyTool(args, context);
+      case 'find_vets':
+        return this.findVetsTool(args);
+      case 'check_service_access':
+        return this.checkServiceAccessTool(args, context);
+      case 'get_available_slots':
+        return this.getAvailableSlotsTool(args);
+      default:
+        throw new BadGatewayException(`ai_tool_not_allowed:${call.name}`);
+    }
+  }
+
+  private chatTurnDryRun(context: AiChatTurnContext, message: string) {
+    const wantsVideo = /video|videollamada|llamada|urgente|urgent|emergency/i.test(message);
+    return {
+      ok: true,
+      dryRun: true,
+      provider: 'dry_run',
+      model: this.providerConfig(undefined, true).model,
+      responseId: null,
+      payload: {
+        message: wantsVideo
+          ? 'Puedo ayudarte a conectar con un veterinario. Por lo que describes, revisaría disponibilidad para una videollamada profesional.'
+          : 'Puedo ayudarte a conectar con el veterinario adecuado. Primero identificaré la especialidad y luego te ofreceré chat, videollamada o agendar una videollamada.',
+        urgency: wantsVideo ? 'urgent' : 'routine',
+        recommendedService: wantsVideo ? 'video' : 'chat',
+        actionLabel: wantsVideo ? 'buscar videollamada' : 'buscar veterinario',
+        safetyEscalation: wantsVideo,
+      },
+      toolResults: [],
+      context,
+    };
+  }
+
+  private async callChatTurnProvider(input: AiChatTurnInput, context: AiChatTurnContext) {
+    const cfg = this.providerConfig(undefined, !!input.dryRun);
+    const messages = this.normalizeChatMessages(input);
+    const latestMessage = messages[messages.length - 1]?.content || '';
+    if (input.dryRun) return this.chatTurnDryRun(context, latestMessage);
+    if (!cfg.apiKey) throw new ServiceUnavailableException('ai_provider_not_configured');
+    if (cfg.apiMode !== 'responses') throw new ServiceUnavailableException('ai_chat_turn_requires_responses_api');
+    if (!messages.length) throw new BadRequestException('message_required');
+
+    const responseInput: any[] = messages.map((message) => ({ role: message.role, content: message.content }));
+    const toolResults: Array<{ name: string; output: any }> = [];
+    const tools = this.chatTurnTools();
+
+    for (let step = 0; step < 6; step += 1) {
+      const body: Record<string, any> = {
+        model: cfg.model,
+        store: false,
+        instructions: this.chatTurnInstructions(context),
+        input: responseInput,
+        tools,
+        text: { format: this.chatTurnResponseFormat() },
+        tool_choice: 'auto',
+        parallel_tool_calls: false,
+      };
+      if (cfg.reasoningEffort) body.reasoning = { effort: cfg.reasoningEffort };
+      const data = await this.postProviderJson(cfg, '/responses', body, 'ai_chat_provider_http');
+      const output = Array.isArray(data?.output) ? data.output : [];
+      const toolCalls = output.filter((item: any): item is AiChatToolCall => item?.type === 'function_call');
+      responseInput.push(...output);
+
+      if (!toolCalls.length) {
+        const payload = this.parseProviderPayload(this.extractResponsesText(data));
+        return { ok: true, provider: cfg.provider, model: cfg.model, responseId: data?.id || null, payload, toolResults, context };
+      }
+
+      for (const toolCall of toolCalls) {
+        const result = await this.executeChatTool(toolCall, context);
+        toolResults.push({ name: toolCall.name, output: result });
+        responseInput.push({
+          type: 'function_call_output',
+          call_id: toolCall.call_id,
+          output: JSON.stringify(result),
+        });
+      }
+    }
+
+    throw new BadGatewayException('ai_chat_tool_loop_exceeded');
+  }
+
+  async runChatTurn(input: AiChatTurnInput) {
+    const actorUserId = this.rc.requireUuidUserId();
+    const petId = this.normalizeOptionalUuid(input.petId, 'petId');
+    const sessionId = this.normalizeOptionalUuid(input.sessionId, 'sessionId');
+    const conversationId = String(input.conversationId || '').trim() || null;
+    const context: AiChatTurnContext = { actorUserId, petId, sessionId, conversationId };
+    const requestPayload = {
+      petId,
+      sessionId,
+      conversationId,
+      messagePresent: !!String(input.message || '').trim(),
+      messageCount: Array.isArray(input.messages) ? input.messages.length : 0,
+      dryRun: !!input.dryRun,
+    };
+    const eventId = await this.insertRawEvent({
+      actorUserId,
+      eventType: 'ai.chat_turn.run',
+      featureKey: 'ai.chat_turn',
+      requestPayload,
+    });
+    if (!eventId) throw new ServiceUnavailableException('ai_event_insert_failed');
+
+    const startedAt = Date.now();
+    try {
+      const result = await this.callChatTurnProvider(input, context);
+      await this.completeEvent(eventId, 'succeeded', {
+        provider: result.provider,
+        model: result.model,
+        responsePayload: { payload: result.payload, toolResults: result.toolResults, responseId: result.responseId || null },
+        latencyMs: Date.now() - startedAt,
+      });
+      return { ...result, eventId };
+    } catch (e: any) {
+      await this.completeEvent(eventId, 'failed', {
+        errorText: (e?.message || 'ai_chat_turn_failed').slice(0, 1000),
+        latencyMs: Date.now() - startedAt,
+      }).catch(() => undefined);
+      throw e;
     }
   }
 

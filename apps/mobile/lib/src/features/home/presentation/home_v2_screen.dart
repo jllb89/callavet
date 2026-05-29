@@ -5,6 +5,10 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 enum _HomeAiPhase { home, fadingOut, prompt }
 
+void _homeAiLog(String message) {
+  debugPrint('[AIChat][Home] $message');
+}
+
 class HomeV2Screen extends StatefulWidget {
   const HomeV2Screen({super.key});
 
@@ -64,27 +68,50 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
   }
 
   Future<void> _enterAiMode() async {
+    _homeAiLog('enterAiMode requested phase=$_aiPhase textLength=${_messageCtrl.text.trim().length}');
     if (_aiPhase == _HomeAiPhase.prompt) {
+      _homeAiLog('enterAiMode already prompt; focusing composer');
       _messageFocusNode.requestFocus();
       return;
     }
-    if (_aiPhase == _HomeAiPhase.fadingOut) return;
+    if (_aiPhase == _HomeAiPhase.fadingOut) {
+      _homeAiLog('enterAiMode ignored while fading out');
+      return;
+    }
 
     setState(() => _aiPhase = _HomeAiPhase.fadingOut);
+    _homeAiLog('enterAiMode phase=fadingOut');
     await Future<void>.delayed(const Duration(milliseconds: 260));
     if (!mounted || _aiPhase != _HomeAiPhase.fadingOut) return;
     setState(() => _aiPhase = _HomeAiPhase.prompt);
+    _homeAiLog('enterAiMode phase=prompt');
   }
 
   void _exitAiMode() {
+    _homeAiLog('exitAiMode from phase=$_aiPhase');
     _messageFocusNode.unfocus();
     setState(() => _aiPhase = _HomeAiPhase.home);
   }
 
   void _useSuggestion(String text) {
+    _homeAiLog('suggestion selected length=${text.length} preview="${text.length > 80 ? '${text.substring(0, 80)}...' : text}"');
     _messageCtrl.text = text;
     _messageCtrl.selection = TextSelection.collapsed(offset: text.length);
     _messageFocusNode.requestFocus();
+  }
+
+  void _openAiChat() {
+    final text = _messageCtrl.text.trim();
+    _homeAiLog('openAiChat requested phase=$_aiPhase textLength=${text.length}');
+    if (text.isEmpty) {
+      _homeAiLog('openAiChat empty text; staying in AI prompt mode');
+      _enterAiMode();
+      return;
+    }
+    _messageFocusNode.unfocus();
+    final route = '/chat/ai?message=${Uri.encodeQueryComponent(text)}';
+    _homeAiLog('routing to /chat/ai with encodedMessageLength=${Uri.encodeQueryComponent(text).length}');
+    context.go(route);
   }
 
   @override
@@ -151,6 +178,7 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
                   focusNode: _messageFocusNode,
                   isPrompt: isPrompt,
                   onTap: _enterAiMode,
+                  onSend: _openAiChat,
                 ),
               ],
             ),
@@ -430,12 +458,14 @@ class _MessageComposer extends StatelessWidget {
     required this.focusNode,
     required this.isPrompt,
     required this.onTap,
+    required this.onSend,
   });
 
   final TextEditingController controller;
   final FocusNode focusNode;
   final bool isPrompt;
   final VoidCallback onTap;
+  final VoidCallback onSend;
 
   @override
   Widget build(BuildContext context) {
@@ -460,6 +490,8 @@ class _MessageComposer extends StatelessWidget {
                         cursorColor: Colors.white,
                         minLines: 1,
                         maxLines: 1,
+                        textInputAction: TextInputAction.send,
+                        onSubmitted: (_) => onSend(),
                         style: const TextStyle(
                           color: Colors.white,
                           fontSize: 13,
@@ -489,10 +521,13 @@ class _MessageComposer extends StatelessWidget {
                       ),
               ),
               const SizedBox(width: 12),
-              SvgPicture.asset(
-                'assets/icons/rightup.svg',
-                width: 17,
-                height: 17,
+              GestureDetector(
+                onTap: isPrompt ? onSend : onTap,
+                child: SvgPicture.asset(
+                  'assets/icons/rightup.svg',
+                  width: 17,
+                  height: 17,
+                ),
               ),
             ],
           ),

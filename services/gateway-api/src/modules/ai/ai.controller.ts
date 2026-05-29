@@ -32,6 +32,11 @@ export class AiController {
     return this.ai.generateEmbeddings(body || {});
   }
 
+  @Post('chat/turn')
+  runChatTurn(@Body() body: any) {
+    return this.ai.runChatTurn(body || {});
+  }
+
   @Get('drafts')
   listDrafts(@Query() query: any) {
     return this.ai.listDrafts(query || {});

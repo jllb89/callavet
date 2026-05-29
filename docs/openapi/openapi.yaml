@@ -152,6 +152,9 @@ components:
       properties:
         ok: { type: boolean }
         sessionId: { type: string, format: uuid }
+        petId: { type: string, format: uuid, nullable: true }
+        vetId: { type: string, format: uuid, nullable: true }
+        specialtyId: { type: string, format: uuid, nullable: true }
         consumptionId: { type: string, format: uuid, nullable: true }
         kind: { type: string, enum: [chat, video] }
         overage: { type: boolean }
@@ -1385,6 +1388,12 @@ paths:
                 type: { type: string, enum: [chat, video] }
                 kind: { type: string, enum: [chat, video] }
                 sessionId: { type: string, format: uuid }
+                petId: { type: string, format: uuid, nullable: true }
+                pet_id: { type: string, format: uuid, nullable: true }
+                vetId: { type: string, format: uuid, nullable: true }
+                vet_id: { type: string, format: uuid, nullable: true }
+                specialtyId: { type: string, format: uuid, nullable: true }
+                specialty_id: { type: string, format: uuid, nullable: true }
       responses:
         "200":
           description: OK
@@ -3052,9 +3061,16 @@ components:
             type: object
             properties:
               mode: { type: string, enum: [chat, video] }
-              pet_id: { type: string, format: uuid }
+              type: { type: string, enum: [chat, video] }
+              kind: { type: string, enum: [chat, video] }
+              sessionId: { type: string, format: uuid }
+              petId: { type: string, format: uuid, nullable: true }
+              pet_id: { type: string, format: uuid, nullable: true }
+              vetId: { type: string, format: uuid, nullable: true }
+              vet_id: { type: string, format: uuid, nullable: true }
+              specialtyId: { type: string, format: uuid, nullable: true }
+              specialty_id: { type: string, format: uuid, nullable: true }
               text: { type: string }
-            required: [mode, pet_id]
     EndSession:
       content:
         application/json:
@@ -3749,6 +3765,9 @@ components:
       properties:
         ok: { type: boolean }
         sessionId: { type: string, format: uuid }
+        petId: { type: string, format: uuid, nullable: true }
+        vetId: { type: string, format: uuid, nullable: true }
+        specialtyId: { type: string, format: uuid, nullable: true }
         kind: { type: string, enum: [chat, video] }
         consumptionId: { type: string, format: uuid, nullable: true }
         overage: { type: boolean }
