@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:cav_mobile/src/core/config/environment.dart';
+import 'package:cav_mobile/src/features/subscriptions/data/subscription_status.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
@@ -118,18 +119,12 @@ class _HorseKycScreenState extends State<HorseKycScreen> {
         return;
       }
 
-    final active = data.whereType<Map>().map((r) => Map<String, dynamic>.from(r)).firstWhere(
-          (row) {
-            final status = (row['status']?.toString() ?? '').toLowerCase();
-            return status == 'active' || status == 'trialing';
-          },
-          orElse: () => <String, dynamic>{},
-        );
+      final active = firstActiveSubscriptionRow(data.whereType<Map>());
 
-    if (active.isEmpty) {
-      _petsIncludedLimit = null;
-      return;
-    }
+      if (active == null) {
+        _petsIncludedLimit = null;
+        return;
+      }
 
       final explicitIncluded = _toInt(active['pets_included']);
       final plan = active['plan'];

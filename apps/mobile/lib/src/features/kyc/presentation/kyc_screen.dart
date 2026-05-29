@@ -6,6 +6,7 @@ import 'package:country_picker/country_picker.dart';
 import 'package:country_picker/src/country_list_view.dart';
 import 'package:cav_mobile/src/core/navigation/post_login_routing_controller.dart';
 import 'package:cav_mobile/src/core/config/environment.dart';
+import 'package:cav_mobile/src/features/subscriptions/data/subscription_status.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:flutter/material.dart';
@@ -778,10 +779,7 @@ class _KycScreenState extends State<KycScreen> {
         return false;
       }
 
-      final hasActive = data.whereType<Map>().any((row) {
-        final status = (row['status']?.toString() ?? '').toLowerCase();
-        return status == 'active' || status == 'trialing';
-      });
+      final hasActive = data.whereType<Map>().any(isSubscriptionActiveNow);
       _kycFlowLog('Active subscription check via gateway: hasActive=$hasActive');
       return hasActive;
     } catch (err) {

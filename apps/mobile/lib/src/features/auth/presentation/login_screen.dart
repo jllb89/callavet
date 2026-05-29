@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:country_picker/country_picker.dart';
 import 'package:cav_mobile/src/core/config/environment.dart';
 import 'package:cav_mobile/src/core/navigation/post_login_routing_controller.dart';
+import 'package:cav_mobile/src/features/subscriptions/data/subscription_status.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_libphonenumber/flutter_libphonenumber.dart';
@@ -308,10 +309,7 @@ class _LoginScreenState extends State<LoginScreen> {
         return false;
       }
 
-      final hasActive = data.whereType<Map>().any((row) {
-        final status = (row['status']?.toString() ?? '').toLowerCase();
-        return status == 'active' || status == 'trialing';
-      });
+      final hasActive = data.whereType<Map>().any(isSubscriptionActiveNow);
       _loginLog('Active subscription check via gateway: hasActive=$hasActive');
       return hasActive;
     } catch (err) {

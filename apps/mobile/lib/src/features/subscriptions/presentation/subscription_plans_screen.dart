@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:ui';
 
 import 'package:cav_mobile/src/core/config/environment.dart';
+import 'package:cav_mobile/src/features/subscriptions/data/subscription_status.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
@@ -880,36 +881,22 @@ class _SubscriptionPlansRepository {
       return const _ActiveSubscriptionCheck();
     }
 
-    final rows = data.whereType<Map>().map((row) {
-      final map = Map<String, dynamic>.from(row);
-      final plan = map['plan'];
-      final planCode = plan is Map ? plan['code']?.toString() : null;
-      return _ActiveSubscriptionCheck(
-        hasActive: false,
-        subscriptionId: map['id']?.toString(),
-        status: map['status']?.toString(),
-        planCode: planCode,
-      );
-    }).toList();
-
-    final active = rows.firstWhere(
-      (row) =>
-          (row.status ?? '').toLowerCase() == 'active' ||
-          (row.status ?? '').toLowerCase() == 'trialing',
-      orElse: () => const _ActiveSubscriptionCheck(),
-    );
+    final rows = data.whereType<Map>().map((row) => Map<String, dynamic>.from(row)).toList();
+    final active = firstActiveSubscriptionRow(rows);
+    final plan = active?['plan'];
+    final planCode = plan is Map ? plan['code']?.toString() : null;
 
     _subscriptionLog(
       'Active subscription check result. total=${rows.length} '
-      'hasActive=${active.status != null} status=${active.status} plan=${active.planCode}',
+      'hasActive=${active != null} status=${active?['status']} plan=$planCode',
     );
 
-    if (active.status != null) {
+    if (active != null) {
       return _ActiveSubscriptionCheck(
         hasActive: true,
-        subscriptionId: active.subscriptionId,
-        status: active.status,
-        planCode: active.planCode,
+        subscriptionId: active['id']?.toString(),
+        status: active['status']?.toString(),
+        planCode: planCode,
       );
     }
 
