@@ -74,6 +74,11 @@ type AiChatTurnContext = {
   recentConversations: any[];
 };
 
+type AiChatTurnState = {
+  urgentIntakeAlreadyAsked: boolean;
+  afterUrgentIntakeAnswer: boolean;
+};
+
 type PromptVersion = {
   id: string;
   prompt_key: string;
@@ -464,7 +469,7 @@ export class AiService {
       {
         type: 'function',
         name: 'find_vets',
-        description: 'Find approved vets that cover a selected specialty. Use only after a specialty is known.',
+        description: 'Find approved vets that cover a selected active specialty, including current load and next available scheduled-video slot. Use after a specialty is known and before presenting service options.',
         strict: true,
         parameters: {
           type: 'object',
@@ -665,7 +670,7 @@ export class AiService {
     });
   }
 
-  private chatTurnInstructions(context: AiChatTurnContext) {
+  private chatTurnInstructions(context: AiChatTurnContext, state: AiChatTurnState) {
     return [
       'You are Call a Vet AI concierge for equine veterinary care.',
       'Reply in Spanish unless the user clearly uses another language.',
@@ -677,6 +682,9 @@ export class AiService {
       'For recommend_specialty petId, pass only an exact pet id from Server context. If unsure, pass null; missing or uncertain petId must not block intake.',
       'If the case may be urgent or emergency, especially appetite refusal for 24+ hours, colic signs, severe pain, fever, dehydration, respiratory distress, bleeding, or inability to stand, ask 2-3 concrete triage questions immediately. These questions must help determine urgency and create a useful handoff summary for the veterinarian.',
       'For urgent intake, do not lead with service-choice buttons or summary drafting. First ask the triage questions, then explain that the answers will help route to the right veterinarian faster.',
+      'Ask the urgent triage question set only once. If the user has already answered those first urgent intake questions, do not ask another triage set or another generic follow-up.',
+      'After the user answers the first urgent intake questions, decide the specialty, urgency, and service type from the available information. Then use tools to route: recommend_specialty, find_vets for that specialty, check_service_access for the recommended service, and get_available_slots only if scheduled_video is the best next step.',
+      'After urgent intake answers, present the next action as chat, immediate video, or scheduled video. If red flags remain, bias toward immediate video/local emergency care; if stable but needs review, choose chat or scheduled video based on service access and availability.',
       'Before recommending a service, gather the minimum missing context for a useful vet handoff: affected horse, main concern, onset/duration, severity, appetite/water, relevant history/medications, and red flags. Ask at most one concise follow-up at a time.',
       'Do not immediately ask the user to choose a product. Decide whether chat, immediate video, or scheduled video is best based on urgency, symptoms, context, and entitlement signals; then explain the recommendation briefly.',
       'Prepare the conversation so a later veterinarian handoff can include a concise contextualization, not a diagnosis.',
@@ -685,6 +693,7 @@ export class AiService {
       'Before recommending chat or video activation, call check_service_access for the relevant service type.',
       'Keep final responses short, warm, and action-oriented. If context is insufficient, ask a targeted question instead of showing all service choices.',
       `Server context: ${JSON.stringify(context)}`,
+      `Conversation state: ${JSON.stringify(state)}`,
     ].join('\n');
   }
 
@@ -701,6 +710,15 @@ export class AiService {
     const currentMessage = String(input.message || '').trim();
     if (currentMessage) normalized.push({ role: 'user', content: currentMessage });
     return normalized.slice(-12);
+  }
+
+  private chatTurnState(messages: Array<{ role: 'user' | 'assistant'; content: string }>): AiChatTurnState {
+    const priorMessages = messages.slice(0, -1);
+    const latestPriorAssistant = [...priorMessages].reverse().find((message) => message.role === 'assistant')?.content || '';
+    const urgentIntakeAlreadyAsked = /dolor abdominal|flancos|hecho heces|encías pálidas|respiración agitada|responder preguntas de urgencia|valorar urgencia/i.test(latestPriorAssistant)
+      || priorMessages.some((message) => message.role === 'assistant' && /dolor abdominal|hecho heces|encías pálidas|responder preguntas de urgencia/i.test(message.content));
+    const afterUrgentIntakeAnswer = urgentIntakeAlreadyAsked && messages[messages.length - 1]?.role === 'user';
+    return { urgentIntakeAlreadyAsked, afterUrgentIntakeAnswer };
   }
 
   private parseToolArguments(raw: string) {
@@ -814,7 +832,8 @@ export class AiService {
     ];
   }
 
-  private shouldAskUrgentIntake(payload: any, latestMessage: string) {
+  private shouldAskUrgentIntake(payload: any, latestMessage: string, state: AiChatTurnState) {
+    if (state.urgentIntakeAlreadyAsked) return false;
     const text = latestMessage.toLowerCase();
     return payload?.urgency === 'urgent'
       || payload?.urgency === 'emergency'
@@ -822,10 +841,10 @@ export class AiService {
       || /no quiere comer|no come|dej[oó] de comer|apetito|desde antier|desde ayer|colic|cólico|dolor|fiebre|no se levanta|respira/.test(text);
   }
 
-  private normalizeChatTurnPayload(payload: any, context: AiChatTurnContext, latestMessage: string) {
+  private normalizeChatTurnPayload(payload: any, context: AiChatTurnContext, latestMessage: string, state: AiChatTurnState) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload;
     const normalized = { ...payload };
-    const urgentIntake = this.shouldAskUrgentIntake(normalized, latestMessage);
+    const urgentIntake = this.shouldAskUrgentIntake(normalized, latestMessage, state);
     const existingQuestions = Array.isArray(normalized.intakeQuestions)
       ? normalized.intakeQuestions.map((question: any) => String(question || '').trim()).filter(Boolean).slice(0, 3)
       : [];
@@ -847,6 +866,11 @@ export class AiService {
       if (!normalized.actionLabel || /resumen/i.test(String(normalized.actionLabel))) {
         normalized.actionLabel = 'Responder preguntas de urgencia';
       }
+    } else if (state.afterUrgentIntakeAnswer) {
+      normalized.intakeQuestions = [];
+      if (!normalized.recommendedService && !normalized.actionLabel) {
+        normalized.actionLabel = 'Ver opciones de atención';
+      }
     }
     return normalized;
   }
@@ -860,6 +884,8 @@ export class AiService {
               v.bio,
               v.years_experience,
               coalesce(v.languages, '{}'::text[]) as languages,
+              av.next_available_at,
+              coalesce(av.available_slots_next_7d, 0)::int as available_slots_next_7d,
               coalesce(avg(r.score)::numeric(10,2), 0) as rating_average,
               count(r.id)::int as rating_count,
               (select count(*)::int
@@ -869,10 +895,52 @@ export class AiService {
          from vets v
          join users u on u.id = v.id
          left join ratings r on r.vet_id = v.id
+    left join lateral (
+              with params as (
+                select now() as since,
+                       now() + interval '7 days' as until,
+                       30::int as dur
+              ),
+              days as (
+                select generate_series(date_trunc('day', (select since from params)), date_trunc('day', (select until from params)), interval '1 day')::date as day
+              ),
+              avail as (
+                select d.day,
+                       va.start_time as start_t,
+                       va.end_time as end_t
+                  from days d
+                  join vet_availability va on va.weekday = extract(dow from d.day) and va.vet_id = v.id
+              ),
+              ranges as (
+                select make_timestamptz(extract(year from a.day)::int, extract(month from a.day)::int, extract(day from a.day)::int, extract(hour from a.start_t)::int, extract(minute from a.start_t)::int, 0) as start_at,
+                       make_timestamptz(extract(year from a.day)::int, extract(month from a.day)::int, extract(day from a.day)::int, extract(hour from a.end_t)::int, extract(minute from a.end_t)::int, 0) as end_at
+                  from avail a
+              ),
+              slots as (
+                select gs as slot_start, gs + make_interval(mins => (select dur from params)) as slot_end
+                  from ranges r,
+                       generate_series(r.start_at, r.end_at - make_interval(mins => (select dur from params)), make_interval(mins => (select dur from params))) as gs
+              ),
+              booked as (
+                select tstzrange(starts_at, ends_at) as appt_range
+                  from appointments
+                 where vet_id = v.id
+                   and status = any(array['scheduled','active','confirmed']::text[])
+              )
+              select min(s.slot_start) as next_available_at,
+                     count(*)::int as available_slots_next_7d
+                from slots s
+               where s.slot_start >= (select since from params)
+                 and s.slot_end <= (select until from params)
+                 and not exists (select 1 from booked b where tstzrange(s.slot_start, s.slot_end) && b.appt_range)
+            ) av on true
         where v.is_approved = true
-          and ($1::uuid is null or array_position(v.specialties, $1::uuid) is not null)
-        group by v.id, u.full_name, v.bio, v.years_experience, v.languages
-        order by active_consults asc, count(r.id) desc, coalesce(avg(r.score), 0) desc, u.full_name asc
+          and ($1::uuid is null or (
+            array_position(v.specialties, $1::uuid) is not null
+            and exists (select 1 from vet_specialties vs where vs.id = $1::uuid and coalesce(vs.is_active, true))
+          ))
+        group by v.id, u.full_name, v.bio, v.years_experience, v.languages, av.next_available_at, av.available_slots_next_7d
+        order by active_consults asc, (av.next_available_at is null) asc, av.next_available_at asc, count(r.id) desc, coalesce(avg(r.score), 0) desc, u.full_name asc
         limit $2`,
       [specialtyId, limit]
     );
@@ -1028,6 +1096,7 @@ export class AiService {
     const cfg = this.providerConfig(undefined, !!input.dryRun);
     const messages = this.normalizeChatMessages(input);
     const latestMessage = messages[messages.length - 1]?.content || '';
+    const state = this.chatTurnState(messages);
     if (input.dryRun) return this.chatTurnDryRun(context, latestMessage);
     if (!cfg.apiKey) throw new ServiceUnavailableException('ai_provider_not_configured');
     if (cfg.apiMode !== 'responses') throw new ServiceUnavailableException('ai_chat_turn_requires_responses_api');
@@ -1038,14 +1107,17 @@ export class AiService {
     const tools = this.chatTurnTools();
 
     for (let step = 0; step < 6; step += 1) {
+      const hasSpecialty = toolResults.some((result) => result.name === 'recommend_specialty');
+      const hasVets = toolResults.some((result) => result.name === 'find_vets');
+      const needsRoutingTools = state.afterUrgentIntakeAnswer && (!hasSpecialty || !hasVets);
       const body: Record<string, any> = {
         model: cfg.model,
         store: false,
-        instructions: this.chatTurnInstructions(context),
+        instructions: this.chatTurnInstructions(context, state),
         input: responseInput,
         tools,
         text: { format: this.chatTurnResponseFormat() },
-        tool_choice: 'auto',
+        tool_choice: needsRoutingTools ? 'required' : 'auto',
         parallel_tool_calls: false,
       };
       if (cfg.reasoningEffort) body.reasoning = { effort: cfg.reasoningEffort };
@@ -1054,7 +1126,7 @@ export class AiService {
       const toolCalls = output.filter((item: any): item is AiChatToolCall => item?.type === 'function_call');
 
       if (!toolCalls.length) {
-        const payload = this.normalizeChatTurnPayload(this.parseProviderPayload(this.extractResponsesText(data)), context, latestMessage);
+        const payload = this.normalizeChatTurnPayload(this.parseProviderPayload(this.extractResponsesText(data)), context, latestMessage, state);
         return { ok: true, provider: cfg.provider, model: cfg.model, responseId: data?.id || null, payload, toolResults, context };
       }
 

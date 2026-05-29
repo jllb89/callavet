@@ -46,7 +46,7 @@ Responsibilities:
 
 Initial tools:
 - `recommend_specialty`: Map symptoms/context to an existing `vet_specialties` row.
-- `find_vets`: Find approved vets matching a specialty, ordered by approval/rating/load.
+- `find_vets`: Find approved vets matching an active specialty, ordered by load and next availability, with next-slot metadata.
 - `check_service_access`: Preflight whether a chat/video action can be enabled for the current user.
 - `get_available_slots`: Fetch availability slots for a selected vet.
 
@@ -115,7 +115,10 @@ Needed behavior:
 - Completed: inline chat margins are wider and the composer spans the available width while growing up to six lines.
 - Completed: specialty routing now deduplicates DB specialty names, respects active/inactive specialties, falls back to Medicina general equina when needed, and boosts equine symptom matches such as appetite/colic toward gastro/internal/urgent care instead of unrelated specialties.
 - Completed: urgent AI intake now requires 2-3 veterinarian-handoff questions for appetite refusal, colic-like signs, fever, severe pain, respiratory distress, bleeding, or inability to stand; the gateway appends the questions if the model omits them.
+- Completed: urgent intake questions are now one-shot; after the user answers them, the gateway tells the model to stop asking follow-ups and requires routing tools before presenting chat/video/scheduled-video next steps.
 - Completed: `0053_vet_specialty_hygiene.sql` deduplicates legacy randomized specialty seeds, preserves vet/referral references, adds `is_active` and `sort_order`, adds a normalized unique index, and seeds an active Spanish equine specialty catalog with stable IDs.
+- Completed: `find_vets` now returns `next_available_at` and `available_slots_next_7d` so AI routing can confirm matching vets have scheduled-video availability before presenting options.
+- Completed: staging dev user `dev.callavet@gmail.com` is an approved vet profile covering all 12 active specialties with a 7-day availability template for routing tests.
 - Completed: embedded mobile chat no longer pins the greeting/question above the thread; `¿Cómo podemos asistirte hoy?` scrolls with the conversation, and bubbles keep the wider margins with a fixed maximum width.
 - Deferred to points 4 and 5: service activation navigation, realtime human chat transport, immediate video, scheduling, and payment-required checkout UX.
 
@@ -123,6 +126,7 @@ Validation completed:
 - `pnpm run build` in `services/gateway-api` passes after the Responses API loop fix.
 - `pnpm run build` in `services/gateway-api` passes after the richer AI chat context loader.
 - `pnpm run build` in `services/gateway-api` passes after the specialty matcher guardrail.
+- `pnpm run build` in `services/gateway-api` passes after adding availability metadata to `find_vets`.
 - `git diff --check` passes for the specialty matcher and specialty hygiene migrations.
 - `flutter analyze lib/src/features/chat/presentation/chat_screen.dart` passes.
 - `flutter analyze lib/src/features/chat/presentation/chat_screen.dart lib/src/features/home/presentation/home_v2_screen.dart` passes after the embedded header and bubble max-width polish.
