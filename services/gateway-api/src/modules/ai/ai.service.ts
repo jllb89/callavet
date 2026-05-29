@@ -431,13 +431,14 @@ export class AiService {
       schema: {
         type: 'object',
         additionalProperties: false,
-        required: ['message', 'urgency', 'recommendedService', 'actionLabel', 'safetyEscalation'],
+        required: ['message', 'urgency', 'recommendedService', 'actionLabel', 'safetyEscalation', 'intakeQuestions'],
         properties: {
           message: { type: 'string' },
           urgency: { type: 'string', enum: ['routine', 'urgent', 'emergency'] },
           recommendedService: { type: ['string', 'null'], enum: ['chat', 'video', 'scheduled_video', null] },
           actionLabel: { type: ['string', 'null'] },
           safetyEscalation: { type: 'boolean' },
+          intakeQuestions: { type: 'array', items: { type: 'string' }, minItems: 0, maxItems: 3 },
         },
       },
     };
@@ -674,6 +675,8 @@ export class AiService {
       'Use the provided user, horse, subscription, and recent conversation context to personalize naturally. Do not expose raw internal IDs unless needed for tool calls.',
       'If the user has more than one horse and no specific pet is clear, ask which horse this is for before non-emergency service activation.',
       'For recommend_specialty petId, pass only an exact pet id from Server context. If unsure, pass null; missing or uncertain petId must not block intake.',
+      'If the case may be urgent or emergency, especially appetite refusal for 24+ hours, colic signs, severe pain, fever, dehydration, respiratory distress, bleeding, or inability to stand, ask 2-3 concrete triage questions immediately. These questions must help determine urgency and create a useful handoff summary for the veterinarian.',
+      'For urgent intake, do not lead with service-choice buttons or summary drafting. First ask the triage questions, then explain that the answers will help route to the right veterinarian faster.',
       'Before recommending a service, gather the minimum missing context for a useful vet handoff: affected horse, main concern, onset/duration, severity, appetite/water, relevant history/medications, and red flags. Ask at most one concise follow-up at a time.',
       'Do not immediately ask the user to choose a product. Decide whether chat, immediate video, or scheduled video is best based on urgency, symptoms, context, and entitlement signals; then explain the recommendation briefly.',
       'Prepare the conversation so a later veterinarian handoff can include a concise contextualization, not a diagnosis.',
@@ -741,14 +744,16 @@ export class AiService {
       if (!rows[0]) selectedPetId = null;
     }
     const { rows } = await this.db.query<any>(
-      `select distinct on (lower(btrim(name))) id, name, description, coalesce(is_active, true) as is_active
+      `select distinct on (lower(btrim(name))) id, name, description, coalesce(is_active, true) as is_active, sort_order
          from vet_specialties
         where nullif(btrim(name), '') is not null
         order by lower(btrim(name)), coalesce(is_active, true) desc, length(coalesce(description, '')) desc, id asc`
     );
     const haystack = symptoms.toLowerCase();
+    const appetiteConcern = /no quiere comer|no come|dej[oó] de comer|apetito|anorex|desde antier|desde ayer|colic|cólico|diarrea/.test(haystack);
+    const emergencyConcern = /no se levanta|respira|sangre|sangrado|dolor fuerte|suda|rueda|se echa|emergencia|urgente/.test(haystack);
     const boostedTerms = [
-      { terms: ['no quiere comer', 'no come', 'dejo de comer', 'dejó de comer', 'apetito', 'colico', 'cólico', 'diarrea', 'gastro'], targets: ['gastro', 'interna', 'internal', 'general', 'urgenc', 'critical', 'crítico'] },
+      { terms: ['no quiere comer', 'no come', 'dejo de comer', 'dejó de comer', 'apetito', 'colico', 'cólico', 'diarrea', 'gastro'], targets: ['gastro', 'interna', 'internal', 'urgenc', 'critical', 'crítico'] },
       { terms: ['cojea', 'cojera', 'lameness', 'renguera', 'pata', 'tendon', 'tendón', 'articular'], targets: ['cojera', 'ortopedia', 'lameness', 'orthopedic', 'deportiva', 'rehabilit'] },
       { terms: ['piel', 'dermat', 'alergia', 'comezon', 'comezón', 'picazón', 'rash', 'herida superficial'], targets: ['dermat', 'piel'] },
       { terms: ['ojo', 'vision', 'visión', 'lagrimeo', 'cornea', 'córnea'], targets: ['oftal', 'ophthalm', 'ojo'] },
@@ -769,9 +774,15 @@ export class AiService {
         const specialtyMatches = group.targets.some((target) => name.includes(target) || description.includes(target));
         return sum + (symptomMatches && specialtyMatches ? 4 : 0);
       }, 0);
-      const score = baseScore + boost;
+      const clinicalBoost = (appetiteConcern && name.includes('gastro')) ? 10
+        : (appetiteConcern && (name.includes('urgenc') || description.includes('cólico'))) ? 8
+          : (appetiteConcern && name.includes('interna')) ? 6
+            : (emergencyConcern && (name.includes('urgenc') || description.includes('estabilización'))) ? 10
+              : (appetiteConcern && name.includes('medicina general')) ? 1
+                : 0;
+      const score = baseScore + boost + clinicalBoost;
       return { specialty, score };
-    }).sort((left, right) => right.score - left.score);
+    }).sort((left, right) => right.score - left.score || Number(left.specialty.sort_order || 100) - Number(right.specialty.sort_order || 100));
     const generalFallback = scored.find((item) => {
       const name = String(item.specialty?.name || '').toLowerCase();
       return isActiveSpecialty(item.specialty) && (name.includes('medicina general') || name.includes('general practice'));
@@ -790,6 +801,54 @@ export class AiService {
       petId: selectedPetId,
       ignoredPetId: ignoredPetId ? true : undefined,
     };
+  }
+
+  private urgentIntakeQuestions(context: AiChatTurnContext) {
+    const petName = context.pets.length === 1 && context.pets[0]?.name
+      ? String(context.pets[0].name)
+      : 'tu caballo';
+    return [
+      `¿${petName} muestra dolor abdominal: se mira los flancos, patea el suelo, se echa/rueda, suda o está inquieto?`,
+      `¿Ha tomado agua y ha hecho heces desde que dejó de comer?`,
+      `¿Tiene fiebre, encías pálidas, respiración agitada o está muy decaído?`,
+    ];
+  }
+
+  private shouldAskUrgentIntake(payload: any, latestMessage: string) {
+    const text = latestMessage.toLowerCase();
+    return payload?.urgency === 'urgent'
+      || payload?.urgency === 'emergency'
+      || payload?.safetyEscalation === true
+      || /no quiere comer|no come|dej[oó] de comer|apetito|desde antier|desde ayer|colic|cólico|dolor|fiebre|no se levanta|respira/.test(text);
+  }
+
+  private normalizeChatTurnPayload(payload: any, context: AiChatTurnContext, latestMessage: string) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload;
+    const normalized = { ...payload };
+    const urgentIntake = this.shouldAskUrgentIntake(normalized, latestMessage);
+    const existingQuestions = Array.isArray(normalized.intakeQuestions)
+      ? normalized.intakeQuestions.map((question: any) => String(question || '').trim()).filter(Boolean).slice(0, 3)
+      : [];
+    const questions: string[] = urgentIntake && existingQuestions.length < 2
+      ? this.urgentIntakeQuestions(context)
+      : existingQuestions;
+
+    normalized.intakeQuestions = questions;
+    if (urgentIntake) {
+      const message = String(normalized.message || '').trim();
+      const questionCount = (message.match(/\?/g) || []).length;
+      if (questionCount < 2 && questions.length >= 2) {
+        normalized.message = [
+          message || 'Esto puede requerir valoración veterinaria hoy.',
+          'Para valorar urgencia y dejarle buen contexto al veterinario, respóndeme rápido:',
+          ...questions.map((question: string, index: number) => `${index + 1}. ${question}`),
+        ].join('\n\n');
+      }
+      if (!normalized.actionLabel || /resumen/i.test(String(normalized.actionLabel))) {
+        normalized.actionLabel = 'Responder preguntas de urgencia';
+      }
+    }
+    return normalized;
   }
 
   private async findVetsTool(args: Record<string, any>) {
@@ -995,7 +1054,7 @@ export class AiService {
       const toolCalls = output.filter((item: any): item is AiChatToolCall => item?.type === 'function_call');
 
       if (!toolCalls.length) {
-        const payload = this.parseProviderPayload(this.extractResponsesText(data));
+        const payload = this.normalizeChatTurnPayload(this.parseProviderPayload(this.extractResponsesText(data)), context, latestMessage);
         return { ok: true, provider: cfg.provider, model: cfg.model, responseId: data?.id || null, payload, toolResults, context };
       }
 

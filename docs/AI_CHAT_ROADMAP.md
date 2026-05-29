@@ -114,6 +114,7 @@ Needed behavior:
 - Completed: prompt behavior asks for the affected horse and minimum handoff context before recommending a service when the case is not an emergency.
 - Completed: inline chat margins are wider and the composer spans the available width while growing up to six lines.
 - Completed: specialty routing now deduplicates DB specialty names, respects active/inactive specialties, falls back to Medicina general equina when needed, and boosts equine symptom matches such as appetite/colic toward gastro/internal/urgent care instead of unrelated specialties.
+- Completed: urgent AI intake now requires 2-3 veterinarian-handoff questions for appetite refusal, colic-like signs, fever, severe pain, respiratory distress, bleeding, or inability to stand; the gateway appends the questions if the model omits them.
 - Completed: `0053_vet_specialty_hygiene.sql` deduplicates legacy randomized specialty seeds, preserves vet/referral references, adds `is_active` and `sort_order`, adds a normalized unique index, and seeds an active Spanish equine specialty catalog with stable IDs.
 - Completed: embedded mobile chat no longer pins the greeting/question above the thread; `¿Cómo podemos asistirte hoy?` scrolls with the conversation, and bubbles keep the wider margins with a fixed maximum width.
 - Deferred to points 4 and 5: service activation navigation, realtime human chat transport, immediate video, scheduling, and payment-required checkout UX.
