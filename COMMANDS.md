@@ -43,6 +43,6 @@ cd /Users/jorge/Desktop/call-a-vet/apps/mobile && flutter run \
 #   --dart-define=CAV_AI_CHAT_DRY_RUN=true  -> sends dryRun=true to /ai/chat/turn for a deterministic bot smoke response
 #   --dart-define=CAV_AI_CHAT_DRY_RUN=false -> uses the gateway's configured AI provider
 # AI chat log tags to watch:
-#   [AIChat][Home]        home composer and /chat route launch
-#   [PostLogin][Routing]  router handoff into ChatScreen
+#   [AIChat][Home]        home composer and inline chat state changes
+#   [PostLogin][Routing]  auth/profile routing into home
 #   [AIChat][Mobile]      auth snapshot, request, response, parsing, UI state

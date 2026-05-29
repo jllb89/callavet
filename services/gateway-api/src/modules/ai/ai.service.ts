@@ -776,6 +776,15 @@ export class AiService {
     };
   }
 
+  private chatTurnFunctionCallInput(call: AiChatToolCall) {
+    return {
+      type: 'function_call',
+      call_id: call.call_id,
+      name: call.name,
+      arguments: typeof call.arguments === 'string' ? call.arguments : JSON.stringify(call.arguments || {}),
+    };
+  }
+
   private async callChatTurnProvider(input: AiChatTurnInput, context: AiChatTurnContext) {
     const cfg = this.providerConfig(undefined, !!input.dryRun);
     const messages = this.normalizeChatMessages(input);
@@ -804,7 +813,6 @@ export class AiService {
       const data = await this.postProviderJson(cfg, '/responses', body, 'ai_chat_provider_http');
       const output = Array.isArray(data?.output) ? data.output : [];
       const toolCalls = output.filter((item: any): item is AiChatToolCall => item?.type === 'function_call');
-      responseInput.push(...output);
 
       if (!toolCalls.length) {
         const payload = this.parseProviderPayload(this.extractResponsesText(data));
@@ -812,6 +820,7 @@ export class AiService {
       }
 
       for (const toolCall of toolCalls) {
+        responseInput.push(this.chatTurnFunctionCallInput(toolCall));
         const result = await this.executeChatTool(toolCall, context);
         toolResults.push({ name: toolCall.name, output: result });
         responseInput.push({

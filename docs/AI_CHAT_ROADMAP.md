@@ -105,13 +105,15 @@ Replace the placeholder chat screen with a real chat experience.
 
 Needed behavior:
 - Completed: composer, bubbles, loading/typing state, routing chips, and service action cards.
-- Completed: home AI prompt opens the chat route and sends the first user turn automatically.
+- Completed: home AI prompt opens an inline chat conversation state and sends the first user turn automatically without leaving home.
 - Completed: user input posts to `POST /ai/chat/turn` with Supabase bearer auth before a human session exists.
 - Completed: prior chat turns are included as bounded UI-side history.
 - Completed: AI response payload renders assistant text, urgency, recommended service, action label, specialty, vet, and remaining entitlement hints when returned by tools.
+- Completed: gateway Responses API tool loop strips non-persisted response item IDs before replaying function calls with `store: false`.
 - Deferred to points 4 and 5: service activation navigation, realtime human chat transport, immediate video, scheduling, and payment-required checkout UX.
 
 Validation completed:
+- `pnpm run build` in `services/gateway-api` passes after the Responses API loop fix.
 - `flutter analyze lib/src/features/chat/presentation/chat_screen.dart` passes.
 - `flutter analyze lib/src/features/chat/presentation/chat_screen.dart lib/src/features/home/presentation/home_v2_screen.dart lib/src/core/router/app_router.dart` passes.
 
@@ -119,8 +121,8 @@ Mobile test setup:
 - Run the Flutter app with valid `SUPABASE_URL` and `SUPABASE_ANON_KEY` dart-defines so the user can authenticate and the gateway receives a Supabase bearer token.
 - Use the default `API_BASE_URL=https://staging.call-a-vet.app` or override it with `--dart-define=API_BASE_URL=<gateway-url>`.
 - For a gateway/provider smoke test without OpenAI, run the app with `--dart-define=CAV_AI_CHAT_DRY_RUN=true`; the mobile client sends `dryRun: true` to `/ai/chat/turn`.
-- From home, tap the AI composer, type a message, and send. The app routes to `/chat/ai?message=...`, auto-sends the first turn, and renders the AI response inside the existing chat screen.
-- Watch Flutter logs tagged `[AIChat][Home]`, `[PostLogin][Routing]`, and `[AIChat][Mobile]` for route handoff, auth/token presence, request body summary, response status/body preview, parsed tool hints, and UI state changes.
+- From home, tap the AI composer, type a message, and send. The app stays on home, switches into the inline AI conversation state, auto-sends the first turn, and renders the AI response in the same surface.
+- Watch Flutter logs tagged `[AIChat][Home]` and `[AIChat][Mobile]` for inline state entry, auth/token presence, request body summary, response status/body preview, parsed tool hints, and UI state changes. `[PostLogin][Routing]` still covers auth/profile routing into home.
 
 ### 4. Mobile Realtime Human Chat
 

@@ -3,7 +3,9 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-enum _HomeAiPhase { home, fadingOut, prompt }
+import '../../chat/presentation/chat_screen.dart';
+
+enum _HomeAiPhase { home, fadingOut, prompt, conversation }
 
 void _homeAiLog(String message) {
   debugPrint('[AIChat][Home] $message');
@@ -20,6 +22,8 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
   final _messageCtrl = TextEditingController();
   final _messageFocusNode = FocusNode();
   String _firstName = '';
+  String? _conversationInitialMessage;
+  int _conversationKey = 0;
   _HomeAiPhase _aiPhase = _HomeAiPhase.home;
 
   @override
@@ -90,7 +94,10 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
   void _exitAiMode() {
     _homeAiLog('exitAiMode from phase=$_aiPhase');
     _messageFocusNode.unfocus();
-    setState(() => _aiPhase = _HomeAiPhase.home);
+    setState(() {
+      _aiPhase = _HomeAiPhase.home;
+      _conversationInitialMessage = null;
+    });
   }
 
   void _useSuggestion(String text) {
@@ -109,9 +116,13 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
       return;
     }
     _messageFocusNode.unfocus();
-    final route = '/chat/ai?message=${Uri.encodeQueryComponent(text)}';
-    _homeAiLog('routing to /chat/ai with encodedMessageLength=${Uri.encodeQueryComponent(text).length}');
-    context.go(route);
+    _messageCtrl.clear();
+    setState(() {
+      _conversationInitialMessage = text;
+      _conversationKey += 1;
+      _aiPhase = _HomeAiPhase.conversation;
+    });
+    _homeAiLog('opened inline AI conversation key=$_conversationKey initialMessageLength=${text.length}');
   }
 
   @override
@@ -119,6 +130,8 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
     final bottomInset = MediaQuery.of(context).padding.bottom;
     final displayName = _firstName.isEmpty ? 'Jorge' : _firstName;
     final isPrompt = _aiPhase == _HomeAiPhase.prompt;
+    final isConversation = _aiPhase == _HomeAiPhase.conversation;
+    final isAiActive = isPrompt || isConversation;
 
     return Scaffold(
       body: DecoratedBox(
@@ -142,7 +155,7 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
                 AnimatedContainer(
                   duration: const Duration(milliseconds: 560),
                   curve: Curves.easeOutCubic,
-                  height: isPrompt ? 24 : 96,
+                  height: isAiActive ? 24 : 96,
                 ),
                 Text(
                   '¡Hola, $displayName!',
@@ -169,17 +182,25 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
                 ),
                 const SizedBox(height: 34),
                 Expanded(
-                  child: isPrompt
-                      ? _AiSuggestionList(onSelected: _useSuggestion)
-                      : _HomeDefaultSection(visible: _aiPhase == _HomeAiPhase.home),
+                  child: isConversation
+                      ? ChatScreen(
+                          key: ValueKey('home-ai-$_conversationKey'),
+                          sessionId: 'ai',
+                          initialMessage: _conversationInitialMessage,
+                          embedded: true,
+                        )
+                      : isPrompt
+                          ? _AiSuggestionList(onSelected: _useSuggestion)
+                          : _HomeDefaultSection(visible: _aiPhase == _HomeAiPhase.home),
                 ),
-                _MessageComposer(
-                  controller: _messageCtrl,
-                  focusNode: _messageFocusNode,
-                  isPrompt: isPrompt,
-                  onTap: _enterAiMode,
-                  onSend: _openAiChat,
-                ),
+                if (!isConversation)
+                  _MessageComposer(
+                    controller: _messageCtrl,
+                    focusNode: _messageFocusNode,
+                    isPrompt: isPrompt,
+                    onTap: _enterAiMode,
+                    onSend: _openAiChat,
+                  ),
               ],
             ),
           ),
@@ -201,7 +222,7 @@ class _HomeTopBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final showHomeChrome = phase == _HomeAiPhase.home;
-    final showBack = phase == _HomeAiPhase.prompt;
+    final showBack = phase == _HomeAiPhase.prompt || phase == _HomeAiPhase.conversation;
 
     return SizedBox(
       height: 42,

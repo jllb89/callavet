@@ -21,10 +21,16 @@ String _preview(String? value, {int max = 180}) {
 }
 
 class ChatScreen extends StatefulWidget {
-  const ChatScreen({super.key, required this.sessionId, this.initialMessage});
+  const ChatScreen({
+    super.key,
+    required this.sessionId,
+    this.initialMessage,
+    this.embedded = false,
+  });
 
   final String sessionId;
   final String? initialMessage;
+  final bool embedded;
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -256,6 +262,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final thread = _buildThread(context);
+    if (widget.embedded) return thread;
+
     return Scaffold(
       resizeToAvoidBottomInset: true,
       body: DecoratedBox(
@@ -267,37 +276,42 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         ),
         child: SafeArea(
-          child: Column(
-            children: [
-              _ChatHeader(onBack: () => context.go('/home')),
-              Expanded(
-                child: ListView.builder(
-                  controller: _scrollController,
-                  padding: const EdgeInsets.fromLTRB(22, 18, 22, 20),
-                  itemCount: _messages.length + (_isSending ? 1 : 0),
-                  itemBuilder: (context, index) {
-                    if (_isSending && index == _messages.length) {
-                      return const _TypingBubble();
-                    }
-                    final message = _messages[index];
-                    return _MessageBubble(
-                      message: message,
-                      sending: _isSending,
-                      onQuickReply: _sendQuickReply,
-                    );
-                  },
-                ),
-              ),
-              _ChatComposer(
-                controller: _inputCtrl,
-                focusNode: _focusNode,
-                sending: _isSending,
-                onSend: _sendComposerMessage,
-              ),
-            ],
-          ),
+          child: thread,
         ),
       ),
+    );
+  }
+
+  Widget _buildThread(BuildContext context) {
+    return Column(
+      children: [
+        if (!widget.embedded) _ChatHeader(onBack: () => context.go('/home')),
+        Expanded(
+          child: ListView.builder(
+            controller: _scrollController,
+            padding: EdgeInsets.fromLTRB(22, widget.embedded ? 10 : 18, 22, 20),
+            itemCount: _messages.length + (_isSending ? 1 : 0),
+            itemBuilder: (context, index) {
+              if (_isSending && index == _messages.length) {
+                return const _TypingBubble();
+              }
+              final message = _messages[index];
+              return _MessageBubble(
+                message: message,
+                sending: _isSending,
+                onQuickReply: _sendQuickReply,
+              );
+            },
+          ),
+        ),
+        _ChatComposer(
+          controller: _inputCtrl,
+          focusNode: _focusNode,
+          sending: _isSending,
+          includeBottomInset: !widget.embedded,
+          onSend: _sendComposerMessage,
+        ),
+      ],
     );
   }
 }
@@ -595,17 +609,19 @@ class _ChatComposer extends StatelessWidget {
     required this.controller,
     required this.focusNode,
     required this.sending,
+    required this.includeBottomInset,
     required this.onSend,
   });
 
   final TextEditingController controller;
   final FocusNode focusNode;
   final bool sending;
+  final bool includeBottomInset;
   final VoidCallback onSend;
 
   @override
   Widget build(BuildContext context) {
-    final bottomInset = MediaQuery.paddingOf(context).bottom;
+    final bottomInset = includeBottomInset ? MediaQuery.paddingOf(context).bottom : 0.0;
     return Padding(
       padding: EdgeInsets.fromLTRB(18, 8, 18, 14 + bottomInset),
       child: DecoratedBox(
