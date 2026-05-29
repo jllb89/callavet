@@ -11,6 +11,20 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../../core/config/environment.dart';
 
 const _aiChatDryRun = bool.fromEnvironment('CAV_AI_CHAT_DRY_RUN');
+const _chatPlanOrder = [
+  'starter',
+  'plus',
+  'cuadra',
+  'cuadra-15',
+  'pro-entrenador',
+  'rancho-trabajo',
+];
+int _chatMessageSequence = 0;
+
+String _nextChatMessageId() {
+  _chatMessageSequence += 1;
+  return '${DateTime.now().microsecondsSinceEpoch}-$_chatMessageSequence';
+}
 
 void _aiChatLog(String message) {
   debugPrint('[AIChat][Mobile] $message');
@@ -348,7 +362,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _scrollToBottom();
 
     try {
-      final option = await _fetchSubscriptionUpgradeOption();
+      final option = await _fetchSubscriptionUpgradeOption(result.commerceService);
       final message = await _aiUpgradePlanMessage(option, result);
       if (!mounted) return;
       setState(() {
@@ -397,8 +411,20 @@ class _ChatScreenState extends State<ChatScreen> {
       });
       _scrollToBottom();
 
-      if (result.canRetryActivationAfterUpgrade) {
+      if (result.canRetryActivationAfterUpgrade && await _hasServiceAvailability(result.commerceService)) {
         await _activateService(result.commerceService, result, addUserBubble: false);
+      } else if (result.canRetryActivationAfterUpgrade) {
+        final message = await _aiPostUpgradeStillExhaustedMessage(plan, result);
+        if (!mounted) return;
+        setState(() {
+          _messages.add(_ChatMessage.assistant(
+            message,
+            result: result.withEntitlement(serviceType: result.commerceService, canUse: false, remaining: 0, reason: 'no_${result.commerceService}_entitlement_left'),
+            includeInHistory: false,
+          ));
+          _isSending = false;
+        });
+        _scrollToBottom();
       }
     } catch (error) {
       _aiChatLog('confirmSubscriptionUpgrade failed: ${error.runtimeType} $error');
@@ -411,17 +437,21 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  Future<_SubscriptionUpgradeOption> _fetchSubscriptionUpgradeOption() async {
+  Future<_SubscriptionUpgradeOption> _fetchSubscriptionUpgradeOption(String service) async {
     final subscriptions = await _getGatewayJson('/subscriptions/my');
+    final usageResponse = await _getGatewayJson('/subscriptions/usage/current');
     final plansResponse = await _getGatewayJson('/plans');
+    final usage = _ChatSubscriptionUsage.fromJson(_asMap(usageResponse['usage']) ?? const {});
     final plans = (_asList(plansResponse['items']) ?? const [])
         .map(_asMap)
         .whereType<Map<String, dynamic>>()
         .map(_ChatSubscriptionPlan.fromJson)
-        .where((plan) => plan.code.isNotEmpty)
+        .where((plan) => plan.code.isNotEmpty && (plan.includedChats > 0 || plan.includedVideos > 0) && !plan.code.endsWith('_unit'))
         .toList();
 
     plans.sort((a, b) {
+      final rank = a.rank.compareTo(b.rank);
+      if (rank != 0) return rank;
       final price = a.monthlyCents.compareTo(b.monthlyCents);
       return price != 0 ? price : a.code.compareTo(b.code);
     });
@@ -441,18 +471,21 @@ class _ChatScreenState extends State<ChatScreen> {
     final currentCode = _asMap(activeRow?['plan'])?['code']?.toString().toLowerCase();
     final currentPlan = currentCode == null ? null : _findPlanByCode(plans, currentCode);
     final currentIndex = currentPlan == null ? -1 : plans.indexWhere((plan) => plan.code.toLowerCase() == currentPlan.code.toLowerCase());
-    final targetPlan = currentIndex >= 0 && currentIndex < plans.length - 1
-        ? plans[currentIndex + 1]
-        : plans.firstWhere(
-            (plan) => currentPlan == null || plan.monthlyCents > currentPlan.monthlyCents,
-            orElse: () => const _ChatSubscriptionPlan.empty(),
-          );
+    final targetPlan = plans.firstWhere(
+      (plan) {
+        final planIndex = plans.indexWhere((item) => item.code.toLowerCase() == plan.code.toLowerCase());
+        if (currentIndex >= 0 && planIndex <= currentIndex) return false;
+        if (currentIndex < 0 && currentPlan != null && plan.monthlyCents <= currentPlan.monthlyCents) return false;
+        return usage.remainingForPlan(plan, service) > 0;
+      },
+      orElse: () => const _ChatSubscriptionPlan.empty(),
+    );
 
     if (targetPlan.code.isEmpty) {
-      throw const _ChatApiException('Ya estás en el plan más alto disponible.');
+      throw const _ChatApiException('No encontré un plan superior que libere disponibilidad para esta consulta en el periodo actual.');
     }
 
-    return _SubscriptionUpgradeOption(currentPlan: currentPlan, targetPlan: targetPlan);
+    return _SubscriptionUpgradeOption(currentPlan: currentPlan, targetPlan: targetPlan, usage: usage);
   }
 
   Future<String> _aiUpgradePlanMessage(_SubscriptionUpgradeOption option, _AiChatTurnResult result) async {
@@ -461,6 +494,7 @@ class _ChatScreenState extends State<ChatScreen> {
       'Contexto interno de Call a Vet: el usuario tocó mejorar plan dentro del chat porque necesita más acceso a $service.',
       'Plan actual: ${option.currentPlan?.aiSummary ?? 'sin plan activo identificado en la app'}.',
       'Plan superior recomendado: ${option.targetPlan.aiSummary}.',
+      'Uso actual del periodo: ${option.usage.aiSummary}.',
       'Escribe solo el mensaje visible para el usuario, en español, máximo dos frases.',
       'Describe beneficios concretos del plan superior sobre el actual con los datos de planes provistos.',
       'Cierra indicando que puede actualizar desde el botón del chat.',
@@ -493,6 +527,30 @@ class _ChatScreenState extends State<ChatScreen> {
       _aiChatLog('aiUpgradeConfirmedMessage fallback after ${error.runtimeType}: $error');
     }
     return 'Tu suscripción se actualizó a ${plan.displayName}; voy a volver a validar la disponibilidad de $service.';
+  }
+
+  Future<String> _aiPostUpgradeStillExhaustedMessage(_ChatSubscriptionPlan plan, _AiChatTurnResult result) async {
+    final service = result.commerceService == 'video' ? 'videollamadas' : 'chats';
+    final prompt = [
+      'Contexto interno de Call a Vet: el usuario actualizó a ${plan.displayName}, pero al revalidar aún no quedan $service incluidos disponibles este periodo.',
+      'Escribe solo el mensaje visible para el usuario, en español, máximo dos frases.',
+      'Explica de forma clara que la actualización se aplicó, pero el cupo del periodo sigue agotado para ese servicio, y ofrece comprar una sesión única o revisar otro plan.',
+      'No menciones IDs ni detalles técnicos.',
+    ].join(' ');
+    try {
+      final response = await _runAiTurn(prompt, const []);
+      final generated = _AiChatTurnResult.fromJson(response).payload.message.trim();
+      if (generated.isNotEmpty) return generated;
+    } catch (error) {
+      _aiChatLog('aiPostUpgradeStillExhaustedMessage fallback after ${error.runtimeType}: $error');
+    }
+    return 'La actualización a ${plan.displayName} se aplicó, pero el cupo de $service del periodo sigue agotado. Puedes comprar una sesión única o revisar otro plan desde aquí.';
+  }
+
+  Future<bool> _hasServiceAvailability(String service) async {
+    final response = await _getGatewayJson('/subscriptions/usage/current');
+    final usage = _ChatSubscriptionUsage.fromJson(_asMap(response['usage']) ?? const {});
+    return service == 'video' ? usage.remainingVideos > 0 : usage.remainingChats > 0;
   }
 
   Future<void> _completeStartedSession(String kind, Map<String, dynamic> start) async {
@@ -716,15 +774,19 @@ class _ChatScreenState extends State<ChatScreen> {
             .take(messageIndex + 1)
             .where((message) => message.isUser)
             .length;
-        return _MessageBubble(
-          message: message,
-          embedded: widget.embedded,
-          sending: _isSending,
-          canShowActions: userTurnsBeforeOrAtMessage >= 2,
-          onServiceSelected: _activateService,
-          onOneOffPurchaseSelected: _purchaseSingleSession,
-          onUpgradeSelected: _openSubscriptionUpgrade,
-          onPlanUpgradeConfirmed: _confirmSubscriptionUpgrade,
+        return _AnimatedMessageEntry(
+          key: ValueKey(message.id),
+          isUser: message.isUser,
+          child: _MessageBubble(
+            message: message,
+            embedded: widget.embedded,
+            sending: _isSending,
+            canShowActions: userTurnsBeforeOrAtMessage >= 2,
+            onServiceSelected: _activateService,
+            onOneOffPurchaseSelected: _purchaseSingleSession,
+            onUpgradeSelected: _openSubscriptionUpgrade,
+            onPlanUpgradeConfirmed: _confirmSubscriptionUpgrade,
+          ),
         );
       },
     );
@@ -863,6 +925,38 @@ class _ChatHeader extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _AnimatedMessageEntry extends StatelessWidget {
+  const _AnimatedMessageEntry({
+    super.key,
+    required this.isUser,
+    required this.child,
+  });
+
+  final bool isUser;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0, end: 1),
+      duration: const Duration(milliseconds: 260),
+      curve: Curves.easeOutCubic,
+      builder: (context, value, child) {
+        final slideX = (isUser ? 10.0 : -10.0) * (1 - value);
+        final slideY = 5.0 * (1 - value);
+        return Opacity(
+          opacity: value,
+          child: Transform.translate(
+            offset: Offset(slideX, slideY),
+            child: child,
+          ),
+        );
+      },
+      child: child,
     );
   }
 }
@@ -1316,7 +1410,8 @@ class _ComposerOutlinePainter extends CustomPainter {
 enum _ChatRole { user, assistant }
 
 class _ChatMessage {
-  const _ChatMessage({
+  _ChatMessage({
+    required this.id,
     required this.role,
     required this.text,
     this.result,
@@ -1324,7 +1419,7 @@ class _ChatMessage {
   });
 
   factory _ChatMessage.user(String text) {
-    return _ChatMessage(role: _ChatRole.user, text: text);
+    return _ChatMessage(id: _nextChatMessageId(), role: _ChatRole.user, text: text);
   }
 
   factory _ChatMessage.assistant(
@@ -1333,6 +1428,7 @@ class _ChatMessage {
     bool includeInHistory = true,
   }) {
     return _ChatMessage(
+      id: _nextChatMessageId(),
       role: _ChatRole.assistant,
       text: text,
       result: result,
@@ -1340,6 +1436,7 @@ class _ChatMessage {
     );
   }
 
+  final String id;
   final _ChatRole role;
   final String text;
   final _AiChatTurnResult? result;
@@ -1535,10 +1632,45 @@ class _AiChatPayload {
 }
 
 class _SubscriptionUpgradeOption {
-  const _SubscriptionUpgradeOption({required this.currentPlan, required this.targetPlan});
+  const _SubscriptionUpgradeOption({required this.currentPlan, required this.targetPlan, required this.usage});
 
   final _ChatSubscriptionPlan? currentPlan;
   final _ChatSubscriptionPlan targetPlan;
+  final _ChatSubscriptionUsage usage;
+}
+
+class _ChatSubscriptionUsage {
+  const _ChatSubscriptionUsage({
+    required this.includedChats,
+    required this.consumedChats,
+    required this.includedVideos,
+    required this.consumedVideos,
+  });
+
+  factory _ChatSubscriptionUsage.fromJson(Map<String, dynamic> json) {
+    return _ChatSubscriptionUsage(
+      includedChats: _toInt(json['included_chats']) ?? 0,
+      consumedChats: _toInt(json['consumed_chats']) ?? 0,
+      includedVideos: _toInt(json['included_videos']) ?? 0,
+      consumedVideos: _toInt(json['consumed_videos']) ?? 0,
+    );
+  }
+
+  final int includedChats;
+  final int consumedChats;
+  final int includedVideos;
+  final int consumedVideos;
+
+  int remainingForPlan(_ChatSubscriptionPlan plan, String service) {
+    final included = service == 'video' ? plan.includedVideos : plan.includedChats;
+    final consumed = service == 'video' ? consumedVideos : consumedChats;
+    return math.max(included - consumed, 0);
+  }
+
+  int get remainingChats => math.max(includedChats - consumedChats, 0);
+  int get remainingVideos => math.max(includedVideos - consumedVideos, 0);
+
+  String get aiSummary => '$consumedChats de $includedChats chats consumidos y $consumedVideos de $includedVideos videollamadas consumidas';
 }
 
 class _ChatSubscriptionPlan {
@@ -1605,6 +1737,11 @@ class _ChatSubscriptionPlan {
       'rancho-trabajo' => 'rancho de trabajo',
       _ => name.isEmpty ? code : name.toLowerCase(),
     };
+  }
+
+  int get rank {
+    final index = _chatPlanOrder.indexOf(code.toLowerCase());
+    return index == -1 ? 999 : index;
   }
 
   String get monthlyPriceLabel {

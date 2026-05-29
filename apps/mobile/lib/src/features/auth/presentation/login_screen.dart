@@ -75,9 +75,6 @@ class _LoginScreenState extends State<LoginScreen> {
   String? _errorText;
   bool _gatewayOtpUnavailable = false;
   bool _showEmailValidationError = false;
-  bool _showIsland = false;
-  String _islandText = '';
-  double _islandOpacity = 0;
 
   @override
   void initState() {
@@ -530,74 +527,6 @@ class _LoginScreenState extends State<LoginScreen> {
     return null;
   }
 
-  Future<void> _sendAuthEmailConfirmationIfNeeded(
-    String? rawEmail, {
-    required String reason,
-  }) async {
-    final email = (rawEmail ?? '').trim().toLowerCase();
-    if (email.isEmpty) return;
-
-    final client = Supabase.instance.client;
-    final currentUser = client.auth.currentUser;
-    if (currentUser == null) {
-      _loginLog('[$reason] Skipping email confirmation request: no active auth user');
-      return;
-    }
-
-    final currentEmail = (currentUser.email ?? '').trim().toLowerCase();
-    final isAlreadyVerified = currentUser.emailConfirmedAt != null;
-    if (currentEmail == email && isAlreadyVerified) {
-      _loginLog('[$reason] Email already linked and verified in auth.users: $email');
-      return;
-    }
-
-    try {
-      await _gatewayPost('/auth/otp/email/confirm-request', {'email': email});
-      _loginLog('[$reason] Requested confirmation email via gateway for auth.users email=$email');
-      unawaited(_showIslandMessage('te enviamos un correo para confirmar tu email'));
-      return;
-    } on _GatewayOtpException catch (err) {
-      final lower = err.message.toLowerCase();
-      final isRateLimited = err.statusCode == 429 || lower.contains('rate limit');
-      if (isRateLimited) {
-        _loginLog('[$reason] Email confirmation is rate-limited in gateway for $email: ${err.message}');
-        unawaited(_showIslandMessage('ya te enviamos un correo recientemente'));
-        return;
-      }
-      _loginLog('[$reason] Gateway email confirmation request failed (will fallback app-side): ${err.message}');
-    } catch (err) {
-      _loginLog('[$reason] Gateway email confirmation request error (will fallback app-side): $err');
-    }
-
-    try {
-      await client.auth.updateUser(
-        UserAttributes(email: email),
-      );
-      _loginLog('[$reason] Requested Supabase confirmation email for auth.users email=$email');
-      unawaited(_showIslandMessage('te enviamos un correo para confirmar tu email'));
-    } catch (err) {
-      _loginLog('[$reason] Failed requesting Supabase confirmation email for $email: $err');
-    }
-  }
-
-  Future<void> _showIslandMessage(String text) async {
-    if (!mounted) return;
-    setState(() {
-      _showIsland = true;
-      _islandText = text;
-      _islandOpacity = 0;
-    });
-    await Future.delayed(const Duration(milliseconds: 30));
-    if (!mounted) return;
-    setState(() => _islandOpacity = 1);
-    await Future.delayed(const Duration(milliseconds: 1000));
-    if (!mounted) return;
-    setState(() => _islandOpacity = 0);
-    await Future.delayed(const Duration(milliseconds: 280));
-    if (!mounted) return;
-    setState(() => _showIsland = false);
-  }
-
   Future<void> _routeAfterLogin({
     required String userId,
     Map<String, dynamic>? userRow,
@@ -610,10 +539,7 @@ class _LoginScreenState extends State<LoginScreen> {
             .eq('id', userId)
             .maybeSingle();
 
-    await _sendAuthEmailConfirmationIfNeeded(
-      (row?['email'] as String?) ?? _emailForOtp,
-      reason: 'post-login-route',
-    );
+    _loginLog('Post-login route does not request auth email confirmation; email linking is handled during explicit KYC/profile updates.');
 
     final missingStep = _missingKycStep(row);
     _loginLog('Post-login KYC completeness check userId=$userId missingStep=$missingStep row=$row');
@@ -1505,38 +1431,6 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
             ),
           ),
-          if (_showIsland)
-            Positioned(
-              top: MediaQuery.of(context).padding.top + 6,
-              left: 0,
-              right: 0,
-              child: IgnorePointer(
-                child: Center(
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 250),
-                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-                    decoration: BoxDecoration(
-                      color: Colors.black,
-                      borderRadius: BorderRadius.circular(24),
-                    ),
-                    child: AnimatedOpacity(
-                      duration: const Duration(milliseconds: 240),
-                      curve: Curves.easeOut,
-                      opacity: _islandOpacity,
-                      child: Text(
-                        _islandText,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 12,
-                          fontFamily: 'ABC Diatype',
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
         ],
       ),
     );

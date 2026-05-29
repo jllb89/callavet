@@ -102,9 +102,7 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
 
   void _useSuggestion(String text) {
     _homeAiLog('suggestion selected length=${text.length} preview="${text.length > 80 ? '${text.substring(0, 80)}...' : text}"');
-    _messageCtrl.text = text;
-    _messageCtrl.selection = TextSelection.collapsed(offset: text.length);
-    _messageFocusNode.requestFocus();
+    _openAiChatWithText(text);
   }
 
   void _openAiChat() {
@@ -115,6 +113,12 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
       _enterAiMode();
       return;
     }
+    _openAiChatWithText(text);
+  }
+
+  void _openAiChatWithText(String rawText) {
+    final text = rawText.trim();
+    if (text.isEmpty) return;
     _messageFocusNode.unfocus();
     _messageCtrl.clear();
     setState(() {
