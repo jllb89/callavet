@@ -144,6 +144,17 @@ export class AiService {
     return trimmed;
   }
 
+  private normalizeOptionalToolUuid(value: unknown, name: string) {
+    const trimmed = String(value || '').trim();
+    if (!trimmed || trimmed.toLowerCase() === 'null') return null;
+    try {
+      this.validator.validateUUID(trimmed, name);
+      return trimmed;
+    } catch {
+      return null;
+    }
+  }
+
   private async featureEnabled(featureKey: string) {
     try {
       const { rows } = await this.db.query<{ enabled: boolean }>(
@@ -445,7 +456,7 @@ export class AiService {
           required: ['symptoms', 'petId'],
           properties: {
             symptoms: { type: 'string', description: 'User-described need, symptoms, or reason for contacting a veterinarian.' },
-            petId: { type: ['string', 'null'], description: 'Known pet UUID when available; otherwise null.' },
+            petId: { type: ['string', 'null'], description: 'Exact pet UUID from server context only. Use null if unsure, if the user did not identify the horse, or if no exact context id matches.' },
           },
         },
       },
@@ -662,6 +673,7 @@ export class AiService {
       'If red flags are present, recommend immediate professional help or local emergency veterinary care.',
       'Use the provided user, horse, subscription, and recent conversation context to personalize naturally. Do not expose raw internal IDs unless needed for tool calls.',
       'If the user has more than one horse and no specific pet is clear, ask which horse this is for before non-emergency service activation.',
+      'For recommend_specialty petId, pass only an exact pet id from Server context. If unsure, pass null; missing or uncertain petId must not block intake.',
       'Before recommending a service, gather the minimum missing context for a useful vet handoff: affected horse, main concern, onset/duration, severity, appetite/water, relevant history/medications, and red flags. Ask at most one concise follow-up at a time.',
       'Do not immediately ask the user to choose a product. Decide whether chat, immediate video, or scheduled video is best based on urgency, symptoms, context, and entitlement signals; then explain the recommendation briefly.',
       'Prepare the conversation so a later veterinarian handoff can include a concise contextualization, not a diagnosis.',
@@ -699,13 +711,34 @@ export class AiService {
 
   private async recommendSpecialtyTool(args: Record<string, any>, context: AiChatTurnContext) {
     const symptoms = String(args.symptoms || '').trim();
-    const requestedPetId = this.normalizeOptionalUuid(String(args.petId || context.petId || ''), 'petId');
-    if (requestedPetId && requestedPetId !== context.petId) {
+    const toolPetId = this.normalizeOptionalToolUuid(args.petId, 'petId');
+    let selectedPetId = context.petId || null;
+    let ignoredPetId: string | null = null;
+    if (toolPetId) {
+      const isKnownContextPet = context.pets.some((pet) => String(pet?.id || '') === toolPetId);
+      if (isKnownContextPet || toolPetId === context.petId) {
+        selectedPetId = toolPetId;
+      } else {
+        const { rows } = await this.db.query<{ id: string }>(
+          `select id from pets where id = $1::uuid and user_id = $2::uuid limit 1`,
+          [toolPetId, context.actorUserId]
+        );
+        selectedPetId = rows[0]?.id || selectedPetId;
+        ignoredPetId = rows[0] ? null : toolPetId;
+      }
+    }
+    if (!selectedPetId && context.pets.length === 1) {
+      selectedPetId = String(context.pets[0]?.id || '') || null;
+    }
+    if (selectedPetId && !this.normalizeOptionalToolUuid(selectedPetId, 'petId')) {
+      selectedPetId = null;
+    }
+    if (selectedPetId && selectedPetId !== context.petId && !context.pets.some((pet) => String(pet?.id || '') === selectedPetId)) {
       const { rows } = await this.db.query<{ id: string }>(
         `select id from pets where id = $1::uuid and user_id = $2::uuid limit 1`,
-        [requestedPetId, context.actorUserId]
+        [selectedPetId, context.actorUserId]
       );
-      if (!rows[0]) throw new BadRequestException('pet_not_found_for_user');
+      if (!rows[0]) selectedPetId = null;
     }
     const { rows } = await this.db.query<any>(
       `select distinct on (lower(btrim(name))) id, name, description, coalesce(is_active, true) as is_active
@@ -754,7 +787,8 @@ export class AiService {
       candidates: scored.slice(0, 5).map((item) => ({ ...item.specialty, score: item.score })),
       confidence: usedFallback ? 'low' : scored[0]?.score >= 5 ? 'high' : scored[0]?.score > 0 ? 'medium' : 'low',
       fallbackUsed: usedFallback,
-      petId: requestedPetId,
+      petId: selectedPetId,
+      ignoredPetId: ignoredPetId ? true : undefined,
     };
   }
 
