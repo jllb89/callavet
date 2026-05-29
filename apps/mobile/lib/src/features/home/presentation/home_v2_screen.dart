@@ -132,6 +132,7 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
     final isPrompt = _aiPhase == _HomeAiPhase.prompt;
     final isConversation = _aiPhase == _HomeAiPhase.conversation;
     final isAiActive = isPrompt || isConversation;
+    final horizontalPadding = isConversation ? 18.0 : 32.0;
 
     return Scaffold(
       body: DecoratedBox(
@@ -144,7 +145,7 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
         ),
         child: SafeArea(
           child: Padding(
-            padding: EdgeInsets.fromLTRB(32, 24, 32, 24 + bottomInset),
+            padding: EdgeInsets.fromLTRB(horizontalPadding, 24, horizontalPadding, 24 + bottomInset),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [

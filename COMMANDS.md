@@ -13,7 +13,7 @@ cd /Users/jorge/Desktop/call-a-vet/apps/mobile && flutter run \
   --dart-define=BYPASS_OTP=false \
   --dart-define=KYC_LOCATION_DEBUG=false \
   --dart-define=KYC_FLOW_DEBUG=true \
-  --dart-define=CAV_AI_CHAT_DRY_RUN=true \
+  --dart-define=CAV_AI_CHAT_DRY_RUN=false \
   -d "vet"
 
 ## Production-like local run (quiet logs)
@@ -40,8 +40,8 @@ cd /Users/jorge/Desktop/call-a-vet/apps/mobile && flutter run \
 #   --dart-define=KYC_FLOW_DEBUG=true  -> logs OTP/auth/session/profile DB flow in console
 #   --dart-define=KYC_FLOW_DEBUG=false -> hides flow logs
 # Toggle AI chat dry-run:
-#   --dart-define=CAV_AI_CHAT_DRY_RUN=true  -> sends dryRun=true to /ai/chat/turn for a deterministic bot smoke response
-#   --dart-define=CAV_AI_CHAT_DRY_RUN=false -> uses the gateway's configured AI provider
+#   --dart-define=CAV_AI_CHAT_DRY_RUN=false -> uses the gateway's configured AI provider (real AI)
+#   --dart-define=CAV_AI_CHAT_DRY_RUN=true  -> sends dryRun=true to /ai/chat/turn for deterministic gateway smoke only
 # AI chat log tags to watch:
 #   [AIChat][Home]        home composer and inline chat state changes
 #   [PostLogin][Routing]  auth/profile routing into home

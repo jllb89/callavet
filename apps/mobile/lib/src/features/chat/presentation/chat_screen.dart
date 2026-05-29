@@ -289,7 +289,7 @@ class _ChatScreenState extends State<ChatScreen> {
         Expanded(
           child: ListView.builder(
             controller: _scrollController,
-            padding: EdgeInsets.fromLTRB(22, widget.embedded ? 10 : 18, 22, 20),
+            padding: EdgeInsets.fromLTRB(widget.embedded ? 0 : 22, widget.embedded ? 10 : 18, widget.embedded ? 0 : 22, 20),
             itemCount: _messages.length + (_isSending ? 1 : 0),
             itemBuilder: (context, index) {
               if (_isSending && index == _messages.length) {
@@ -298,6 +298,7 @@ class _ChatScreenState extends State<ChatScreen> {
               final message = _messages[index];
               return _MessageBubble(
                 message: message,
+                embedded: widget.embedded,
                 sending: _isSending,
                 onQuickReply: _sendQuickReply,
               );
@@ -308,6 +309,7 @@ class _ChatScreenState extends State<ChatScreen> {
           controller: _inputCtrl,
           focusNode: _focusNode,
           sending: _isSending,
+          embedded: widget.embedded,
           includeBottomInset: !widget.embedded,
           onSend: _sendComposerMessage,
         ),
@@ -366,11 +368,13 @@ class _ChatHeader extends StatelessWidget {
 class _MessageBubble extends StatelessWidget {
   const _MessageBubble({
     required this.message,
+    required this.embedded,
     required this.sending,
     required this.onQuickReply,
   });
 
   final _ChatMessage message;
+  final bool embedded;
   final bool sending;
   final ValueChanged<String> onQuickReply;
 
@@ -385,7 +389,9 @@ class _MessageBubble extends StatelessWidget {
       child: Align(
         alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
         child: ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: MediaQuery.sizeOf(context).width * (isUser ? 0.76 : 0.84)),
+          constraints: BoxConstraints(
+            maxWidth: MediaQuery.sizeOf(context).width * (isUser ? (embedded ? 0.90 : 0.78) : (embedded ? 0.96 : 0.86)),
+          ),
           child: Column(
             crossAxisAlignment: isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
             children: [
@@ -609,6 +615,7 @@ class _ChatComposer extends StatelessWidget {
     required this.controller,
     required this.focusNode,
     required this.sending,
+    required this.embedded,
     required this.includeBottomInset,
     required this.onSend,
   });
@@ -616,6 +623,7 @@ class _ChatComposer extends StatelessWidget {
   final TextEditingController controller;
   final FocusNode focusNode;
   final bool sending;
+  final bool embedded;
   final bool includeBottomInset;
   final VoidCallback onSend;
 
@@ -623,55 +631,66 @@ class _ChatComposer extends StatelessWidget {
   Widget build(BuildContext context) {
     final bottomInset = includeBottomInset ? MediaQuery.paddingOf(context).bottom : 0.0;
     return Padding(
-      padding: EdgeInsets.fromLTRB(18, 8, 18, 14 + bottomInset),
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.07),
-          borderRadius: BorderRadius.circular(28),
-          border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
-        ),
-        child: Padding(
-          padding: const EdgeInsets.only(left: 18, right: 8),
-          child: Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: controller,
-                  focusNode: focusNode,
-                  enabled: !sending,
-                  cursorColor: Colors.white,
-                  textInputAction: TextInputAction.send,
-                  minLines: 1,
-                  maxLines: 4,
-                  onSubmitted: (_) => onSend(),
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w400,
-                  ),
-                  decoration: InputDecoration(
-                    border: InputBorder.none,
-                    hintText: 'escribir mensaje...',
-                    hintStyle: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.32),
+      padding: EdgeInsets.fromLTRB(embedded ? 0 : 18, 8, embedded ? 0 : 18, 14 + bottomInset),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 46, maxHeight: 150),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.07),
+            borderRadius: BorderRadius.circular(28),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.only(left: 18, right: 6, top: 3, bottom: 3),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: controller,
+                    focusNode: focusNode,
+                    enabled: !sending,
+                    cursorColor: Colors.white,
+                    keyboardType: TextInputType.multiline,
+                    textCapitalization: TextCapitalization.sentences,
+                    textInputAction: TextInputAction.send,
+                    minLines: 1,
+                    maxLines: 6,
+                    onSubmitted: (_) => onSend(),
+                    style: const TextStyle(
+                      color: Colors.white,
                       fontSize: 14,
                       fontWeight: FontWeight.w400,
+                      height: 1.25,
+                    ),
+                    decoration: InputDecoration(
+                      border: InputBorder.none,
+                      hintText: 'escribir mensaje...',
+                      hintStyle: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.32),
+                        fontSize: 14,
+                        fontWeight: FontWeight.w400,
+                        height: 1.25,
+                      ),
                     ),
                   ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              IconButton.filled(
-                onPressed: sending ? null : onSend,
-                style: IconButton.styleFrom(
-                  backgroundColor: Colors.white,
-                  disabledBackgroundColor: Colors.white.withValues(alpha: 0.25),
-                  foregroundColor: Colors.black,
-                  fixedSize: const Size(38, 38),
+                const SizedBox(width: 8),
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 1),
+                  child: IconButton.filled(
+                    onPressed: sending ? null : onSend,
+                    style: IconButton.styleFrom(
+                      backgroundColor: Colors.white,
+                      disabledBackgroundColor: Colors.white.withValues(alpha: 0.25),
+                      foregroundColor: Colors.black,
+                      fixedSize: const Size(38, 38),
+                    ),
+                    icon: const Icon(Icons.arrow_upward_rounded, size: 19),
+                  ),
                 ),
-                icon: const Icon(Icons.arrow_upward_rounded, size: 19),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),

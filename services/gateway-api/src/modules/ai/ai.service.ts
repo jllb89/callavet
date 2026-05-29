@@ -68,6 +68,10 @@ type AiChatTurnContext = {
   petId: string | null;
   sessionId: string | null;
   conversationId: string | null;
+  user: Record<string, any> | null;
+  pets: any[];
+  subscription: Record<string, any> | null;
+  recentConversations: any[];
 };
 
 type PromptVersion = {
@@ -542,17 +546,129 @@ export class AiService {
     }
   }
 
+  private compactChatPet(pet: any, healthProfile: any) {
+    if (!pet || typeof pet !== 'object') return null;
+    const { user_id, embedding, ...safePet } = pet;
+    const { pet_id, embedding: healthEmbedding, ...safeHealth } = healthProfile || {};
+    return {
+      ...safePet,
+      healthProfile: healthProfile ? safeHealth : null,
+    };
+  }
+
+  private async buildChatTurnContext(actorUserId: string, petId: string | null, sessionId: string | null, conversationId: string | null): Promise<AiChatTurnContext> {
+    const base = { actorUserId, petId, sessionId, conversationId };
+    if (this.db.isStub) return { ...base, user: null, pets: [], subscription: null, recentConversations: [] };
+
+    return this.db.runInTx(async (q) => {
+      const [userRows, petRows, subscriptionRows, conversationRows] = await Promise.all([
+        q<any>(
+          `select id::text, full_name, email, phone, country, state, customer_type, is_verified
+             from users
+            where id = $1::uuid
+            limit 1`,
+          [actorUserId]
+        ),
+        q<any>(
+          `select to_jsonb(p) as pet,
+                  to_jsonb(h) as health_profile
+             from pets p
+             left join pet_health_profiles h on h.pet_id = p.id
+            where p.user_id = $1::uuid
+              and ($2::uuid is null or p.id = $2::uuid)
+            order by p.created_at desc
+            limit 20`,
+          [actorUserId, petId]
+        ),
+        q<any>(
+          `select us.id::text as subscription_id,
+                  us.status,
+                  us.current_period_start,
+                  us.current_period_end,
+                  us.cancel_at_period_end,
+                  us.pets_included,
+                  p.code as plan_code,
+                  p.name as plan_name,
+                  p.included_chats,
+                  p.included_videos,
+                  p.pets_included_default,
+                  coalesce(su.consumed_chats, 0)::int as consumed_chats,
+                  coalesce(su.consumed_videos, 0)::int as consumed_videos
+             from user_subscriptions us
+             join subscription_plans p on p.id = us.plan_id
+        left join subscription_usage su
+               on su.subscription_id = us.id
+              and su.period_start = us.current_period_start
+              and su.period_end = us.current_period_end
+            where us.user_id = $1::uuid
+              and us.status = 'active'
+              and coalesce(us.current_period_end, now()) > now()
+            order by us.current_period_end desc nulls last
+            limit 1`,
+          [actorUserId]
+        ),
+        q<any>(
+          `select s.id::text as session_id,
+                  s.mode,
+                  s.status,
+                  s.pet_id::text,
+                  p.name as pet_name,
+                  s.started_at,
+                  s.ended_at,
+                  (
+                    select coalesce(json_agg(row_to_json(mm)), '[]'::json)
+                      from (
+                        select role, left(content, 240) as content, created_at
+                          from messages
+                         where session_id = s.id
+                           and deleted_at is null
+                         order by created_at desc
+                         limit 4
+                      ) mm
+                  ) as recent_messages
+             from chat_sessions s
+             left join pets p on p.id = s.pet_id
+            where s.user_id = $1::uuid
+              and ($2::uuid is null or s.pet_id = $2::uuid)
+            order by coalesce(s.started_at, s.created_at) desc
+            limit 5`,
+          [actorUserId, petId]
+        ),
+      ]);
+
+      const subscription = subscriptionRows.rows[0] || null;
+      return {
+        ...base,
+        user: userRows.rows[0] || null,
+        pets: petRows.rows.map((row) => this.compactChatPet(row.pet, row.health_profile)).filter(Boolean),
+        subscription: subscription
+          ? {
+              ...subscription,
+              remaining_chats: Math.max(Number(subscription.included_chats || 0) - Number(subscription.consumed_chats || 0), 0),
+              remaining_videos: Math.max(Number(subscription.included_videos || 0) - Number(subscription.consumed_videos || 0), 0),
+            }
+          : null,
+        recentConversations: conversationRows.rows,
+      };
+    });
+  }
+
   private chatTurnInstructions(context: AiChatTurnContext) {
     return [
       'You are Call a Vet AI concierge for equine veterinary care.',
       'Reply in Spanish unless the user clearly uses another language.',
-      'Your purpose is intake, urgency detection, routing, entitlement-aware service handoff, and concise coordination with professional human vets.',
+      'Your purpose is warm intake, urgency detection, specialty routing, entitlement-aware service recommendation, and concise coordination with professional human vets.',
       'Never diagnose, prescribe medication, recommend medication doses, or imply you replace a veterinarian.',
       'If red flags are present, recommend immediate professional help or local emergency veterinary care.',
+      'Use the provided user, horse, subscription, and recent conversation context to personalize naturally. Do not expose raw internal IDs unless needed for tool calls.',
+      'If the user has more than one horse and no specific pet is clear, ask which horse this is for before non-emergency service activation.',
+      'Before recommending a service, gather the minimum missing context for a useful vet handoff: affected horse, main concern, onset/duration, severity, appetite/water, relevant history/medications, and red flags. Ask at most one concise follow-up at a time.',
+      'Do not immediately ask the user to choose a product. Decide whether chat, immediate video, or scheduled video is best based on urgency, symptoms, context, and entitlement signals; then explain the recommendation briefly.',
+      'Prepare the conversation so a later veterinarian handoff can include a concise contextualization, not a diagnosis.',
       'Use function tools to choose an existing specialty, find approved vets, check service access, and inspect availability.',
       'Do not invent specialty IDs, vet IDs, appointment slots, entitlements, prices, or session IDs.',
       'Before recommending chat or video activation, call check_service_access for the relevant service type.',
-      'Keep final responses short and action-oriented. Offer chat, immediate video, or scheduled video when enough context is available.',
+      'Keep final responses short, warm, and action-oriented. If context is insufficient, ask a targeted question instead of showing all service choices.',
       `Server context: ${JSON.stringify(context)}`,
     ].join('\n');
   }
@@ -756,6 +872,8 @@ export class AiService {
 
   private chatTurnDryRun(context: AiChatTurnContext, message: string) {
     const wantsVideo = /video|videollamada|llamada|urgente|urgent|emergency/i.test(message);
+    const petNames = context.pets.map((pet) => pet?.name).filter(Boolean).slice(0, 3);
+    const hasMultiplePets = context.pets.length > 1;
     return {
       ok: true,
       dryRun: true,
@@ -764,8 +882,8 @@ export class AiService {
       responseId: null,
       payload: {
         message: wantsVideo
-          ? 'Puedo ayudarte a conectar con un veterinario. Por lo que describes, revisaría disponibilidad para una videollamada profesional.'
-          : 'Puedo ayudarte a conectar con el veterinario adecuado. Primero identificaré la especialidad y luego te ofreceré chat, videollamada o agendar una videollamada.',
+          ? `Puedo ayudarte a preparar esto para un veterinario. ${hasMultiplePets ? `¿Para cuál caballo es: ${petNames.join(', ')}? ` : ''}Por lo que describes, puede convenir una videollamada para valorar urgencia.`
+          : `Claro, te ayudo. ${hasMultiplePets ? `¿Para cuál caballo es: ${petNames.join(', ')}? ` : 'Cuéntame desde cuándo pasa y si ha cambiado su apetito, agua o energía. '}Con eso puedo orientar mejor si conviene chat, videollamada inmediata o agendar una videollamada.`,
         urgency: wantsVideo ? 'urgent' : 'routine',
         recommendedService: wantsVideo ? 'video' : 'chat',
         actionLabel: wantsVideo ? 'buscar videollamada' : 'buscar veterinario',
@@ -839,7 +957,7 @@ export class AiService {
     const petId = this.normalizeOptionalUuid(input.petId, 'petId');
     const sessionId = this.normalizeOptionalUuid(input.sessionId, 'sessionId');
     const conversationId = String(input.conversationId || '').trim() || null;
-    const context: AiChatTurnContext = { actorUserId, petId, sessionId, conversationId };
+    const context = await this.buildChatTurnContext(actorUserId, petId, sessionId, conversationId);
     const requestPayload = {
       petId,
       sessionId,
@@ -847,6 +965,11 @@ export class AiService {
       messagePresent: !!String(input.message || '').trim(),
       messageCount: Array.isArray(input.messages) ? input.messages.length : 0,
       dryRun: !!input.dryRun,
+      contextSummary: {
+        pets: context.pets.length,
+        hasSubscription: !!context.subscription,
+        recentConversations: context.recentConversations.length,
+      },
     };
     const eventId = await this.insertRawEvent({
       actorUserId,
