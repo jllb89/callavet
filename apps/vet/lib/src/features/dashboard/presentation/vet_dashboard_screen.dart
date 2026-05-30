@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../core/config/environment.dart';
@@ -108,6 +109,12 @@ class _VetDashboardScreenState extends State<VetDashboardScreen> {
     });
   }
 
+  void _openVideoCall(String sessionId) {
+    final normalizedSessionId = sessionId.trim();
+    if (normalizedSessionId.isEmpty) return;
+    context.push('/video/${Uri.encodeComponent(normalizedSessionId)}');
+  }
+
   @override
   Widget build(BuildContext context) {
     final content = _showProfile
@@ -122,6 +129,7 @@ class _VetDashboardScreenState extends State<VetDashboardScreen> {
         : _DashboardPage(
             availableNow: _availableNow,
             profileBundleFuture: _profileBundleFuture,
+            onJoinVideo: _openVideoCall,
           );
 
     return Scaffold(
@@ -290,10 +298,12 @@ class _DashboardPage extends StatelessWidget {
   const _DashboardPage({
     required this.availableNow,
     required this.profileBundleFuture,
+    required this.onJoinVideo,
   });
 
   final bool availableNow;
   final Future<_VetProfileBundle> profileBundleFuture;
+  final ValueChanged<String> onJoinVideo;
 
   @override
   Widget build(BuildContext context) {
@@ -329,6 +339,7 @@ class _DashboardPage extends StatelessWidget {
                     _ActivitySections(
                       availableNow: availableNow,
                       profileBundleFuture: profileBundleFuture,
+                      onJoinVideo: onJoinVideo,
                     ),
                   ],
                 ),
@@ -386,10 +397,11 @@ class _BoltMark extends StatelessWidget {
 }
 
 class _ActivitySections extends StatelessWidget {
-  const _ActivitySections({required this.availableNow, required this.profileBundleFuture});
+  const _ActivitySections({required this.availableNow, required this.profileBundleFuture, required this.onJoinVideo});
 
   final bool availableNow;
   final Future<_VetProfileBundle> profileBundleFuture;
+  final ValueChanged<String> onJoinVideo;
 
   @override
   Widget build(BuildContext context) {
@@ -418,7 +430,7 @@ class _ActivitySections extends StatelessWidget {
             else if (activeConsults.isEmpty)
               const _EmptyActivityText('No tienes consultas activas.')
             else
-              _ActiveConsultPills(consults: activeConsults),
+              _ActiveConsultPills(consults: activeConsults, onJoinVideo: onJoinVideo),
             const SizedBox(height: 46),
             const Text(
               'próximas consultas:',
@@ -435,7 +447,7 @@ class _ActivitySections extends StatelessWidget {
             else if (upcomingAppointments.isEmpty)
               const _EmptyActivityText('No tienes videollamadas programadas.')
             else
-              _UpcomingAppointmentsList(appointments: upcomingAppointments),
+              _UpcomingAppointmentsList(appointments: upcomingAppointments, onJoinVideo: onJoinVideo),
           ],
         );
       },
@@ -444,9 +456,10 @@ class _ActivitySections extends StatelessWidget {
 }
 
 class _ActiveConsultPills extends StatelessWidget {
-  const _ActiveConsultPills({required this.consults});
+  const _ActiveConsultPills({required this.consults, required this.onJoinVideo});
 
   final List<_ActiveConsult> consults;
+  final ValueChanged<String> onJoinVideo;
 
   @override
   Widget build(BuildContext context) {
@@ -461,6 +474,10 @@ class _ActiveConsultPills extends StatelessWidget {
           _DarkTagPill(label: consult.status),
           const SizedBox(width: 13),
           _DarkTagPill(label: consult.mode),
+          if (consult.canJoinVideo) ...[
+            const SizedBox(width: 13),
+            _JoinVideoPill(onTap: () => onJoinVideo(consult.sessionId)),
+          ],
         ],
       ),
     );
@@ -530,9 +547,10 @@ class _DarkTagPill extends StatelessWidget {
 }
 
 class _UpcomingAppointmentsList extends StatelessWidget {
-  const _UpcomingAppointmentsList({required this.appointments});
+  const _UpcomingAppointmentsList({required this.appointments, required this.onJoinVideo});
 
   final List<_UpcomingAppointment> appointments;
+  final ValueChanged<String> onJoinVideo;
 
   @override
   Widget build(BuildContext context) {
@@ -555,7 +573,11 @@ class _UpcomingAppointmentsList extends StatelessWidget {
             child: SingleChildScrollView(
               scrollDirection: Axis.horizontal,
               clipBehavior: Clip.none,
-              child: _UpcomingConsultPill(name: appointment.name, time: appointment.formattedStart),
+              child: _UpcomingConsultPill(
+                name: appointment.name,
+                time: appointment.formattedStart,
+                onJoin: appointment.canJoinVideo ? () => onJoinVideo(appointment.sessionId) : null,
+              ),
             ),
           );
         }),
@@ -565,10 +587,11 @@ class _UpcomingAppointmentsList extends StatelessWidget {
 }
 
 class _UpcomingConsultPill extends StatelessWidget {
-  const _UpcomingConsultPill({required this.name, required this.time});
+  const _UpcomingConsultPill({required this.name, required this.time, this.onJoin});
 
   final String name;
   final String time;
+  final VoidCallback? onJoin;
 
   @override
   Widget build(BuildContext context) {
@@ -604,7 +627,72 @@ class _UpcomingConsultPill extends StatelessWidget {
               fontWeight: FontWeight.w300,
             ),
           ),
+          if (onJoin != null) ...[
+            const SizedBox(width: 12),
+            _RoundVideoIconButton(onTap: onJoin!),
+          ],
         ],
+      ),
+    );
+  }
+}
+
+class _JoinVideoPill extends StatelessWidget {
+  const _JoinVideoPill({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        height: 51,
+        padding: const EdgeInsets.only(left: 18, right: 20),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(40),
+        ),
+        child: const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.videocam_rounded, color: Colors.black, size: 18),
+            SizedBox(width: 10),
+            Text(
+              'entrar',
+              style: TextStyle(
+                color: Colors.black,
+                fontSize: 13,
+                fontFamily: 'ABC Diatype',
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _RoundVideoIconButton extends StatelessWidget {
+  const _RoundVideoIconButton({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        width: 34,
+        height: 34,
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          shape: BoxShape.circle,
+        ),
+        child: const Icon(Icons.videocam_rounded, color: Colors.black, size: 18),
       ),
     );
   }
@@ -860,79 +948,85 @@ class _ProfileEditorState extends State<_ProfileEditor> {
       profile.licenseNumber,
       if (profile.ratingCount > 0) '${profile.ratingAverage.toStringAsFixed(1)} (${profile.ratingCount})',
     ].where((value) => value.trim().isNotEmpty).toList();
-    return ListView(
+    return Column(
       children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: Column(
+        Expanded(
+          child: ListView(
+            children: [
+              Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text(
-                    'Perfil veterinario',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 24,
-                      fontFamily: 'ABC Diatype',
-                      fontWeight: FontWeight.w400,
-                      height: 1.02,
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Perfil veterinario',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 24,
+                            fontFamily: 'ABC Diatype',
+                            fontWeight: FontWeight.w400,
+                            height: 1.02,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          profile.fullName.isEmpty ? 'Veterinario Call a Vet' : profile.fullName,
+                          style: TextStyle(
+                            color: Colors.white.withAlpha(180),
+                            fontSize: 13,
+                            fontFamily: 'ABC Diatype',
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-                  const SizedBox(height: 8),
-                  Text(
-                    profile.fullName.isEmpty ? 'Veterinario Call a Vet' : profile.fullName,
-                    style: TextStyle(
-                      color: Colors.white.withAlpha(180),
-                      fontSize: 13,
-                      fontFamily: 'ABC Diatype',
-                    ),
-                  ),
+                  _ApprovalBadge(isApproved: profile.isApproved),
                 ],
               ),
-            ),
-            _ApprovalBadge(isApproved: profile.isApproved),
-          ],
-        ),
-        const SizedBox(height: 18),
-        ...metadata.map((value) => _ProfileMetaText(value)),
-        const SizedBox(height: 20),
-        _EditableProfileLine(
-          label: 'Bio profesional',
-          value: _bioController.text,
-          maxLines: 4,
-          onTap: () => _editField(_bioController, 'Bio profesional', maxLines: 5),
-        ),
-        const SizedBox(height: 10),
-        const Text(
-          'Especialidades',
-          style: TextStyle(color: Colors.white, fontSize: 13, fontFamily: 'ABC Diatype', fontWeight: FontWeight.w500),
-        ),
-        const SizedBox(height: 8),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: widget.bundle.specialties.map((specialty) {
-            final selected = _selectedSpecialtyIds.contains(specialty.id);
-            return _SpecialtyToggleTag(
-              label: specialty.name,
-              selected: selected,
-              onTap: () => _toggleSpecialty(specialty.id),
-            );
-          }).toList(),
-        ),
-        if (_message != null) ...[
-          const SizedBox(height: 12),
-          Text(
-            _message!,
-            style: TextStyle(
-              color: _message!.startsWith('No pude') ? const Color(0xFFFF8A80) : Colors.white.withAlpha(190),
-              fontSize: 12,
-              fontFamily: 'ABCDiatype',
-            ),
+              const SizedBox(height: 18),
+              ...metadata.map((value) => _ProfileMetaText(value)),
+              const SizedBox(height: 20),
+              _EditableProfileLine(
+                label: 'Bio profesional',
+                value: _bioController.text,
+                maxLines: 4,
+                onTap: () => _editField(_bioController, 'Bio profesional', maxLines: 5),
+              ),
+              const SizedBox(height: 10),
+              const Text(
+                'Especialidades',
+                style: TextStyle(color: Colors.white, fontSize: 13, fontFamily: 'ABC Diatype', fontWeight: FontWeight.w500),
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 10,
+                children: widget.bundle.specialties.map((specialty) {
+                  final selected = _selectedSpecialtyIds.contains(specialty.id);
+                  return _SpecialtyToggleTag(
+                    label: specialty.name,
+                    selected: selected,
+                    onTap: () => _toggleSpecialty(specialty.id),
+                  );
+                }).toList(),
+              ),
+              if (_message != null) ...[
+                const SizedBox(height: 12),
+                Text(
+                  _message!,
+                  style: TextStyle(
+                    color: _message!.startsWith('No pude') ? const Color(0xFFFF8A80) : Colors.white.withAlpha(190),
+                    fontSize: 12,
+                    fontFamily: 'ABCDiatype',
+                  ),
+                ),
+              ],
+              const SizedBox(height: 24),
+            ],
           ),
-        ],
-        const SizedBox(height: 18),
+        ),
         Align(
           alignment: Alignment.centerRight,
           child: _OnboardingStyleAction(
@@ -1033,37 +1127,41 @@ class _SpecialtyToggleTag extends StatelessWidget {
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: onTap,
-      child: Container(
-        height: 36,
-        padding: const EdgeInsets.only(left: 18, right: 10),
-        alignment: Alignment.center,
+      child: DecoratedBox(
         decoration: BoxDecoration(
           color: selected ? Colors.black : Colors.white,
           borderRadius: BorderRadius.circular(999),
         ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              label,
-              style: TextStyle(
-                color: selected ? Colors.white : Colors.black,
-                fontSize: 14,
-                fontFamily: 'ABC Diatype',
-                fontWeight: FontWeight.w500,
-              ),
+        child: SizedBox(
+          height: 38,
+          child: Padding(
+            padding: const EdgeInsets.only(left: 18, right: 12),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  label,
+                  softWrap: false,
+                  style: TextStyle(
+                    color: selected ? Colors.white : Colors.black,
+                    fontSize: 15,
+                    fontFamily: 'ABC Diatype',
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                SizedBox(
+                  width: 19,
+                  height: 19,
+                  child: Icon(
+                    selected ? Icons.close_rounded : Icons.add_rounded,
+                    color: selected ? Colors.white : Colors.black,
+                    size: 18,
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(width: 9),
-            SizedBox(
-              width: 18,
-              height: 18,
-              child: Icon(
-                selected ? Icons.close_rounded : Icons.add_rounded,
-                color: selected ? Colors.white : Colors.black,
-                size: 16,
-              ),
-            ),
-          ],
+          ),
         ),
       ),
     );
@@ -1213,36 +1311,45 @@ class _VetQueue {
 }
 
 class _ActiveConsult {
-  const _ActiveConsult({required this.name, required this.status, required this.mode});
+  const _ActiveConsult({required this.sessionId, required this.name, required this.status, required this.mode});
 
   factory _ActiveConsult.fromJson(Map<String, dynamic> json) {
-    final source = json['source']?.toString() ?? '';
+    final mode = _normalizeConsultMode(json['mode']);
     return _ActiveConsult(
+      sessionId: json['session_id']?.toString() ?? '',
       name: _displayName(json),
       status: json['status']?.toString() ?? 'activa',
-      mode: source == 'session' ? 'chat' : 'video',
+      mode: mode,
     );
   }
 
+  final String sessionId;
   final String name;
   final String status;
   final String mode;
+
+  bool get canJoinVideo => mode == 'video' && sessionId.trim().isNotEmpty;
 }
 
 class _UpcomingAppointment {
-  const _UpcomingAppointment({required this.name, required this.startsAt});
+  const _UpcomingAppointment({required this.sessionId, required this.name, required this.startsAt, required this.mode});
 
   factory _UpcomingAppointment.fromJson(Map<String, dynamic> json) {
     return _UpcomingAppointment(
+      sessionId: json['session_id']?.toString() ?? '',
       name: _displayName(json),
       startsAt: _parseDateTime(json['starts_at']),
+      mode: _normalizeConsultMode(json['mode'], fallback: 'video'),
     );
   }
 
+  final String sessionId;
   final String name;
   final DateTime? startsAt;
+  final String mode;
 
   String get formattedStart => startsAt == null ? 'hora por confirmar' : _formatAppointmentDate(startsAt!);
+  bool get canJoinVideo => mode == 'video' && sessionId.trim().isNotEmpty;
 }
 
 class _VetProfile {
@@ -1349,6 +1456,13 @@ String _displayName(Map<String, dynamic> json) {
   final userName = json['user_name']?.toString().trim();
   if (userName != null && userName.isNotEmpty) return userName;
   return 'consulta';
+}
+
+String _normalizeConsultMode(Object? value, {String fallback = 'chat'}) {
+  final normalized = value?.toString().trim().toLowerCase();
+  if (normalized == 'video' || normalized == 'scheduled_video') return 'video';
+  if (normalized == 'chat') return 'chat';
+  return fallback;
 }
 
 DateTime? _parseDateTime(Object? value) {

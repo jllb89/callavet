@@ -19,7 +19,8 @@ const _chatPlanOrder = [
   'pro-entrenador',
   'rancho-trabajo',
 ];
-const _noUpgradePlanAvailableMessage = 'No encontré un plan superior que libere disponibilidad para esta consulta.';
+const _noUpgradePlanAvailableMessage =
+    'No encontré un plan superior que libere disponibilidad para esta consulta.';
 int _chatMessageSequence = 0;
 
 String _nextChatMessageId() {
@@ -83,7 +84,8 @@ class _ChatScreenState extends State<ChatScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final initialMessage = widget.initialMessage?.trim();
       if (initialMessage != null && initialMessage.isNotEmpty) {
-        _aiChatLog('postFrame auto-sending initial message preview="${_preview(initialMessage)}"');
+        _aiChatLog(
+            'postFrame auto-sending initial message preview="${_preview(initialMessage)}"');
         _sendUserMessage(initialMessage);
       } else {
         _aiChatLog('postFrame no initial message; focusing composer');
@@ -94,7 +96,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
-    _aiChatLog('dispose conversationId=$_conversationId totalMessages=${_messages.length}');
+    _aiChatLog(
+        'dispose conversationId=$_conversationId totalMessages=${_messages.length}');
     _inputCtrl.dispose();
     _focusNode.dispose();
     _scrollController.dispose();
@@ -111,14 +114,16 @@ class _ChatScreenState extends State<ChatScreen> {
       _aiChatLog('composer send ignored: request already in flight');
       return;
     }
-    _aiChatLog('composer send accepted length=${text.length} preview="${_preview(text)}"');
+    _aiChatLog(
+        'composer send accepted length=${text.length} preview="${_preview(text)}"');
     _inputCtrl.clear();
     _sendUserMessage(text);
   }
 
   Future<void> _sendUserMessage(String text) async {
     if (_isSending) {
-      _aiChatLog('sendUserMessage ignored while sending preview="${_preview(text)}"');
+      _aiChatLog(
+          'sendUserMessage ignored while sending preview="${_preview(text)}"');
       return;
     }
     final history = _historyForApi();
@@ -130,12 +135,14 @@ class _ChatScreenState extends State<ChatScreen> {
       _messages.add(_ChatMessage.user(text));
       _isSending = true;
     });
-    _aiChatLog('sendUserMessage state updated: user bubble appended isSending=$_isSending');
+    _aiChatLog(
+        'sendUserMessage state updated: user bubble appended isSending=$_isSending');
     _scrollToBottom();
 
     try {
       final response = await _runAiTurn(text, history);
-      _aiChatLog('sendUserMessage raw response keys=${response.keys.join(',')}');
+      _aiChatLog(
+          'sendUserMessage raw response keys=${response.keys.join(',')}');
       final result = _AiChatTurnResult.fromJson(response);
       _aiChatLog(
         'sendUserMessage parsed result urgency=${result.payload.urgency} '
@@ -144,19 +151,23 @@ class _ChatScreenState extends State<ChatScreen> {
       );
       if (!mounted) return;
       setState(() {
-        _messages.add(_ChatMessage.assistant(result.payload.message, result: result));
+        _messages.add(
+            _ChatMessage.assistant(result.payload.message, result: result));
         _isSending = false;
       });
-      _aiChatLog('sendUserMessage success: assistant bubble appended totalMessages=${_messages.length}');
+      _aiChatLog(
+          'sendUserMessage success: assistant bubble appended totalMessages=${_messages.length}');
       _scrollToBottom();
     } catch (error) {
       _aiChatLog('sendUserMessage failed: ${error.runtimeType} $error');
       if (!mounted) return;
       setState(() {
-        _messages.add(_ChatMessage.assistant(_friendlyError(error), includeInHistory: false));
+        _messages.add(_ChatMessage.assistant(_friendlyError(error),
+            includeInHistory: false));
         _isSending = false;
       });
-      _aiChatLog('sendUserMessage error bubble appended totalMessages=${_messages.length}');
+      _aiChatLog(
+          'sendUserMessage error bubble appended totalMessages=${_messages.length}');
       _scrollToBottom();
     }
   }
@@ -167,14 +178,17 @@ class _ChatScreenState extends State<ChatScreen> {
   ) async {
     final token = Supabase.instance.client.auth.currentSession?.accessToken;
     final userId = Supabase.instance.client.auth.currentUser?.id;
-    _aiChatLog('runAiTurn auth snapshot tokenPresent=${token?.isNotEmpty == true} userId=$userId');
+    _aiChatLog(
+        'runAiTurn auth snapshot tokenPresent=${token?.isNotEmpty == true} userId=$userId');
     if (token == null || token.isEmpty) {
       _aiChatLog('runAiTurn aborted: missing Supabase access token');
-      throw const _ChatApiException('Tu sesión expiró. Vuelve a iniciar sesión.');
+      throw const _ChatApiException(
+          'Tu sesión expiró. Vuelve a iniciar sesión.');
     }
 
     final sessionId = _uuidOrNull(widget.sessionId);
-    _aiChatLog('runAiTurn session routing raw=${widget.sessionId} normalized=${sessionId ?? 'none'}');
+    _aiChatLog(
+        'runAiTurn session routing raw=${widget.sessionId} normalized=${sessionId ?? 'none'}');
     final body = <String, dynamic>{
       'conversationId': _conversationId,
       'message': message,
@@ -191,37 +205,46 @@ class _ChatScreenState extends State<ChatScreen> {
         'runAiTurn POST $uri bodySummary={conversationId:$_conversationId, messageLength:${message.length}, '
         'historyCount:${history.length}, sessionId:${sessionId ?? 'none'}, dryRun:$_aiChatDryRun}',
       );
-      final request = await client.postUrl(uri).timeout(const Duration(seconds: 10));
+      final request =
+          await client.postUrl(uri).timeout(const Duration(seconds: 10));
       request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
       request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
       request.add(utf8.encode(jsonEncode(body)));
       _aiChatLog('runAiTurn request sent; awaiting gateway response');
 
-      final response = await request.close().timeout(const Duration(seconds: 45));
+      final response =
+          await request.close().timeout(const Duration(seconds: 45));
       final rawBody = await utf8.decoder.bind(response).join();
       final elapsedMs = DateTime.now().difference(startedAt).inMilliseconds;
       _aiChatLog(
         'runAiTurn response status=${response.statusCode} elapsedMs=$elapsedMs bodyLength=${rawBody.length} '
         'bodyPreview="${_preview(rawBody, max: 500)}"',
       );
-      final decoded = rawBody.trim().isEmpty ? <String, dynamic>{} : jsonDecode(rawBody);
+      final decoded =
+          rawBody.trim().isEmpty ? <String, dynamic>{} : jsonDecode(rawBody);
       final data = _asMap(decoded) ?? <String, dynamic>{};
       _aiChatLog('runAiTurn decoded response mapKeys=${data.keys.join(',')}');
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        _aiChatLog('runAiTurn gateway returned error status=${response.statusCode} message=${_errorMessage(data, response.statusCode)}');
+        _aiChatLog(
+            'runAiTurn gateway returned error status=${response.statusCode} message=${_errorMessage(data, response.statusCode)}');
         throw _ChatApiException(_errorMessage(data, response.statusCode));
       }
       return data;
     } on TimeoutException {
-      _aiChatLog('runAiTurn timeout after ${DateTime.now().difference(startedAt).inMilliseconds}ms');
-      throw const _ChatApiException('La conexión tardó demasiado. Inténtalo otra vez.');
+      _aiChatLog(
+          'runAiTurn timeout after ${DateTime.now().difference(startedAt).inMilliseconds}ms');
+      throw const _ChatApiException(
+          'La conexión tardó demasiado. Inténtalo otra vez.');
     } on FormatException catch (error) {
       _aiChatLog('runAiTurn JSON decode failed: $error');
-      throw const _ChatApiException('El asistente respondió con datos inválidos.');
+      throw const _ChatApiException(
+          'El asistente respondió con datos inválidos.');
     } on SocketException {
-      _aiChatLog('runAiTurn socket error while reaching ${Environment.apiBaseUrl}');
-      throw const _ChatApiException('No hay conexión con Call a Vet en este momento.');
+      _aiChatLog(
+          'runAiTurn socket error while reaching ${Environment.apiBaseUrl}');
+      throw const _ChatApiException(
+          'No hay conexión con Call a Vet en este momento.');
     } finally {
       _aiChatLog('runAiTurn closing HttpClient');
       client.close(force: true);
@@ -238,7 +261,8 @@ class _ChatScreenState extends State<ChatScreen> {
           },
         )
         .toList(growable: false);
-    _aiChatLog('historyForApi prepared count=${history.length} roles=${history.map((message) => message['role']).join(',')}');
+    _aiChatLog(
+        'historyForApi prepared count=${history.length} roles=${history.map((message) => message['role']).join(',')}');
     return history;
   }
 
@@ -246,13 +270,15 @@ class _ChatScreenState extends State<ChatScreen> {
     _aiChatLog('quickReply selected service=$service isSending=$_isSending');
     final text = switch (service) {
       'video' => 'Quiero una videollamada ahora con un veterinario.',
-      'scheduled_video' => 'Quiero agendar una videollamada con un veterinario.',
+      'scheduled_video' =>
+        'Quiero agendar una videollamada con un veterinario.',
       _ => 'Quiero continuar por chat con un veterinario.',
     };
     _sendUserMessage(text);
   }
 
-  Future<void> _activateService(String service, _AiChatTurnResult result, {bool addUserBubble = true}) async {
+  Future<void> _activateService(String service, _AiChatTurnResult result,
+      {bool addUserBubble = true}) async {
     if (service == 'scheduled_video') {
       _sendQuickReply(service);
       return;
@@ -267,7 +293,9 @@ class _ChatScreenState extends State<ChatScreen> {
     );
     setState(() {
       if (addUserBubble) {
-        _messages.add(_ChatMessage.user(kind == 'video' ? 'Iniciar videollamada ahora.' : 'Iniciar chat con el veterinario.'));
+        _messages.add(_ChatMessage.user(kind == 'video'
+            ? 'Iniciar videollamada ahora.'
+            : 'Iniciar chat con el veterinario.'));
       }
       _isSending = true;
     });
@@ -275,7 +303,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
     try {
       final start = await _startSession(kind, result);
-      _aiChatLog('activateService /sessions/start response keys=${start.keys.join(',')}');
+      _aiChatLog(
+          'activateService /sessions/start response keys=${start.keys.join(',')}');
       if (start['overage'] == true) {
         final exhaustedResult = result.withEntitlement(
           serviceType: kind,
@@ -283,7 +312,8 @@ class _ChatScreenState extends State<ChatScreen> {
           remaining: 0,
           reason: start['overageReason']?.toString(),
         );
-        final offerMessage = await _aiEntitlementOfferMessage(kind, start, exhaustedResult);
+        final offerMessage =
+            await _aiEntitlementOfferMessage(kind, start, exhaustedResult);
         if (!mounted) return;
         setState(() {
           _messages.add(_ChatMessage.assistant(
@@ -301,22 +331,27 @@ class _ChatScreenState extends State<ChatScreen> {
       _aiChatLog('activateService failed: ${error.runtimeType} $error');
       if (!mounted) return;
       setState(() {
-        _messages.add(_ChatMessage.assistant(_friendlyError(error), includeInHistory: false));
+        _messages.add(_ChatMessage.assistant(_friendlyError(error),
+            includeInHistory: false));
         _isSending = false;
       });
       _scrollToBottom();
     }
   }
 
-  Future<void> _purchaseSingleSession(String service, _AiChatTurnResult result) async {
+  Future<void> _purchaseSingleSession(
+      String service, _AiChatTurnResult result) async {
     if (_isSending) {
       _aiChatLog('purchaseSingleSession ignored while busy service=$service');
       return;
     }
-    final kind = service == 'video' || service == 'scheduled_video' ? 'video' : 'chat';
+    final kind =
+        service == 'video' || service == 'scheduled_video' ? 'video' : 'chat';
     _aiChatLog('purchaseSingleSession start kind=$kind');
     setState(() {
-      _messages.add(_ChatMessage.user(kind == 'video' ? 'Comprar videollamada única.' : 'Comprar chat único.'));
+      _messages.add(_ChatMessage.user(kind == 'video'
+          ? 'Comprar videollamada única.'
+          : 'Comprar chat único.'));
       _isSending = true;
     });
     _scrollToBottom();
@@ -326,14 +361,19 @@ class _ChatScreenState extends State<ChatScreen> {
         'type': kind,
         'quantity': 1,
       });
-      _aiChatLog('purchaseSingleSession dev grant response keys=${grant.keys.join(',')}');
+      _aiChatLog(
+          'purchaseSingleSession dev grant response keys=${grant.keys.join(',')}');
       final start = await _startSession(kind, result);
       if (start['overage'] == true) {
         if (!mounted) return;
         setState(() {
           _messages.add(_ChatMessage.assistant(
             _paymentRequiredMessage(start),
-            result: result.withEntitlement(serviceType: kind, canUse: false, remaining: 0, reason: start['overageReason']?.toString()),
+            result: result.withEntitlement(
+                serviceType: kind,
+                canUse: false,
+                remaining: 0,
+                reason: start['overageReason']?.toString()),
             includeInHistory: false,
           ));
           _isSending = false;
@@ -346,7 +386,8 @@ class _ChatScreenState extends State<ChatScreen> {
       _aiChatLog('purchaseSingleSession failed: ${error.runtimeType} $error');
       if (!mounted) return;
       setState(() {
-        _messages.add(_ChatMessage.assistant(_friendlyError(error), includeInHistory: false));
+        _messages.add(_ChatMessage.assistant(_friendlyError(error),
+            includeInHistory: false));
         _isSending = false;
       });
       _scrollToBottom();
@@ -363,7 +404,8 @@ class _ChatScreenState extends State<ChatScreen> {
     _scrollToBottom();
 
     try {
-      final option = await _fetchSubscriptionUpgradeOption(result.commerceService);
+      final option =
+          await _fetchSubscriptionUpgradeOption(result.commerceService);
       final message = await _aiUpgradePlanMessage(option, result);
       if (!mounted) return;
       setState(() {
@@ -377,10 +419,13 @@ class _ChatScreenState extends State<ChatScreen> {
       _scrollToBottom();
     } catch (error) {
       _aiChatLog('openSubscriptionUpgrade failed: ${error.runtimeType} $error');
-      if (error is _ChatApiException && error.message == _noUpgradePlanAvailableMessage) {
+      if (error is _ChatApiException &&
+          error.message == _noUpgradePlanAvailableMessage) {
         final service = result.commerceService;
-        final includedLabel = service == 'video' ? 'videollamadas incluidas' : 'chats incluidos';
-        final oneOffLabel = service == 'video' ? 'una videollamada única' : 'un chat único';
+        final includedLabel =
+            service == 'video' ? 'videollamadas incluidas' : 'chats incluidos';
+        final oneOffLabel =
+            service == 'video' ? 'una videollamada única' : 'un chat único';
         final fallbackResult = result.withEntitlement(
           serviceType: service,
           canUse: false,
@@ -402,16 +447,19 @@ class _ChatScreenState extends State<ChatScreen> {
       }
       if (!mounted) return;
       setState(() {
-        _messages.add(_ChatMessage.assistant(_friendlyError(error), includeInHistory: false));
+        _messages.add(_ChatMessage.assistant(_friendlyError(error),
+            includeInHistory: false));
         _isSending = false;
       });
       _scrollToBottom();
     }
   }
 
-  Future<void> _confirmSubscriptionUpgrade(_ChatSubscriptionPlan plan, _AiChatTurnResult result) async {
+  Future<void> _confirmSubscriptionUpgrade(
+      _ChatSubscriptionPlan plan, _AiChatTurnResult result) async {
     if (_isSending) return;
-    _aiChatLog('confirmSubscriptionUpgrade start plan=${plan.code} service=${result.commerceService}');
+    _aiChatLog(
+        'confirmSubscriptionUpgrade start plan=${plan.code} service=${result.commerceService}');
     setState(() {
       _messages.add(_ChatMessage.user('Actualizar a ${plan.displayName}.'));
       _isSending = true;
@@ -419,12 +467,16 @@ class _ChatScreenState extends State<ChatScreen> {
     _scrollToBottom();
 
     try {
-      var upgrade = await _postGatewayJson('/subscriptions/change-plan', {'code': plan.code});
-      if (upgrade['ok'] != true && upgrade['reason']?.toString() == 'no_active_subscription') {
-        upgrade = await _postGatewayJson('/subscriptions/activate-plan', {'code': plan.code});
+      var upgrade = await _postGatewayJson(
+          '/subscriptions/change-plan', {'code': plan.code});
+      if (upgrade['ok'] != true &&
+          upgrade['reason']?.toString() == 'no_active_subscription') {
+        upgrade = await _postGatewayJson(
+            '/subscriptions/activate-plan', {'code': plan.code});
       }
       if (upgrade['ok'] != true) {
-        throw _ChatApiException('No pude actualizar el plan: ${upgrade['reason']?.toString() ?? 'respuesta inválida'}');
+        throw _ChatApiException(
+            'No pude actualizar el plan: ${upgrade['reason']?.toString() ?? 'respuesta inválida'}');
       }
 
       final message = await _aiUpgradeConfirmedMessage(plan, result);
@@ -435,15 +487,21 @@ class _ChatScreenState extends State<ChatScreen> {
       });
       _scrollToBottom();
 
-      if (result.canRetryActivationAfterUpgrade && await _hasServiceAvailability(result.commerceService)) {
-        await _activateService(result.commerceService, result, addUserBubble: false);
+      if (result.canRetryActivationAfterUpgrade &&
+          await _hasServiceAvailability(result.commerceService)) {
+        await _activateService(result.commerceService, result,
+            addUserBubble: false);
       } else if (result.canRetryActivationAfterUpgrade) {
         final message = await _aiPostUpgradeStillExhaustedMessage(plan, result);
         if (!mounted) return;
         setState(() {
           _messages.add(_ChatMessage.assistant(
             message,
-            result: result.withEntitlement(serviceType: result.commerceService, canUse: false, remaining: 0, reason: 'no_${result.commerceService}_entitlement_left'),
+            result: result.withEntitlement(
+                serviceType: result.commerceService,
+                canUse: false,
+                remaining: 0,
+                reason: 'no_${result.commerceService}_entitlement_left'),
             includeInHistory: false,
           ));
           _isSending = false;
@@ -451,26 +509,33 @@ class _ChatScreenState extends State<ChatScreen> {
         _scrollToBottom();
       }
     } catch (error) {
-      _aiChatLog('confirmSubscriptionUpgrade failed: ${error.runtimeType} $error');
+      _aiChatLog(
+          'confirmSubscriptionUpgrade failed: ${error.runtimeType} $error');
       if (!mounted) return;
       setState(() {
-        _messages.add(_ChatMessage.assistant(_friendlyError(error), includeInHistory: false));
+        _messages.add(_ChatMessage.assistant(_friendlyError(error),
+            includeInHistory: false));
         _isSending = false;
       });
       _scrollToBottom();
     }
   }
 
-  Future<_SubscriptionUpgradeOption> _fetchSubscriptionUpgradeOption(String service) async {
+  Future<_SubscriptionUpgradeOption> _fetchSubscriptionUpgradeOption(
+      String service) async {
     final subscriptions = await _getGatewayJson('/subscriptions/my');
     final usageResponse = await _getGatewayJson('/subscriptions/usage/current');
     final plansResponse = await _getGatewayJson('/plans');
-    final usage = _ChatSubscriptionUsage.fromJson(_asMap(usageResponse['usage']) ?? const {});
+    final usage = _ChatSubscriptionUsage.fromJson(
+        _asMap(usageResponse['usage']) ?? const {});
     final plans = (_asList(plansResponse['items']) ?? const [])
         .map(_asMap)
         .whereType<Map<String, dynamic>>()
         .map(_ChatSubscriptionPlan.fromJson)
-        .where((plan) => plan.code.isNotEmpty && (plan.includedChats > 0 || plan.includedVideos > 0) && !plan.code.endsWith('_unit'))
+        .where((plan) =>
+            plan.code.isNotEmpty &&
+            (plan.includedChats > 0 || plan.includedVideos > 0) &&
+            !plan.code.endsWith('_unit'))
         .toList();
 
     plans.sort((a, b) {
@@ -480,7 +545,8 @@ class _ChatScreenState extends State<ChatScreen> {
       return price != 0 ? price : a.code.compareTo(b.code);
     });
     if (plans.isEmpty) {
-      throw const _ChatApiException('No pude cargar los planes disponibles. Inténtalo de nuevo.');
+      throw const _ChatApiException(
+          'No pude cargar los planes disponibles. Inténtalo de nuevo.');
     }
 
     Map<String, dynamic>? activeRow;
@@ -492,14 +558,26 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     }
 
-    final currentCode = _asMap(activeRow?['plan'])?['code']?.toString().toLowerCase();
-    final currentPlan = currentCode == null ? null : _findPlanByCode(plans, currentCode);
-    final currentIndex = currentPlan == null ? -1 : plans.indexWhere((plan) => plan.code.toLowerCase() == currentPlan.code.toLowerCase());
+    final currentCode =
+        _asMap(activeRow?['plan'])?['code']?.toString().toLowerCase();
+    final currentPlan =
+        currentCode == null ? null : _findPlanByCode(plans, currentCode);
+    final currentIndex = currentPlan == null
+        ? -1
+        : plans.indexWhere((plan) =>
+            plan.code.toLowerCase() == currentPlan.code.toLowerCase());
     final targetPlan = plans.firstWhere(
       (plan) {
-        final planIndex = plans.indexWhere((item) => item.code.toLowerCase() == plan.code.toLowerCase());
-        if (currentIndex >= 0 && planIndex <= currentIndex) return false;
-        if (currentIndex < 0 && currentPlan != null && plan.monthlyCents <= currentPlan.monthlyCents) return false;
+        final planIndex = plans.indexWhere(
+            (item) => item.code.toLowerCase() == plan.code.toLowerCase());
+        if (currentIndex >= 0 && planIndex <= currentIndex) {
+          return false;
+        }
+        if (currentIndex < 0 &&
+            currentPlan != null &&
+            plan.monthlyCents <= currentPlan.monthlyCents) {
+          return false;
+        }
         return usage.remainingForPlan(plan, service) > 0;
       },
       orElse: () => const _ChatSubscriptionPlan.empty(),
@@ -509,10 +587,12 @@ class _ChatScreenState extends State<ChatScreen> {
       throw const _ChatApiException(_noUpgradePlanAvailableMessage);
     }
 
-    return _SubscriptionUpgradeOption(currentPlan: currentPlan, targetPlan: targetPlan, usage: usage);
+    return _SubscriptionUpgradeOption(
+        currentPlan: currentPlan, targetPlan: targetPlan, usage: usage);
   }
 
-  Future<String> _aiUpgradePlanMessage(_SubscriptionUpgradeOption option, _AiChatTurnResult result) async {
+  Future<String> _aiUpgradePlanMessage(
+      _SubscriptionUpgradeOption option, _AiChatTurnResult result) async {
     final service = result.commerceService == 'video' ? 'videollamada' : 'chat';
     final prompt = [
       'Contexto interno de Call a Vet: el usuario tocó mejorar plan dentro del chat porque necesita más acceso a $service.',
@@ -526,15 +606,18 @@ class _ChatScreenState extends State<ChatScreen> {
     ].join(' ');
     try {
       final response = await _runAiTurn(prompt, const []);
-      final generated = _AiChatTurnResult.fromJson(response).payload.message.trim();
+      final generated =
+          _AiChatTurnResult.fromJson(response).payload.message.trim();
       if (generated.isNotEmpty) return generated;
     } catch (error) {
-      _aiChatLog('aiUpgradePlanMessage fallback after ${error.runtimeType}: $error');
+      _aiChatLog(
+          'aiUpgradePlanMessage fallback after ${error.runtimeType}: $error');
     }
     return '${option.targetPlan.displayName} te da ${option.targetPlan.includedChats} chats y ${option.targetPlan.includedVideos} videollamadas incluidas para tener más margen de atención. Puedes actualizar desde el botón del chat.';
   }
 
-  Future<String> _aiUpgradeConfirmedMessage(_ChatSubscriptionPlan plan, _AiChatTurnResult result) async {
+  Future<String> _aiUpgradeConfirmedMessage(
+      _ChatSubscriptionPlan plan, _AiChatTurnResult result) async {
     final service = result.commerceService == 'video' ? 'videollamada' : 'chat';
     final prompt = [
       'Contexto interno de Call a Vet: el usuario actualizó su suscripción al plan ${plan.displayName} dentro del chat.',
@@ -545,16 +628,20 @@ class _ChatScreenState extends State<ChatScreen> {
     ].join(' ');
     try {
       final response = await _runAiTurn(prompt, const []);
-      final generated = _AiChatTurnResult.fromJson(response).payload.message.trim();
+      final generated =
+          _AiChatTurnResult.fromJson(response).payload.message.trim();
       if (generated.isNotEmpty) return generated;
     } catch (error) {
-      _aiChatLog('aiUpgradeConfirmedMessage fallback after ${error.runtimeType}: $error');
+      _aiChatLog(
+          'aiUpgradeConfirmedMessage fallback after ${error.runtimeType}: $error');
     }
     return 'Tu suscripción se actualizó a ${plan.displayName}; voy a volver a validar la disponibilidad de $service.';
   }
 
-  Future<String> _aiPostUpgradeStillExhaustedMessage(_ChatSubscriptionPlan plan, _AiChatTurnResult result) async {
-    final service = result.commerceService == 'video' ? 'videollamadas' : 'chats';
+  Future<String> _aiPostUpgradeStillExhaustedMessage(
+      _ChatSubscriptionPlan plan, _AiChatTurnResult result) async {
+    final service =
+        result.commerceService == 'video' ? 'videollamadas' : 'chats';
     final prompt = [
       'Contexto interno de Call a Vet: el usuario actualizó a ${plan.displayName}, pero al revalidar aún no quedan $service incluidos disponibles este periodo.',
       'Escribe solo el mensaje visible para el usuario, en español, máximo dos frases.',
@@ -563,50 +650,63 @@ class _ChatScreenState extends State<ChatScreen> {
     ].join(' ');
     try {
       final response = await _runAiTurn(prompt, const []);
-      final generated = _AiChatTurnResult.fromJson(response).payload.message.trim();
+      final generated =
+          _AiChatTurnResult.fromJson(response).payload.message.trim();
       if (generated.isNotEmpty) return generated;
     } catch (error) {
-      _aiChatLog('aiPostUpgradeStillExhaustedMessage fallback after ${error.runtimeType}: $error');
+      _aiChatLog(
+          'aiPostUpgradeStillExhaustedMessage fallback after ${error.runtimeType}: $error');
     }
     return 'La actualización a ${plan.displayName} se aplicó, pero el cupo de $service del periodo sigue agotado. Puedes comprar una sesión única o revisar otro plan desde aquí.';
   }
 
   Future<bool> _hasServiceAvailability(String service) async {
     final response = await _getGatewayJson('/subscriptions/usage/current');
-    final usage = _ChatSubscriptionUsage.fromJson(_asMap(response['usage']) ?? const {});
-    return service == 'video' ? usage.remainingVideos > 0 : usage.remainingChats > 0;
+    final usage =
+        _ChatSubscriptionUsage.fromJson(_asMap(response['usage']) ?? const {});
+    return service == 'video'
+        ? usage.remainingVideos > 0
+        : usage.remainingChats > 0;
   }
 
-  Future<void> _completeStartedSession(String kind, Map<String, dynamic> start) async {
+  Future<void> _completeStartedSession(
+      String kind, Map<String, dynamic> start) async {
     final sessionId = _uuidOrNull(start['sessionId']?.toString() ?? '');
     if (sessionId == null) {
-      throw const _ChatApiException('No pude activar la consulta: el servidor no devolvió una sesión válida.');
+      throw const _ChatApiException(
+          'No pude activar la consulta: el servidor no devolvió una sesión válida.');
     }
 
     if (kind == 'video') {
-      final room = await _createVideoRoom(sessionId);
-      final roomName = room['roomName']?.toString() ?? room['roomId']?.toString() ?? sessionId;
-      _aiChatLog('completeStartedSession video room created sessionId=$sessionId roomName=$roomName');
+      _aiChatLog(
+          'completeStartedSession video session active sessionId=$sessionId; navigating');
       if (!mounted) return;
       setState(() {
-        _messages.add(_ChatMessage.assistant('Videollamada activada. Sala: $roomName', includeInHistory: false));
+        _messages.add(_ChatMessage.assistant(
+            'Videollamada activada. Te conecto con el veterinario.',
+            includeInHistory: false));
         _isSending = false;
       });
       _scrollToBottom();
+      context.go('/video/${Uri.encodeComponent(sessionId)}');
       return;
     }
 
-    _aiChatLog('completeStartedSession chat session active sessionId=$sessionId; navigating');
+    _aiChatLog(
+        'completeStartedSession chat session active sessionId=$sessionId; navigating');
     if (!mounted) return;
     setState(() {
-      _messages.add(_ChatMessage.assistant('Chat con veterinario activado. Te llevo a la conversación.', includeInHistory: false));
+      _messages.add(_ChatMessage.assistant(
+          'Chat con veterinario activado. Te llevo a la conversación.',
+          includeInHistory: false));
       _isSending = false;
     });
     _scrollToBottom();
     context.go('/chat/${Uri.encodeComponent(sessionId)}');
   }
 
-  Future<Map<String, dynamic>> _startSession(String kind, _AiChatTurnResult result) {
+  Future<Map<String, dynamic>> _startSession(
+      String kind, _AiChatTurnResult result) {
     return _postGatewayJson('/sessions/start', {
       'kind': kind,
       if (result.petId != null) 'petId': result.petId,
@@ -615,14 +715,12 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
-  Future<Map<String, dynamic>> _createVideoRoom(String sessionId) {
-    return _postGatewayJson('/video/rooms', {'sessionId': sessionId});
-  }
-
-  Future<Map<String, dynamic>> _postGatewayJson(String path, Map<String, dynamic> body) async {
+  Future<Map<String, dynamic>> _postGatewayJson(
+      String path, Map<String, dynamic> body) async {
     final token = Supabase.instance.client.auth.currentSession?.accessToken;
     if (token == null || token.isEmpty) {
-      throw const _ChatApiException('Tu sesión expiró. Vuelve a iniciar sesión.');
+      throw const _ChatApiException(
+          'Tu sesión expiró. Vuelve a iniciar sesión.');
     }
 
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
@@ -630,30 +728,36 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       final uri = Uri.parse('${Environment.apiBaseUrl}$path');
       _aiChatLog('gateway POST $uri bodyKeys=${body.keys.join(',')}');
-      final request = await client.postUrl(uri).timeout(const Duration(seconds: 10));
+      final request =
+          await client.postUrl(uri).timeout(const Duration(seconds: 10));
       request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
       request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
       request.headers.set(HttpHeaders.acceptHeader, 'application/json');
       request.add(utf8.encode(jsonEncode(body)));
 
-      final response = await request.close().timeout(const Duration(seconds: 30));
+      final response =
+          await request.close().timeout(const Duration(seconds: 30));
       final rawBody = await utf8.decoder.bind(response).join();
       _aiChatLog(
         'gateway POST $path status=${response.statusCode} elapsedMs=${DateTime.now().difference(startedAt).inMilliseconds} '
         'bodyPreview="${_preview(rawBody, max: 420)}"',
       );
-      final decoded = rawBody.trim().isEmpty ? <String, dynamic>{} : jsonDecode(rawBody);
+      final decoded =
+          rawBody.trim().isEmpty ? <String, dynamic>{} : jsonDecode(rawBody);
       final data = _asMap(decoded) ?? <String, dynamic>{};
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw _ChatApiException(_errorMessage(data, response.statusCode));
       }
       return data;
     } on TimeoutException {
-      throw const _ChatApiException('La conexión tardó demasiado. Inténtalo otra vez.');
+      throw const _ChatApiException(
+          'La conexión tardó demasiado. Inténtalo otra vez.');
     } on FormatException {
-      throw const _ChatApiException('El servidor respondió con datos inválidos.');
+      throw const _ChatApiException(
+          'El servidor respondió con datos inválidos.');
     } on SocketException {
-      throw const _ChatApiException('No hay conexión con Call a Vet en este momento.');
+      throw const _ChatApiException(
+          'No hay conexión con Call a Vet en este momento.');
     } finally {
       client.close(force: true);
     }
@@ -662,7 +766,8 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<Map<String, dynamic>> _getGatewayJson(String path) async {
     final token = Supabase.instance.client.auth.currentSession?.accessToken;
     if (token == null || token.isEmpty) {
-      throw const _ChatApiException('Tu sesión expiró. Vuelve a iniciar sesión.');
+      throw const _ChatApiException(
+          'Tu sesión expiró. Vuelve a iniciar sesión.');
     }
 
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
@@ -670,28 +775,34 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       final uri = Uri.parse('${Environment.apiBaseUrl}$path');
       _aiChatLog('gateway GET $uri');
-      final request = await client.getUrl(uri).timeout(const Duration(seconds: 10));
+      final request =
+          await client.getUrl(uri).timeout(const Duration(seconds: 10));
       request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
       request.headers.set(HttpHeaders.acceptHeader, 'application/json');
 
-      final response = await request.close().timeout(const Duration(seconds: 30));
+      final response =
+          await request.close().timeout(const Duration(seconds: 30));
       final rawBody = await utf8.decoder.bind(response).join();
       _aiChatLog(
         'gateway GET $path status=${response.statusCode} elapsedMs=${DateTime.now().difference(startedAt).inMilliseconds} '
         'bodyPreview="${_preview(rawBody, max: 420)}"',
       );
-      final decoded = rawBody.trim().isEmpty ? <String, dynamic>{} : jsonDecode(rawBody);
+      final decoded =
+          rawBody.trim().isEmpty ? <String, dynamic>{} : jsonDecode(rawBody);
       final data = _asMap(decoded) ?? <String, dynamic>{};
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw _ChatApiException(_errorMessage(data, response.statusCode));
       }
       return data;
     } on TimeoutException {
-      throw const _ChatApiException('La conexión tardó demasiado. Inténtalo otra vez.');
+      throw const _ChatApiException(
+          'La conexión tardó demasiado. Inténtalo otra vez.');
     } on FormatException {
-      throw const _ChatApiException('El servidor respondió con datos inválidos.');
+      throw const _ChatApiException(
+          'El servidor respondió con datos inválidos.');
     } on SocketException {
-      throw const _ChatApiException('No hay conexión con Call a Vet en este momento.');
+      throw const _ChatApiException(
+          'No hay conexión con Call a Vet en este momento.');
     } finally {
       client.close(force: true);
     }
@@ -707,9 +818,12 @@ class _ChatScreenState extends State<ChatScreen> {
     return 'Para activar esta consulta necesitas pago o crédito adicional. Motivo: $reason';
   }
 
-  Future<String> _aiEntitlementOfferMessage(String kind, Map<String, dynamic> start, _AiChatTurnResult result) async {
+  Future<String> _aiEntitlementOfferMessage(
+      String kind, Map<String, dynamic> start, _AiChatTurnResult result) async {
     final service = kind == 'video' ? 'videollamada' : 'chat';
-    final reason = start['overageReason']?.toString() ?? result.serviceAccessReason ?? 'no_entitlement';
+    final reason = start['overageReason']?.toString() ??
+        result.serviceAccessReason ??
+        'no_entitlement';
     final prompt = [
       'Contexto interno de Call a Vet: el usuario intentó activar una $service, pero el servidor confirmó que no tiene disponibilidad incluida en su suscripción.',
       'Motivo técnico: $reason.',
@@ -721,10 +835,12 @@ class _ChatScreenState extends State<ChatScreen> {
 
     try {
       final response = await _runAiTurn(prompt, const []);
-      final generated = _AiChatTurnResult.fromJson(response).payload.message.trim();
+      final generated =
+          _AiChatTurnResult.fromJson(response).payload.message.trim();
       if (generated.isNotEmpty) return generated;
     } catch (error) {
-      _aiChatLog('aiEntitlementOfferMessage fallback after ${error.runtimeType}: $error');
+      _aiChatLog(
+          'aiEntitlementOfferMessage fallback after ${error.runtimeType}: $error');
     }
 
     return 'Tu plan ya no tiene $service incluida disponible. Puedes comprar una $service única o mejorar tu suscripción.';
@@ -777,7 +893,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Widget _buildThread(BuildContext context) {
     final topInset = MediaQuery.paddingOf(context).top;
-    final bottomInset = widget.embedded ? 0.0 : MediaQuery.paddingOf(context).bottom;
+    final bottomInset =
+        widget.embedded ? 0.0 : MediaQuery.paddingOf(context).bottom;
     final messageList = ListView.builder(
       controller: _scrollController,
       padding: EdgeInsets.fromLTRB(
@@ -883,8 +1000,11 @@ class _MessageOpacityFade extends StatelessWidget {
     return ShaderMask(
       blendMode: BlendMode.dstIn,
       shaderCallback: (bounds) {
-        final topStop = (topFadeHeight / bounds.height).clamp(0.12, 0.32).toDouble();
-        final bottomStart = (1 - (bottomFadeHeight / bounds.height)).clamp(0.68, 0.90).toDouble();
+        final topStop =
+            (topFadeHeight / bounds.height).clamp(0.12, 0.32).toDouble();
+        final bottomStart = (1 - (bottomFadeHeight / bounds.height))
+            .clamp(0.68, 0.90)
+            .toDouble();
         return LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
@@ -1001,10 +1121,13 @@ class _MessageBubble extends StatelessWidget {
   final bool embedded;
   final bool sending;
   final bool canShowActions;
-  final void Function(String service, _AiChatTurnResult result) onServiceSelected;
-  final void Function(String service, _AiChatTurnResult result) onOneOffPurchaseSelected;
+  final void Function(String service, _AiChatTurnResult result)
+      onServiceSelected;
+  final void Function(String service, _AiChatTurnResult result)
+      onOneOffPurchaseSelected;
   final void Function(_AiChatTurnResult result) onUpgradeSelected;
-  final void Function(_ChatSubscriptionPlan plan, _AiChatTurnResult result) onPlanUpgradeConfirmed;
+  final void Function(_ChatSubscriptionPlan plan, _AiChatTurnResult result)
+      onPlanUpgradeConfirmed;
 
   @override
   Widget build(BuildContext context) {
@@ -1012,8 +1135,10 @@ class _MessageBubble extends StatelessWidget {
     final bubbleColor = isUser ? const Color(0xFF242426) : Colors.black;
     const textColor = Colors.white;
     final viewportWidth = MediaQuery.sizeOf(context).width;
-    final widthFactor = isUser ? (embedded ? 0.90 : 0.78) : (embedded ? 0.96 : 0.86);
-    final fixedCap = isUser ? (embedded ? 360.0 : 420.0) : (embedded ? 390.0 : 460.0);
+    final widthFactor =
+        isUser ? (embedded ? 0.90 : 0.78) : (embedded ? 0.96 : 0.86);
+    final fixedCap =
+        isUser ? (embedded ? 360.0 : 420.0) : (embedded ? 390.0 : 460.0);
     final maxBubbleWidth = math.min(viewportWidth * widthFactor, fixedCap);
 
     return Padding(
@@ -1025,7 +1150,8 @@ class _MessageBubble extends StatelessWidget {
             maxWidth: maxBubbleWidth,
           ),
           child: Column(
-            crossAxisAlignment: isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+            crossAxisAlignment:
+                isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
             children: [
               DecoratedBox(
                 decoration: BoxDecoration(
@@ -1038,9 +1164,12 @@ class _MessageBubble extends StatelessWidget {
                   ),
                 ),
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 13),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 18, vertical: 13),
                   child: Text(
-                    isUser ? message.text : _readableAssistantText(message.text),
+                    isUser
+                        ? message.text
+                        : _readableAssistantText(message.text),
                     style: const TextStyle(
                       color: textColor,
                       fontSize: 15,
@@ -1050,7 +1179,10 @@ class _MessageBubble extends StatelessWidget {
                   ),
                 ),
               ),
-              if (!isUser && canShowActions && (message.result?.payload.recommendedService != null || message.result?.upgradePlan != null)) ...[
+              if (!isUser &&
+                  canShowActions &&
+                  (message.result?.payload.recommendedService != null ||
+                      message.result?.upgradePlan != null)) ...[
                 const SizedBox(height: 8),
                 _HandoffPanel(
                   result: message.result!,
@@ -1081,10 +1213,13 @@ class _HandoffPanel extends StatelessWidget {
 
   final _AiChatTurnResult result;
   final bool sending;
-  final void Function(String service, _AiChatTurnResult result) onServiceSelected;
-  final void Function(String service, _AiChatTurnResult result) onOneOffPurchaseSelected;
+  final void Function(String service, _AiChatTurnResult result)
+      onServiceSelected;
+  final void Function(String service, _AiChatTurnResult result)
+      onOneOffPurchaseSelected;
   final void Function(_AiChatTurnResult result) onUpgradeSelected;
-  final void Function(_ChatSubscriptionPlan plan, _AiChatTurnResult result) onPlanUpgradeConfirmed;
+  final void Function(_ChatSubscriptionPlan plan, _AiChatTurnResult result)
+      onPlanUpgradeConfirmed;
 
   @override
   Widget build(BuildContext context) {
@@ -1108,7 +1243,9 @@ class _HandoffPanel extends StatelessWidget {
     if (recommended == null) return const SizedBox.shrink();
     if (result.entitlementExhaustedForRecommendedService) {
       final service = result.commerceService;
-      final recommendedService = payload.recommendedService == 'scheduled_video' ? 'video' : payload.recommendedService;
+      final recommendedService = payload.recommendedService == 'scheduled_video'
+          ? 'video'
+          : payload.recommendedService;
       final canAlsoUseRecommended = result.commerceServiceOverride == null &&
           recommendedService != null &&
           recommendedService != service &&
@@ -1119,14 +1256,17 @@ class _HandoffPanel extends StatelessWidget {
         children: [
           if (canAlsoUseRecommended)
             _ServiceButton(
-              label: _productActionLabel(payload.actionLabel, recommendedService),
+              label:
+                  _productActionLabel(payload.actionLabel, recommendedService),
               selected: true,
               enabled: !sending,
               onTap: () => onServiceSelected(recommendedService, result),
             ),
           if (!result.noActiveSubscription)
             _ServiceButton(
-              label: service == 'video' ? 'comprar video único' : 'comprar chat único',
+              label: service == 'video'
+                  ? 'comprar video único'
+                  : 'comprar chat único',
               selected: true,
               enabled: !sending,
               onTap: () => onOneOffPurchaseSelected(service, result),
@@ -1149,7 +1289,9 @@ class _HandoffPanel extends StatelessWidget {
       children: services.map((service) {
         final selected = service == recommended;
         return _ServiceButton(
-          label: selected ? _productActionLabel(payload.actionLabel, service) : _serviceLabel(service),
+          label: selected
+              ? _productActionLabel(payload.actionLabel, service)
+              : _serviceLabel(service),
           selected: selected,
           enabled: !sending,
           onTap: () => onServiceSelected(service, result),
@@ -1171,11 +1313,19 @@ class _HandoffPanel extends StatelessWidget {
     final normalized = (label ?? '').trim();
     if (normalized.isEmpty) return fallback;
     final lower = normalized.toLowerCase();
-    if (lower.contains('responder') || lower.contains('pregunta') || lower.contains('triaje')) {
+    if (lower.contains('responder') ||
+        lower.contains('pregunta') ||
+        lower.contains('triaje')) {
       return fallback;
     }
-    final mentionsProduct = lower.contains('chat') || lower.contains('video') || lower.contains('videollamada') || lower.contains('agendar');
-    final isAction = lower.contains('iniciar') || lower.contains('empezar') || lower.contains('continuar') || lower.contains('agendar');
+    final mentionsProduct = lower.contains('chat') ||
+        lower.contains('video') ||
+        lower.contains('videollamada') ||
+        lower.contains('agendar');
+    final isAction = lower.contains('iniciar') ||
+        lower.contains('empezar') ||
+        lower.contains('continuar') ||
+        lower.contains('agendar');
     return mentionsProduct && isAction ? normalized : fallback;
   }
 }
@@ -1242,9 +1392,11 @@ class _ChatComposer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bottomInset = includeBottomInset ? MediaQuery.paddingOf(context).bottom : 0.0;
+    final bottomInset =
+        includeBottomInset ? MediaQuery.paddingOf(context).bottom : 0.0;
     return Padding(
-      padding: EdgeInsets.fromLTRB(embedded ? 0 : 18, 8, embedded ? 0 : 18, 14 + bottomInset),
+      padding: EdgeInsets.fromLTRB(
+          embedded ? 0 : 18, 8, embedded ? 0 : 18, 14 + bottomInset),
       child: ConstrainedBox(
         constraints: const BoxConstraints(minHeight: 46, maxHeight: 150),
         child: AnimatedBuilder(
@@ -1257,7 +1409,8 @@ class _ChatComposer extends StatelessWidget {
             );
           },
           child: Padding(
-            padding: const EdgeInsets.only(left: 18, right: 6, top: 3, bottom: 3),
+            padding:
+                const EdgeInsets.only(left: 18, right: 6, top: 3, bottom: 3),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
@@ -1298,7 +1451,8 @@ class _ChatComposer extends StatelessWidget {
                     onPressed: sending ? null : onSend,
                     style: IconButton.styleFrom(
                       backgroundColor: Colors.white,
-                      disabledBackgroundColor: Colors.white.withValues(alpha: 0.25),
+                      disabledBackgroundColor:
+                          Colors.white.withValues(alpha: 0.25),
                       foregroundColor: Colors.black,
                       fixedSize: const Size(38, 38),
                     ),
@@ -1329,7 +1483,8 @@ class _ComposerFrame extends StatefulWidget {
   State<_ComposerFrame> createState() => _ComposerFrameState();
 }
 
-class _ComposerFrameState extends State<_ComposerFrame> with SingleTickerProviderStateMixin {
+class _ComposerFrameState extends State<_ComposerFrame>
+    with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
 
   @override
@@ -1364,8 +1519,11 @@ class _ComposerFrameState extends State<_ComposerFrame> with SingleTickerProvide
       animation: _controller,
       builder: (context, child) {
         final phase = _controller.value * math.pi * 2;
-        final pulse = widget.active ? 0.72 + (math.sin(phase * 0.82) + 1) * 0.12 : 1.0;
-        final drift = widget.active ? math.sin(phase) * 7.5 + math.sin(phase * 2.15) * 2.0 : 0.0;
+        final pulse =
+            widget.active ? 0.72 + (math.sin(phase * 0.82) + 1) * 0.12 : 1.0;
+        final drift = widget.active
+            ? math.sin(phase) * 7.5 + math.sin(phase * 2.15) * 2.0
+            : 0.0;
         return DecoratedBox(
           decoration: BoxDecoration(
             color: Colors.transparent,
@@ -1373,7 +1531,8 @@ class _ComposerFrameState extends State<_ComposerFrame> with SingleTickerProvide
             boxShadow: widget.active
                 ? [
                     BoxShadow(
-                      color: const Color(0xFF57546F).withValues(alpha: (widget.thinking ? 0.12 : 0.075) * pulse),
+                      color: const Color(0xFF57546F).withValues(
+                          alpha: (widget.thinking ? 0.12 : 0.075) * pulse),
                       blurRadius: widget.thinking ? 22 : 14,
                       spreadRadius: -8,
                       offset: Offset(drift, 0),
@@ -1396,7 +1555,8 @@ class _ComposerFrameState extends State<_ComposerFrame> with SingleTickerProvide
 }
 
 class _ComposerOutlinePainter extends CustomPainter {
-  const _ComposerOutlinePainter({required this.progress, required this.thinking});
+  const _ComposerOutlinePainter(
+      {required this.progress, required this.thinking});
 
   final double progress;
   final bool thinking;
@@ -1404,7 +1564,8 @@ class _ComposerOutlinePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final rect = Offset.zero & size;
-    final rrect = RRect.fromRectAndRadius(rect.deflate(0.7), const Radius.circular(28));
+    final rrect =
+        RRect.fromRectAndRadius(rect.deflate(0.7), const Radius.circular(28));
     final paint = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = thinking ? 1.15 : 1;
@@ -1444,7 +1605,8 @@ class _ChatMessage {
   });
 
   factory _ChatMessage.user(String text) {
-    return _ChatMessage(id: _nextChatMessageId(), role: _ChatRole.user, text: text);
+    return _ChatMessage(
+        id: _nextChatMessageId(), role: _ChatRole.user, text: text);
   }
 
   factory _ChatMessage.assistant(
@@ -1488,7 +1650,8 @@ class _AiChatTurnResult {
   });
 
   factory _AiChatTurnResult.fromJson(Map<String, dynamic> json) {
-    final payload = _AiChatPayload.fromJson(_asMap(json['payload']) ?? <String, dynamic>{});
+    final payload =
+        _AiChatPayload.fromJson(_asMap(json['payload']) ?? <String, dynamic>{});
     String? petId;
     String? specialtyId;
     String? vetId;
@@ -1514,7 +1677,8 @@ class _AiChatTurnResult {
       if (name == 'find_vets') {
         specialtyId ??= _uuidFrom(output?['specialtyId']);
         final vets = _asList(output?['vets']);
-        final firstVet = vets == null || vets.isEmpty ? null : _asMap(vets.first);
+        final firstVet =
+            vets == null || vets.isEmpty ? null : _asMap(vets.first);
         vetId ??= _uuidFrom(firstVet?['id']);
         vetName = firstVet?['full_name']?.toString();
       }
@@ -1524,7 +1688,9 @@ class _AiChatTurnResult {
         serviceCanUse = canUseValue is bool ? canUseValue : null;
         serviceAccessReason = output?['reason']?.toString();
         final value = output?['remaining'];
-        remaining = value is num ? value.toInt() : int.tryParse(value?.toString() ?? '');
+        remaining = value is num
+            ? value.toInt()
+            : int.tryParse(value?.toString() ?? '');
       }
     }
 
@@ -1564,13 +1730,22 @@ class _AiChatTurnResult {
   final int? remaining;
 
   String get commerceService {
-    if (commerceServiceOverride == 'video' || commerceServiceOverride == 'chat') return commerceServiceOverride!;
-    final recommended = payload.recommendedService == 'scheduled_video' ? 'video' : payload.recommendedService;
-    final accessType = serviceAccessType == 'video' || serviceAccessType == 'chat' ? serviceAccessType : null;
+    if (commerceServiceOverride == 'video' ||
+        commerceServiceOverride == 'chat') {
+      return commerceServiceOverride!;
+    }
+    final recommended = payload.recommendedService == 'scheduled_video'
+        ? 'video'
+        : payload.recommendedService;
+    final accessType =
+        serviceAccessType == 'video' || serviceAccessType == 'chat'
+            ? serviceAccessType
+            : null;
     return accessType ?? (recommended == 'video' ? 'video' : 'chat');
   }
 
-  bool get noActiveSubscription => serviceAccessReason == 'no_active_subscription';
+  bool get noActiveSubscription =>
+      serviceAccessReason == 'no_active_subscription';
 
   bool get canRetryActivationAfterUpgrade {
     return serviceCanUse == false &&
@@ -1581,14 +1756,21 @@ class _AiChatTurnResult {
   }
 
   bool get entitlementExhaustedForRecommendedService {
-    final exhausted = serviceCanUse == false || (serviceAccessType != null && remaining != null && remaining! <= 0);
+    final exhausted = serviceCanUse == false ||
+        (serviceAccessType != null && remaining != null && remaining! <= 0);
     if (!exhausted) return false;
     if (commerceServiceOverride != null) return true;
-    if (serviceCanUse == false && (serviceAccessType == 'chat' || serviceAccessType == 'video')) return true;
+    if (serviceCanUse == false &&
+        (serviceAccessType == 'chat' || serviceAccessType == 'video')) {
+      return true;
+    }
     final recommended = payload.recommendedService;
-    if (recommended == null) return serviceAccessType == 'chat' || serviceAccessType == 'video';
+    if (recommended == null) {
+      return serviceAccessType == 'chat' || serviceAccessType == 'video';
+    }
     final target = recommended == 'scheduled_video' ? 'video' : recommended;
-    final accessType = serviceAccessType == 'scheduled_video' ? 'video' : serviceAccessType;
+    final accessType =
+        serviceAccessType == 'scheduled_video' ? 'video' : serviceAccessType;
     return accessType == null || accessType == target;
   }
 
@@ -1646,7 +1828,8 @@ class _AiChatPayload {
 
   factory _AiChatPayload.fromJson(Map<String, dynamic> json) {
     return _AiChatPayload(
-      message: json['message']?.toString() ?? 'Te ayudo a encontrar el veterinario adecuado.',
+      message: json['message']?.toString() ??
+          'Te ayudo a encontrar el veterinario adecuado.',
       urgency: json['urgency']?.toString() ?? 'routine',
       recommendedService: json['recommendedService']?.toString(),
       actionLabel: json['actionLabel']?.toString(),
@@ -1662,7 +1845,10 @@ class _AiChatPayload {
 }
 
 class _SubscriptionUpgradeOption {
-  const _SubscriptionUpgradeOption({required this.currentPlan, required this.targetPlan, required this.usage});
+  const _SubscriptionUpgradeOption(
+      {required this.currentPlan,
+      required this.targetPlan,
+      required this.usage});
 
   final _ChatSubscriptionPlan? currentPlan;
   final _ChatSubscriptionPlan targetPlan;
@@ -1692,7 +1878,8 @@ class _ChatSubscriptionUsage {
   final int consumedVideos;
 
   int remainingForPlan(_ChatSubscriptionPlan plan, String service) {
-    final included = service == 'video' ? plan.includedVideos : plan.includedChats;
+    final included =
+        service == 'video' ? plan.includedVideos : plan.includedChats;
     final consumed = service == 'video' ? consumedVideos : consumedChats;
     return math.max(included - consumed, 0);
   }
@@ -1700,7 +1887,8 @@ class _ChatSubscriptionUsage {
   int get remainingChats => math.max(includedChats - consumedChats, 0);
   int get remainingVideos => math.max(includedVideos - consumedVideos, 0);
 
-  String get aiSummary => '$consumedChats de $includedChats chats consumidos y $consumedVideos de $includedVideos videollamadas consumidas';
+  String get aiSummary =>
+      '$consumedChats de $includedChats chats consumidos y $consumedVideos de $includedVideos videollamadas consumidas';
 }
 
 class _ChatSubscriptionPlan {
@@ -1731,17 +1919,25 @@ class _ChatSubscriptionPlan {
     final marketing = _marketingMap(json['description_json']);
     final included = marketing['included'];
     final includedList = included is List
-        ? included.map((item) => item.toString()).where((item) => item.trim().isNotEmpty).toList()
+        ? included
+            .map((item) => item.toString())
+            .where((item) => item.trim().isNotEmpty)
+            .toList()
         : const <String>[];
     return _ChatSubscriptionPlan(
       code: json['code']?.toString() ?? '',
       name: json['name']?.toString() ?? '',
-      monthlyCents: _toInt(json['price_monthly_cents']) ?? _toInt(json['price_cents']) ?? 0,
+      monthlyCents: _toInt(json['price_monthly_cents']) ??
+          _toInt(json['price_cents']) ??
+          0,
       currency: (json['currency']?.toString() ?? 'MXN').toUpperCase(),
       includedChats: _toInt(json['included_chats']) ?? 0,
       includedVideos: _toInt(json['included_videos']) ?? 0,
       petsIncludedDefault: _toInt(json['pets_included_default']) ?? 1,
-      descriptionMain: (marketing['main']?.toString() ?? json['description']?.toString() ?? '').trim(),
+      descriptionMain: (marketing['main']?.toString() ??
+              json['description']?.toString() ??
+              '')
+          .trim(),
       descriptionIncluded: includedList,
     );
   }
@@ -1776,7 +1972,9 @@ class _ChatSubscriptionPlan {
 
   String get monthlyPriceLabel {
     if (monthlyCents <= 0) return 'precio no disponible';
-    final amount = monthlyCents % 100 == 0 ? (monthlyCents ~/ 100).toString() : (monthlyCents / 100).toStringAsFixed(2);
+    final amount = monthlyCents % 100 == 0
+        ? (monthlyCents ~/ 100).toString()
+        : (monthlyCents / 100).toStringAsFixed(2);
     return '$currency $amount al mes';
   }
 
@@ -1788,7 +1986,8 @@ class _ChatSubscriptionPlan {
       '$includedVideos videollamadas incluidas',
       '$petsIncludedDefault caballos incluidos',
       if (descriptionMain.isNotEmpty) descriptionMain,
-      if (descriptionIncluded.isNotEmpty) 'Incluye: ${descriptionIncluded.take(3).join('; ')}',
+      if (descriptionIncluded.isNotEmpty)
+        'Incluye: ${descriptionIncluded.take(3).join('; ')}',
     ];
     return details.join(', ');
   }
@@ -1814,7 +2013,8 @@ List<Object?>? _asList(Object? value) {
   return value is List ? value : null;
 }
 
-_ChatSubscriptionPlan? _findPlanByCode(List<_ChatSubscriptionPlan> plans, String code) {
+_ChatSubscriptionPlan? _findPlanByCode(
+    List<_ChatSubscriptionPlan> plans, String code) {
   final normalized = code.toLowerCase();
   for (final plan in plans) {
     if (plan.code.toLowerCase() == normalized) return plan;
@@ -1861,7 +2061,8 @@ String _readableAssistantText(String text) {
     (match) => '${match[1]}\n\n${match[2]}',
   );
   formatted = formatted.replaceAllMapped(
-    RegExp(r'([.!?])\s+(?=(Te recomiendo|Para |Si ves|Si empeora|Mientras|Respóndeme|¿))'),
+    RegExp(
+        r'([.!?])\s+(?=(Te recomiendo|Para |Si ves|Si empeora|Mientras|Respóndeme|¿))'),
     (match) => '${match[1]}\n\n',
   );
   return formatted;

@@ -1,5 +1,5 @@
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
-import { AccessToken, RoomServiceClient } from 'livekit-server-sdk';
+import { AccessToken, RoomServiceClient, WebhookReceiver } from 'livekit-server-sdk';
 
 export type LiveKitParticipantRole = 'owner' | 'vet' | 'admin' | 'participant';
 
@@ -15,6 +15,7 @@ type JoinTokenInput = {
 @Injectable()
 export class LiveKitService {
   private roomClient?: RoomServiceClient;
+  private webhookReceiver?: WebhookReceiver;
 
   get publicUrl(): string {
     return (process.env.LIVEKIT_URL || '').trim().replace(/\/+$/, '');
@@ -52,6 +53,18 @@ export class LiveKitService {
       this.roomClient = new RoomServiceClient(this.publicUrl, this.apiKey, this.apiSecret);
     }
     return this.roomClient;
+  }
+
+  private webhooks(): WebhookReceiver {
+    this.assertConfigured();
+    if (!this.webhookReceiver) {
+      this.webhookReceiver = new WebhookReceiver(this.apiKey, this.apiSecret);
+    }
+    return this.webhookReceiver;
+  }
+
+  async receiveWebhook(rawBody: string, authHeader?: string) {
+    return this.webhooks().receive(rawBody, authHeader);
   }
 
   async ensureRoom(roomName: string, metadata: Record<string, string>) {

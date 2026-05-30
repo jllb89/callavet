@@ -9,7 +9,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 const bool _subscriptionFlowDebug = bool.fromEnvironment(
   'SUBSCRIPTION_FLOW_DEBUG',
@@ -119,11 +118,11 @@ class _SubscriptionPlansLoaderScreenState
               ),
             ),
           ),
-          Align(
-            alignment: const Alignment(0, 0.45),
+          const Align(
+            alignment: Alignment(0, 0.45),
             child: Column(
               mainAxisSize: MainAxisSize.min,
-              children: const [
+              children: [
                 Text(
                   'call a vet',
                   textAlign: TextAlign.center,
@@ -231,10 +230,7 @@ class _SubscriptionPlansScreenState extends State<SubscriptionPlansScreen> {
               ? suggestedCode
               : _SubscriptionPlansRepository.instance.cachedRecommendedCode;
 
-      if (resolvedRecommendedCode == null) {
-        resolvedRecommendedCode =
-            await _SubscriptionPlansRepository.instance.prepareSuggestions();
-      }
+      resolvedRecommendedCode ??= await _SubscriptionPlansRepository.instance.prepareSuggestions();
 
       setState(() {
         _plans = plans;
@@ -334,11 +330,6 @@ class _SubscriptionPlansScreenState extends State<SubscriptionPlansScreen> {
       }
       _subscriptionLog('Subscribe flow finished.');
     }
-  }
-
-  String _formatPrice(int cents) {
-    final pesos = (cents / 100).round();
-    return '\$$pesos';
   }
 
   @override

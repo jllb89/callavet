@@ -4,7 +4,7 @@ class AppTheme {
   static ThemeData get light => ThemeData(
         useMaterial3: true,
         colorScheme: _lightScheme,
-        scaffoldBackgroundColor: _lightScheme.background,
+        scaffoldBackgroundColor: _lightScheme.surface,
       fontFamily: 'ABCDiatype',
       appBarTheme: const AppBarTheme(centerTitle: true),
       );
@@ -12,7 +12,7 @@ class AppTheme {
   static ThemeData get dark => ThemeData(
         useMaterial3: true,
         colorScheme: _darkScheme,
-        scaffoldBackgroundColor: _darkScheme.background,
+        scaffoldBackgroundColor: _darkScheme.surface,
       fontFamily: 'ABCDiatype',
       appBarTheme: const AppBarTheme(centerTitle: true),
       );
@@ -25,8 +25,6 @@ class AppTheme {
     onSecondary: Color(0xFFFFFFFF),
     error: Color(0xFFB3261E),
     onError: Color(0xFFFFFFFF),
-    background: Color(0xFFF7F7F7),
-    onBackground: Color(0xFF0E0E0E),
     surface: Color(0xFFFFFFFF),
     onSurface: Color(0xFF0E0E0E),
   );
@@ -39,8 +37,6 @@ class AppTheme {
     onSecondary: Color(0xFF0D0D0D),
     error: Color(0xFFFFB4AB),
     onError: Color(0xFF690005),
-    background: Color(0xFF0B0B0B),
-    onBackground: Color(0xFFF4F4F4),
     surface: Color(0xFF111111),
     onSurface: Color(0xFFF4F4F4),
   );

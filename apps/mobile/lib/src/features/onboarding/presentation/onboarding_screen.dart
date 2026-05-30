@@ -29,7 +29,8 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                 'úsalo para',
                 'qué sigue',
               ];
-              final ctaText = ctaLabels[_pageIndex.clamp(0, ctaLabels.length - 1)];
+              final ctaText =
+                  ctaLabels[_pageIndex.clamp(0, ctaLabels.length - 1)];
               return Column(
                 children: [
                   // Top bar
@@ -52,7 +53,8 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                                 context.go('/home');
                               }
                             },
-                            style: TextButton.styleFrom(foregroundColor: Colors.white),
+                            style: TextButton.styleFrom(
+                                foregroundColor: Colors.white),
                             child: const Text(
                               'atrás',
                               style: TextStyle(
@@ -65,8 +67,9 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                         ),
                       ),
                       TextButton(
-                            onPressed: () => context.go('/kyc'),
-                        style: TextButton.styleFrom(foregroundColor: Colors.white),
+                        onPressed: () => context.go('/kyc'),
+                        style:
+                            TextButton.styleFrom(foregroundColor: Colors.white),
                         child: const Text(
                           'saltar',
                           style: TextStyle(
@@ -143,8 +146,8 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                                 'assets/icons/continue.svg',
                                 width: 48,
                                 height: 48,
-                                colorFilter:
-                                    const ColorFilter.mode(Colors.white, BlendMode.srcIn),
+                                colorFilter: const ColorFilter.mode(
+                                    Colors.white, BlendMode.srcIn),
                               ),
                             ),
                           ],
@@ -294,11 +297,11 @@ class _FirstPageState extends State<_FirstPage> {
             duration: const Duration(milliseconds: 550),
             curve: Curves.easeOut,
             opacity: _showText ? 1 : 0,
-            child: SizedBox(
+            child: const SizedBox(
               width: 353,
               child: Text.rich(
                 TextSpan(
-                  children: const [
+                  children: [
                     TextSpan(
                       text: 'Cuando algo no está bien, esperar cuesta caro.\n',
                       style: TextStyle(
@@ -416,18 +419,16 @@ class _UseCasesPageState extends State<_UseCasesPage> {
               ),
             ),
           ),
-
           const SizedBox(height: 32),
-
           AnimatedOpacity(
             duration: const Duration(milliseconds: 550),
             curve: Curves.easeOut,
             opacity: _showText ? 1 : 0,
-            child: SizedBox(
+            child: const SizedBox(
               width: 353,
               child: Text.rich(
                 TextSpan(
-                  children: const [
+                  children: [
                     TextSpan(
                       text: 'Úsalo para…\n',
                       style: TextStyle(
@@ -453,7 +454,6 @@ class _UseCasesPageState extends State<_UseCasesPage> {
               ),
             ),
           ),
-
           const SizedBox(height: 48),
         ],
       ),
@@ -594,8 +594,8 @@ class _SecondPageState extends State<_SecondPage> {
                             'assets/icons/f1 1.svg',
                             width: 16,
                             height: 16,
-                            colorFilter:
-                                const ColorFilter.mode(Colors.white, BlendMode.srcIn),
+                            colorFilter: const ColorFilter.mode(
+                                Colors.white, BlendMode.srcIn),
                           ),
                         ),
                         Positioned(
@@ -605,8 +605,8 @@ class _SecondPageState extends State<_SecondPage> {
                             'assets/icons/f3 1.svg',
                             width: 16,
                             height: 16,
-                            colorFilter:
-                                const ColorFilter.mode(Colors.white, BlendMode.srcIn),
+                            colorFilter: const ColorFilter.mode(
+                                Colors.white, BlendMode.srcIn),
                           ),
                         ),
                         Positioned(
@@ -616,8 +616,8 @@ class _SecondPageState extends State<_SecondPage> {
                             'assets/icons/f6 1.svg',
                             width: 16,
                             height: 16,
-                            colorFilter:
-                                const ColorFilter.mode(Colors.white, BlendMode.srcIn),
+                            colorFilter: const ColorFilter.mode(
+                                Colors.white, BlendMode.srcIn),
                           ),
                         ),
                         Positioned(
@@ -783,12 +783,12 @@ class _ThirdPageState extends State<_ThirdPage> {
                               fit: BoxFit.contain,
                             ),
                           ),
-                          Positioned(
+                          const Positioned(
                             left: 0,
                             right: 0,
                             bottom: 0,
                             height: 600,
-                            child: const DecoratedBox(
+                            child: DecoratedBox(
                               decoration: BoxDecoration(
                                 gradient: LinearGradient(
                                   begin: Alignment.topCenter,
@@ -814,9 +814,9 @@ class _ThirdPageState extends State<_ThirdPage> {
                         duration: const Duration(milliseconds: 550),
                         curve: Curves.easeOut,
                         opacity: _showText ? 1 : 0,
-                        child: Column(
+                        child: const Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
-                          children: const [
+                          children: [
                             SizedBox(
                               width: 351,
                               child: Text(
@@ -849,62 +849,11 @@ class _ThirdPageState extends State<_ThirdPage> {
                   ],
                 ),
               ),
-
               const SizedBox(height: 24),
             ],
           ),
         );
       },
-    );
-  }
-}
-
-class _StepRow extends StatelessWidget {
-  const _StepRow({required this.icon, required this.title, required this.body});
-
-  final String icon;
-  final String title;
-  final String body;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        SvgPicture.asset(
-          icon,
-          width: 18,
-          height: 18,
-          colorFilter: const ColorFilter.mode(Colors.white, BlendMode.srcIn),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Text.rich(
-            TextSpan(
-              children: [
-                TextSpan(
-                  text: '$title\n',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w500,
-                    height: 1.47,
-                  ),
-                ),
-                TextSpan(
-                  text: body,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w300,
-                    height: 1.83,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ],
     );
   }
 }

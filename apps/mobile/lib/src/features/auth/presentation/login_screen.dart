@@ -29,13 +29,6 @@ void _loginLog(String message) {
   }
 }
 
-String _normalizePhone(String input) {
-  final compact = input.replaceAll(RegExp(r'[^0-9+]'), '');
-  if (compact.startsWith('+')) return compact;
-  final digits = compact.replaceAll(RegExp(r'[^0-9]'), '');
-  return '+$digits';
-}
-
 String _digitsOnly(String input) => input.replaceAll(RegExp(r'[^0-9]'), '');
 
 bool _isTrustedDevPhone(String? phone) {
@@ -846,9 +839,9 @@ class _LoginScreenState extends State<LoginScreen> {
     return Column(
       children: [
         const SizedBox(height: 24),
-        SizedBox(
+        const SizedBox(
           width: 351,
-          child: const Text(
+          child: Text(
             'bienvenido a call a vet.\npor favor introduce tu número de teléfono para iniciar sesión:',
             style: TextStyle(
               color: Colors.white,
@@ -869,14 +862,14 @@ class _LoginScreenState extends State<LoginScreen> {
               height: 62,
               padding: const EdgeInsets.symmetric(horizontal: 10),
               decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.06),
+                color: Colors.white.withValues(alpha: 0.06),
                 borderRadius: BorderRadius.circular(20),
               ),
               child: Row(
                 children: [
                   CircleAvatar(
                     radius: 12.5,
-                    backgroundColor: Color(0xFF2E2E2E),
+                    backgroundColor: const Color(0xFF2E2E2E),
                     child: Text(_flagEmoji, style: const TextStyle(fontSize: 14)),
                   ),
                   const SizedBox(width: 8),
@@ -900,7 +893,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 height: 62,
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.06),
+                  color: Colors.white.withValues(alpha: 0.06),
                   borderRadius: BorderRadius.circular(20),
                 ),
                 alignment: Alignment.centerLeft,
@@ -993,7 +986,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     padding: EdgeInsets.zero,
                     backgroundColor: Colors.white,
                     foregroundColor: const Color(0xFF101010),
-                    disabledBackgroundColor: Colors.white.withOpacity(0.2),
+                    disabledBackgroundColor: Colors.white.withValues(alpha: 0.2),
                   ),
                   child: _isSendingOtp
                       ? const SizedBox(
@@ -1169,7 +1162,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     padding: EdgeInsets.zero,
                     backgroundColor: Colors.white,
                     foregroundColor: const Color(0xFF101010),
-                    disabledBackgroundColor: Colors.white.withOpacity(0.2),
+                    disabledBackgroundColor: Colors.white.withValues(alpha: 0.2),
                   ),
                   child: _isVerifyingOtp
                       ? const SizedBox(
@@ -1198,9 +1191,9 @@ class _LoginScreenState extends State<LoginScreen> {
     return Column(
       children: [
         const SizedBox(height: 24),
-        SizedBox(
+        const SizedBox(
           width: 351,
-          child: const Text(
+          child: Text(
             'bienvenido a call a vet.\npor favor introduce tu correo electrónico para iniciar sesión:',
             style: TextStyle(
               color: Colors.white,
@@ -1218,7 +1211,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 height: 62,
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.06),
+                  color: Colors.white.withValues(alpha: 0.06),
                   borderRadius: BorderRadius.circular(20),
                 ),
                 alignment: Alignment.centerLeft,
@@ -1304,7 +1297,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     padding: EdgeInsets.zero,
                     backgroundColor: Colors.white,
                     foregroundColor: const Color(0xFF101010),
-                    disabledBackgroundColor: Colors.white.withOpacity(0.2),
+                    disabledBackgroundColor: Colors.white.withValues(alpha: 0.2),
                   ),
                   child: _isSendingOtp
                       ? const SizedBox(
@@ -1466,7 +1459,7 @@ class _OtpGroupBox extends StatelessWidget {
       width: 148,
       height: 62,
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.06),
+        color: Colors.white.withValues(alpha: 0.06),
         borderRadius: BorderRadius.circular(20),
       ),
       child: Row(

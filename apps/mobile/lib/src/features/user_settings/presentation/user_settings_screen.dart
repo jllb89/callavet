@@ -7,7 +7,7 @@ class UserSettingsScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text('User Settings')),
+      appBar: AppBar(title: const Text('User Settings')),
       body: Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,

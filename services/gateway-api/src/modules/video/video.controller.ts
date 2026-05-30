@@ -1,4 +1,5 @@
-import { BadRequestException, Body, Controller, HttpException, HttpStatus, NotFoundException, Param, Post, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Headers, HttpException, HttpStatus, NotFoundException, Param, Post, Req, UnauthorizedException, UseGuards } from '@nestjs/common';
+import type { Request } from 'express';
 import { AuthGuard } from '../auth/auth.guard';
 import { EndpointRateLimitGuard } from '../rate-limit/endpoint-rate-limit.guard';
 import { RateLimit } from '../rate-limit/rate-limit.decorator';
@@ -8,7 +9,8 @@ import { RequestContext } from '../auth/request-context.service';
 import { EntitlementService } from '../subscriptions/entitlement.service';
 import { LiveKitParticipantRole, LiveKitService } from './livekit.service';
 
-@UseGuards(AuthGuard)
+type TxQuery = <R = any>(sql: string, args?: any[]) => Promise<{ rows: R[] }>;
+
 @Controller('video')
 export class VideoController {
   constructor(
@@ -204,8 +206,281 @@ export class VideoController {
     return 'participant';
   }
 
+  private rawBodyFromRequest(req: Request, body: unknown): string {
+    const rawBody = (req as any).rawBody;
+    if (Buffer.isBuffer(rawBody)) return rawBody.toString('utf8');
+    if (typeof rawBody === 'string') return rawBody;
+    if (typeof body === 'string') return body;
+    throw new BadRequestException('raw_webhook_body_required');
+  }
+
+  private safeParseJson(rawBody: string): Record<string, any> {
+    try {
+      const parsed = JSON.parse(rawBody);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  private parseMetadata(metadata?: string | null): Record<string, any> {
+    if (!metadata) return {};
+    try {
+      const parsed = JSON.parse(metadata);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  private isUuid(value: string | null | undefined): value is string {
+    return !!value && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+  }
+
+  private webhookRoomName(event: any, payload: Record<string, any>): string | null {
+    return event?.room?.name || payload.room?.name || payload.room_name || null;
+  }
+
+  private webhookRoomSid(event: any, payload: Record<string, any>): string | null {
+    return event?.room?.sid || payload.room?.sid || payload.room_sid || null;
+  }
+
+  private webhookParticipantIdentity(event: any, payload: Record<string, any>): string | null {
+    return event?.participant?.identity || payload.participant?.identity || payload.participant_identity || null;
+  }
+
+  private webhookParticipantSid(event: any, payload: Record<string, any>): string | null {
+    return event?.participant?.sid || payload.participant?.sid || payload.participant_sid || null;
+  }
+
+  private webhookSessionId(event: any, payload: Record<string, any>, roomName: string | null): string | null {
+    const roomMetadata = this.parseMetadata(event?.room?.metadata || payload.room?.metadata);
+    const participantMetadata = this.parseMetadata(event?.participant?.metadata || payload.participant?.metadata);
+    const candidate = roomMetadata.sessionId || participantMetadata.sessionId || payload.sessionId || (roomName ? this.livekit.sessionIdFromRoomName(roomName) : null);
+    const sessionId = candidate ? String(candidate) : null;
+    return this.isUuid(sessionId) ? sessionId : null;
+  }
+
+  private webhookParticipantRole(event: any, payload: Record<string, any>, participantIdentity: string | null): LiveKitParticipantRole {
+    const participantMetadata = this.parseMetadata(event?.participant?.metadata || payload.participant?.metadata);
+    const role = String(participantMetadata.role || '').toLowerCase();
+    if (role === 'owner' || role === 'vet' || role === 'admin') return role as LiveKitParticipantRole;
+    if (participantIdentity?.startsWith('owner:')) return 'owner';
+    if (participantIdentity?.startsWith('vet:')) return 'vet';
+    if (participantIdentity?.startsWith('admin:')) return 'admin';
+    return 'participant';
+  }
+
+  private egressId(payload: Record<string, any>): string | null {
+    return payload.egressInfo?.egressId || payload.egress_info?.egress_id || null;
+  }
+
+  private recordingUrl(payload: Record<string, any>): string | null {
+    const fileResults = payload.egressInfo?.fileResults || payload.egress_info?.file_results;
+    if (Array.isArray(fileResults) && fileResults.length > 0) {
+      return fileResults[0]?.location || fileResults[0]?.filename || null;
+    }
+    return null;
+  }
+
+  private async ensureLifecycle(q: TxQuery, sessionId: string, roomName: string | null, roomSid: string | null) {
+    await q(
+      `insert into video_session_lifecycle (session_id, room_name, room_sid, status, created_at, updated_at)
+       values ($1::uuid, $2, $3, 'pending', now(), now())
+       on conflict (session_id) do update
+         set room_name = coalesce(excluded.room_name, video_session_lifecycle.room_name),
+             room_sid = coalesce(excluded.room_sid, video_session_lifecycle.room_sid),
+             updated_at = now()`,
+      [sessionId, roomName, roomSid]
+    );
+  }
+
+  private async findConsumptionState(q: TxQuery, sessionId: string) {
+    const { rows } = await q<{
+      owner_joined_at: string | null;
+      host_joined_at: string | null;
+      first_both_joined_at: string | null;
+      entitlement_consumption_id: string | null;
+      consumption_id: string | null;
+      consumption_finalized: boolean | null;
+    }>(
+      `select v.owner_joined_at::text,
+              v.host_joined_at::text,
+              v.first_both_joined_at::text,
+              v.entitlement_consumption_id,
+              coalesce(v.entitlement_consumption_id, ec.id) as consumption_id,
+              ec.finalized as consumption_finalized
+         from video_session_lifecycle v
+    left join lateral (
+          select id, finalized
+            from entitlement_consumptions
+           where session_id = v.session_id
+             and consumption_type = 'video'
+             and canceled_at is null
+           order by created_at desc
+           limit 1
+         ) ec on true
+        where v.session_id = $1::uuid
+        limit 1`,
+      [sessionId]
+    );
+    return rows[0];
+  }
+
+  private async commitIfBothJoined(q: TxQuery, sessionId: string) {
+    const state = await this.findConsumptionState(q, sessionId);
+    const bothJoined = !!state?.first_both_joined_at || (!!state?.owner_joined_at && !!state?.host_joined_at);
+    if (!bothJoined) return 'none';
+    let action = 'none';
+    if (state?.consumption_id && !state.consumption_finalized) {
+      const { rows } = await q<{ ok: boolean }>(`select fn_commit_consumption($1::uuid) as ok`, [state.consumption_id]);
+      action = rows[0]?.ok ? 'committed' : 'none';
+    }
+    await q(
+      `update video_session_lifecycle
+          set status = 'live',
+              first_both_joined_at = coalesce(first_both_joined_at, now()),
+              entitlement_consumption_id = coalesce(entitlement_consumption_id, $2::uuid),
+              entitlement_finalized_at = coalesce(entitlement_finalized_at, now()),
+              updated_at = now()
+        where session_id = $1::uuid`,
+      [sessionId, state?.consumption_id || null]
+    );
+    return action;
+  }
+
+  private async settleFinishedLifecycle(q: TxQuery, sessionId: string, reason: string) {
+    const state = await this.findConsumptionState(q, sessionId);
+    const engaged = !!state?.first_both_joined_at || (!!state?.owner_joined_at && !!state?.host_joined_at) || state?.consumption_finalized === true;
+    let entitlementAction = 'none';
+    if (state?.consumption_id && engaged && !state.consumption_finalized) {
+      const { rows } = await q<{ ok: boolean }>(`select fn_commit_consumption($1::uuid) as ok`, [state.consumption_id]);
+      entitlementAction = rows[0]?.ok ? 'committed' : 'none';
+    } else if (state?.consumption_id && !engaged) {
+      const { rows } = await q<{ ok: boolean }>(`select fn_release_consumption($1::uuid) as ok`, [state.consumption_id]);
+      entitlementAction = rows[0]?.ok ? 'released' : 'none';
+    }
+    await q(
+      `update video_session_lifecycle
+          set status = case when $2 then 'ended' else case when $6 = 'reconcile_timeout' then 'timed_out' else 'released' end end,
+              room_finished_at = coalesce(room_finished_at, now()),
+              entitlement_consumption_id = coalesce(entitlement_consumption_id, $3::uuid),
+              entitlement_finalized_at = case when $4 then coalesce(entitlement_finalized_at, now()) else entitlement_finalized_at end,
+              entitlement_released_at = case when $5 then coalesce(entitlement_released_at, now()) else entitlement_released_at end,
+              safety_reason = case when $2 then safety_reason else $6 end,
+              updated_at = now()
+        where session_id = $1::uuid`,
+      [sessionId, engaged, state?.consumption_id || null, entitlementAction === 'committed' || (engaged && !!state?.consumption_id), entitlementAction === 'released', reason]
+    );
+    await q(
+      `update chat_sessions
+          set status = case when $2 then 'completed' else 'canceled' end,
+              ended_at = coalesce(ended_at, now()),
+              updated_at = now()
+        where id = $1::uuid`,
+      [sessionId, engaged]
+    );
+    await q(
+      `update appointments
+          set status = case when $2 then 'completed' else case when status = 'completed' then status else 'no_show' end end
+        where session_id = $1::uuid`,
+      [sessionId, engaged]
+    );
+    await q(
+      `update clinical_encounters
+          set status = 'closed',
+              ended_at = coalesce(ended_at, now()),
+              updated_at = now()
+        where session_id = $1::uuid`,
+      [sessionId]
+    );
+    return { engaged, entitlementAction };
+  }
+
+  private async handleLiveKitEvent(event: any, payload: Record<string, any>) {
+    const eventType = String(event?.event || payload.event || '').trim();
+    const roomName = this.webhookRoomName(event, payload);
+    const roomSid = this.webhookRoomSid(event, payload);
+    const participantIdentity = this.webhookParticipantIdentity(event, payload);
+    const participantSid = this.webhookParticipantSid(event, payload);
+    const sessionId = this.webhookSessionId(event, payload, roomName);
+    const role = this.webhookParticipantRole(event, payload, participantIdentity);
+
+    if (this.db.isStub) return { eventType, sessionId, action: 'stub' };
+
+    return this.db.runInTx(async (q) => {
+      const { rows: eventRows } = await q<{ id: string }>(
+        `insert into livekit_video_events (event_type, room_name, room_sid, session_id, participant_identity, participant_sid, payload, received_at)
+         values ($1, $2, $3, $4::uuid, $5, $6, $7::jsonb, now())
+         returning id`,
+        [eventType || 'unknown', roomName, roomSid, sessionId, participantIdentity, participantSid, JSON.stringify(payload)]
+      );
+      const eventId = eventRows[0]?.id;
+      let action: any = 'stored';
+      if (sessionId) {
+        await this.ensureLifecycle(q, sessionId, roomName, roomSid);
+        if (eventType === 'room_started') {
+          await q(
+            `update video_session_lifecycle
+                set first_room_started_at = coalesce(first_room_started_at, now()),
+                    status = case when status in ('ended', 'released', 'timed_out', 'forced_ended') then status else 'waiting' end,
+                    updated_at = now()
+              where session_id = $1::uuid`,
+            [sessionId]
+          );
+          action = 'room_started';
+        } else if (eventType === 'participant_joined') {
+          await q(
+            `update video_session_lifecycle
+                set first_participant_joined_at = coalesce(first_participant_joined_at, now()),
+                    owner_joined_at = case when $2 then coalesce(owner_joined_at, now()) else owner_joined_at end,
+                    host_joined_at = case when $3 then coalesce(host_joined_at, now()) else host_joined_at end,
+                    status = case when status in ('ended', 'released', 'timed_out', 'forced_ended') then status else 'waiting' end,
+                    updated_at = now()
+              where session_id = $1::uuid`,
+            [sessionId, role === 'owner', role === 'vet' || role === 'admin']
+          );
+          action = await this.commitIfBothJoined(q, sessionId);
+        } else if (eventType === 'participant_left' || eventType === 'participant_connection_aborted') {
+          await q(
+            `update video_session_lifecycle
+                set last_participant_left_at = now(),
+                    safety_reason = case when $2 then 'participant_connection_aborted' else safety_reason end,
+                    updated_at = now()
+              where session_id = $1::uuid`,
+            [sessionId, eventType === 'participant_connection_aborted']
+          );
+          action = eventType;
+        } else if (eventType === 'room_finished') {
+          action = await this.settleFinishedLifecycle(q, sessionId, 'room_finished');
+        } else if (eventType === 'egress_started' || eventType === 'egress_updated' || eventType === 'egress_ended') {
+          await q(
+            `update video_session_lifecycle
+                set egress_id = coalesce($2, egress_id),
+                    egress_started_at = case when $3 then coalesce(egress_started_at, now()) else egress_started_at end,
+                    egress_ended_at = case when $4 then coalesce(egress_ended_at, now()) else egress_ended_at end,
+                    recording_url = coalesce($5, recording_url),
+                    updated_at = now()
+              where session_id = $1::uuid`,
+            [sessionId, this.egressId(payload), eventType === 'egress_started', eventType === 'egress_ended', this.recordingUrl(payload)]
+          );
+          action = eventType;
+        }
+      }
+      if (eventId) {
+        await q(
+          `update livekit_video_events
+              set processed_at = now(), processing_error = null
+            where id = $1::uuid`,
+          [eventId]
+        );
+      }
+      return { eventId, eventType, sessionId, roomName, action };
+    });
+  }
+
   @Post('rooms')
-  @UseGuards(EndpointRateLimitGuard)
+  @UseGuards(AuthGuard, EndpointRateLimitGuard)
   @RateLimit({ key: 'video.rooms.create', limit: 10, windowMs: 60_000 })
   async createRoom(@Body() body: { sessionId?: string }) {
     const sessionId = (body?.sessionId || '').toString().trim();
@@ -248,6 +523,7 @@ export class VideoController {
   }
 
   @Post('rooms/:roomId/end')
+  @UseGuards(AuthGuard)
   async endRoom(@Param('roomId') roomId: string) {
     const normalizedRoomId = String(roomId || '').trim();
     if (!normalizedRoomId) throw new BadRequestException('roomId is required');
@@ -257,5 +533,54 @@ export class VideoController {
     const result = await this.livekit.endRoom(normalizedRoomId);
     const settlement = await this.markForcedEnd(sessionId, normalizedRoomId);
     return { ok: true, provider: 'livekit', roomId: normalizedRoomId, ...result, settlement };
+  }
+
+  @Post(['livekit/webhook', 'webhooks/livekit'])
+  async liveKitWebhook(
+    @Req() req: Request,
+    @Body() body: unknown,
+    @Headers('authorization') authorization?: string,
+    @Headers('authorize') authorize?: string,
+  ) {
+    const rawBody = this.rawBodyFromRequest(req, body);
+    let event: any;
+    try {
+      event = await this.livekit.receiveWebhook(rawBody, authorization || authorize);
+    } catch {
+      throw new UnauthorizedException('invalid_livekit_webhook_signature');
+    }
+    const payload = this.safeParseJson(rawBody);
+    const result = await this.handleLiveKitEvent(event, payload);
+    return { ok: true, provider: 'livekit', ...result };
+  }
+
+  @Post('reconcile')
+  async reconcile(@Headers('x-internal-secret') secret?: string, @Body() body?: { maxAgeMinutes?: number; limit?: number }) {
+    const expected = (process.env.INTERNAL_LIVEKIT_RECONCILE_SECRET || '').trim();
+    if (!expected) throw new HttpException('reconcile_not_configured', HttpStatus.SERVICE_UNAVAILABLE);
+    if (!secret || secret !== expected) throw new UnauthorizedException('invalid_reconcile_secret');
+    const maxAgeMinutes = Math.min(Math.max(Number(body?.maxAgeMinutes || 20), 5), 240);
+    const limit = Math.min(Math.max(Number(body?.limit || 25), 1), 100);
+    if (this.db.isStub) return { ok: true, provider: 'livekit', reconciled: 0, rows: [] };
+
+    const { rows } = await this.db.query<{ session_id: string; room_name: string | null }>(
+      `select session_id, room_name
+         from video_session_lifecycle
+        where status in ('pending', 'waiting')
+          and first_both_joined_at is null
+          and created_at < now() - ($1::text || ' minutes')::interval
+        order by created_at asc
+        limit $2`,
+      [String(maxAgeMinutes), limit]
+    );
+    const settled: any[] = [];
+    for (const row of rows) {
+      if (row.room_name) {
+        try { await this.livekit.endRoom(row.room_name); } catch {}
+      }
+      const result = await this.db.runInTx(async (q) => this.settleFinishedLifecycle(q, row.session_id, 'reconcile_timeout'));
+      settled.push({ sessionId: row.session_id, roomName: row.room_name, ...result });
+    }
+    return { ok: true, provider: 'livekit', reconciled: settled.length, rows: settled };
   }
 }

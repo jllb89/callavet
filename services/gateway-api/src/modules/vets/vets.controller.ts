@@ -385,9 +385,11 @@ export class VetsController {
                 u.full_name as user_name,
                 a.starts_at,
                 a.ends_at,
-                a.status
+                a.status,
+                coalesce(s.mode, 'video') as mode
            from appointments a
            join users u on u.id = a.user_id
+      left join chat_sessions s on s.id = a.session_id
           where a.vet_id = $1::uuid
             and a.status in ('scheduled', 'confirmed')
             and a.starts_at >= now()
@@ -403,9 +405,11 @@ export class VetsController {
                 u.full_name as user_name,
                 a.starts_at as started_at,
                 a.ends_at,
-                a.status
+                a.status,
+                coalesce(s.mode, 'video') as mode
            from appointments a
            join users u on u.id = a.user_id
+      left join chat_sessions s on s.id = a.session_id
           where a.vet_id = $1::uuid
             and a.status = 'active'
          union all
@@ -416,7 +420,8 @@ export class VetsController {
                 u.full_name as user_name,
                 s.started_at,
                 s.ended_at,
-                s.status
+                 s.status,
+                 s.mode
            from chat_sessions s
            join users u on u.id = s.user_id
           where s.vet_id = $1::uuid

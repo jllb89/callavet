@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:country_picker/country_picker.dart';
+// ignore: implementation_imports
 import 'package:country_picker/src/country_list_view.dart';
 import 'package:cav_mobile/src/core/navigation/post_login_routing_controller.dart';
 import 'package:cav_mobile/src/core/config/environment.dart';
@@ -451,7 +452,7 @@ class _KycScreenState extends State<KycScreen> {
 
   void _goNext() {
     final nextPage = _pageIndex + 1;
-    final totalSteps = _bypassOtpValidationForDev ? 3 : 4;
+    const totalSteps = _bypassOtpValidationForDev ? 3 : 4;
     _kycFlowLog(
         'Navigating next: current=$_pageIndex next=$nextPage totalSteps=$totalSteps bypassOtp=$_bypassOtpValidationForDev');
     if (nextPage < totalSteps) {
@@ -1405,7 +1406,7 @@ class _KycPhoneScreenState extends State<_KycPhoneScreen> {
                         height: 62,
                         padding: const EdgeInsets.symmetric(horizontal: 10),
                         decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.06),
+                          color: Colors.white.withValues(alpha: 0.06),
                           borderRadius: BorderRadius.circular(20),
                         ),
                         child: Row(
@@ -1444,7 +1445,7 @@ class _KycPhoneScreenState extends State<_KycPhoneScreen> {
                         height: 62,
                         padding: const EdgeInsets.symmetric(horizontal: 16),
                         decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.06),
+                          color: Colors.white.withValues(alpha: 0.06),
                           borderRadius: BorderRadius.circular(20),
                         ),
                         alignment: Alignment.centerLeft,
@@ -1519,8 +1520,8 @@ class _KycPhoneScreenState extends State<_KycPhoneScreen> {
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.white,
                     foregroundColor: const Color(0xFF101010),
-                    disabledBackgroundColor: Colors.white.withOpacity(0.2),
-                    disabledForegroundColor: Colors.white.withOpacity(0.6),
+                    disabledBackgroundColor: Colors.white.withValues(alpha: 0.2),
+                    disabledForegroundColor: Colors.white.withValues(alpha: 0.6),
                     padding: const EdgeInsets.symmetric(vertical: 16),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(22),
@@ -1703,7 +1704,7 @@ class _KycProfileScreenState extends State<_KycProfileScreen> {
           child: ListView.separated(
             itemCount: _mexicanStates.length,
             separatorBuilder: (_, __) => Divider(
-              color: Colors.white.withOpacity(0.08),
+              color: Colors.white.withValues(alpha: 0.08),
               height: 1,
             ),
             itemBuilder: (context, index) {
@@ -1881,9 +1882,9 @@ class _KycProfileScreenState extends State<_KycProfileScreen> {
                                 backgroundColor: Colors.white,
                                 foregroundColor: const Color(0xFF101010),
                                 disabledBackgroundColor:
-                                    Colors.white.withOpacity(0.2),
+                                    Colors.white.withValues(alpha: 0.2),
                                 disabledForegroundColor:
-                                    Colors.white.withOpacity(0.6),
+                                    Colors.white.withValues(alpha: 0.6),
                               ),
                               child: widget.isSaving
                                   ? const SizedBox(
@@ -1934,7 +1935,7 @@ class _KycInputField extends StatelessWidget {
       height: 62,
       padding: const EdgeInsets.symmetric(horizontal: 16),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.06),
+        color: Colors.white.withValues(alpha: 0.06),
         borderRadius: BorderRadius.circular(20),
       ),
       alignment: Alignment.centerLeft,
@@ -2515,8 +2516,8 @@ class _KycOtpScreenState extends State<_KycOtpScreen> {
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.white,
                 foregroundColor: const Color(0xFF101010),
-                disabledBackgroundColor: Colors.white.withOpacity(0.2),
-                disabledForegroundColor: Colors.white.withOpacity(0.6),
+                disabledBackgroundColor: Colors.white.withValues(alpha: 0.2),
+                disabledForegroundColor: Colors.white.withValues(alpha: 0.6),
                 padding: const EdgeInsets.symmetric(vertical: 16),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(22),
@@ -2564,7 +2565,7 @@ class _OtpGroupBox extends StatelessWidget {
       width: 148,
       height: 62,
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.06),
+        color: Colors.white.withValues(alpha: 0.06),
         borderRadius: BorderRadius.circular(20),
       ),
       child: Row(

@@ -6,8 +6,8 @@ class HorseCareScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text('Horse Care')),
-      body: Center(
+      appBar: AppBar(title: const Text('Horse Care')),
+      body: const Center(
         child: Text('Horse care placeholder'),
       ),
     );

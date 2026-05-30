@@ -79,10 +79,10 @@ class _SplashScreenState extends State<SplashScreen> {
                               color: Colors.white,
                               borderRadius: BorderRadius.circular(33.5),
                             ),
-                            child: Center(
+                            child: const Center(
                               child: Text(
                                 'iniciar sesión',
-                                style: const TextStyle(
+                                style: TextStyle(
                                   color: Colors.black,
                                   fontSize: 14,
                                   fontWeight: FontWeight.w500,
@@ -111,12 +111,12 @@ class _SplashScreenState extends State<SplashScreen> {
                         AnimatedOpacity(
                           opacity: _showContent ? 1 : 0,
                           duration: const Duration(milliseconds: 300),
-                          child: SizedBox(
+                          child: const SizedBox(
                             width: 312,
                             child: Text(
                               'atención veterinaria especializada para tu caballo en minutos.',
                               textAlign: TextAlign.center,
-                              style: const TextStyle(
+                              style: TextStyle(
                                 color: Colors.white,
                                 fontSize: 15,
                                 fontWeight: FontWeight.w500,

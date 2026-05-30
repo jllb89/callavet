@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import '../../features/auth/presentation/login_screen.dart';
 import '../../features/dashboard/presentation/vet_dashboard_screen.dart';
 import '../../features/onboarding/presentation/splash_screen.dart';
+import '../../features/video/presentation/vet_video_call_screen.dart';
 
 class AppRouter {
   static final router = GoRouter(
@@ -23,6 +24,14 @@ class AppRouter {
         path: '/dashboard',
         name: 'dashboard',
         builder: (context, state) => const VetDashboardScreen(),
+      ),
+      GoRoute(
+        path: '/video/:sessionId',
+        name: 'videoCall',
+        builder: (context, state) {
+          final sessionId = state.pathParameters['sessionId'] ?? '';
+          return VetVideoCallScreen(sessionId: sessionId);
+        },
       ),
     ],
     errorBuilder: (context, state) => Scaffold(

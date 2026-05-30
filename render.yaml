@@ -42,6 +42,8 @@ services:
         sync: false
       - key: LIVEKIT_API_SECRET
         sync: false
+      - key: INTERNAL_LIVEKIT_RECONCILE_SECRET
+        sync: false
       - key: AI_PROVIDER
         value: openai
       - key: AI_PROVIDER_BASE_URL

@@ -43,7 +43,7 @@ import path from 'node:path';
 async function bootstrap() {
   // Prefer IPv4 inside some container runtimes (e.g., Colima)
   try { dns.setDefaultResultOrder?.('ipv4first'); } catch {}
-  const app = await NestFactory.create(AppModule, { logger: ['log','error','warn'] });
+  const app = await NestFactory.create(AppModule, { logger: ['log','error','warn'], rawBody: true });
   if (!process.env.DATABASE_URL) {
     // eslint-disable-next-line no-console
     console.error('[env] DATABASE_URL still missing after fallback load -> running in stub mode.');

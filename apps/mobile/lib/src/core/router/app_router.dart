@@ -13,6 +13,7 @@ import '../../features/onboarding/presentation/onboarding_screen.dart';
 import '../../features/onboarding/presentation/splash_screen.dart';
 import '../../features/subscriptions/presentation/subscription_plans_screen.dart';
 import '../../features/user_settings/presentation/user_settings_screen.dart';
+import '../../features/video/presentation/video_call_screen.dart';
 
 class AppRouter {
   static final router = GoRouter(
@@ -50,7 +51,8 @@ class AppRouter {
         path: '/subscription-loader',
         name: 'subscriptionLoader',
         builder: (context, state) {
-          final horses = int.tryParse(state.uri.queryParameters['horses'] ?? '');
+          final horses =
+              int.tryParse(state.uri.queryParameters['horses'] ?? '');
           postLoginRouteLog(
             'Router entered /subscription-loader uri=${state.uri} horses=$horses',
           );
@@ -98,7 +100,16 @@ class AppRouter {
             'initialMessagePresent=${initialMessage?.trim().isNotEmpty == true} '
             'initialMessageLength=${initialMessage?.trim().length ?? 0}',
           );
-          return ChatScreen(sessionId: sessionId, initialMessage: initialMessage);
+          return ChatScreen(
+              sessionId: sessionId, initialMessage: initialMessage);
+        },
+      ),
+      GoRoute(
+        path: '/video/:sessionId',
+        name: 'videoCall',
+        builder: (context, state) {
+          final sessionId = state.pathParameters['sessionId'] ?? '';
+          return VideoCallScreen(sessionId: sessionId);
         },
       ),
       GoRoute(
