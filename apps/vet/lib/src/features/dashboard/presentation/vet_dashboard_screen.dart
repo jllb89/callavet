@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -15,15 +16,48 @@ class VetDashboardScreen extends StatefulWidget {
   State<VetDashboardScreen> createState() => _VetDashboardScreenState();
 }
 
-class _VetDashboardScreenState extends State<VetDashboardScreen> {
+class _VetDashboardScreenState extends State<VetDashboardScreen>
+    with WidgetsBindingObserver {
+  static const _dashboardRealtimeTables = <String>[
+    'chat_sessions',
+    'appointments',
+    'video_session_lifecycle',
+  ];
+
   bool _showProfile = false;
   bool _availableNow = true;
+  final Set<String> _endingConsultIds = <String>{};
+  final List<RealtimeChannel> _dashboardRealtimeChannels = <RealtimeChannel>[];
+  RealtimeChannel? _dashboardBroadcastChannel;
+  String? _dashboardBroadcastTopic;
+  Timer? _dashboardRefreshDebounce;
   late Future<_VetProfileBundle> _profileBundleFuture;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _profileBundleFuture = _loadProfileBundle();
+    _startDashboardRealtime();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _dashboardRefreshDebounce?.cancel();
+    _removeDashboardBroadcast();
+    _removeDashboardRealtime();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _startDashboardRealtime();
+      _profileBundleFuture
+          .then((bundle) => _startDashboardBroadcast(bundle.profile.id));
+      _refreshDashboardQueue();
+    }
   }
 
   Future<_VetProfileBundle> _loadProfileBundle() async {
@@ -37,27 +71,115 @@ class _VetDashboardScreenState extends State<VetDashboardScreen> {
             .where((specialty) => specialty.isActive)
             .toList() ??
         const <_VetSpecialty>[];
+    final profile = _VetProfile.fromJson(profileResponse);
+    _startDashboardBroadcast(profile.id);
     return _VetProfileBundle(
-      profile: _VetProfile.fromJson(profileResponse),
+      profile: profile,
       specialties: specialties,
       queue: _VetQueue.fromJson(queueResponse),
     );
   }
 
+  Future<_VetProfileBundle> _loadQueueIntoBundle(
+      Future<_VetProfileBundle> currentBundleFuture) async {
+    try {
+      final bundle = await currentBundleFuture;
+      _startDashboardBroadcast(bundle.profile.id);
+      final queueResponse = await _getGatewayJson('/vets/me/queue');
+      return bundle.copyWith(queue: _VetQueue.fromJson(queueResponse));
+    } catch (_) {
+      return _loadProfileBundle();
+    }
+  }
+
+  void _refreshDashboardQueue() {
+    if (!mounted) return;
+    final currentBundleFuture = _profileBundleFuture;
+    setState(
+        () => _profileBundleFuture = _loadQueueIntoBundle(currentBundleFuture));
+  }
+
+  void _scheduleDashboardRefresh() {
+    _dashboardRefreshDebounce?.cancel();
+    _dashboardRefreshDebounce =
+        Timer(const Duration(milliseconds: 650), _refreshDashboardQueue);
+  }
+
+  void _startDashboardRealtime() {
+    if (_dashboardRealtimeChannels.isNotEmpty) return;
+    final client = Supabase.instance.client;
+    for (final table in _dashboardRealtimeTables) {
+      final channel = client.channel('vet-dashboard:$table');
+      channel
+          .onPostgresChanges(
+            event: PostgresChangeEvent.all,
+            schema: 'public',
+            table: table,
+            callback: (_) => _scheduleDashboardRefresh(),
+          )
+          .subscribe();
+      _dashboardRealtimeChannels.add(channel);
+    }
+  }
+
+  void _startDashboardBroadcast(String vetId) {
+    final normalizedVetId = vetId.trim();
+    if (normalizedVetId.isEmpty) return;
+    final topic = 'vet-dashboard:$normalizedVetId';
+    if (_dashboardBroadcastTopic == topic && _dashboardBroadcastChannel != null) {
+      return;
+    }
+
+    _removeDashboardBroadcast();
+    final channel = Supabase.instance.client.channel(
+      topic,
+      opts: const RealtimeChannelConfig(private: true),
+    );
+    channel
+        .onBroadcast(
+          event: 'dashboard_changed',
+          callback: (_) => _scheduleDashboardRefresh(),
+        )
+        .subscribe();
+    _dashboardBroadcastTopic = topic;
+    _dashboardBroadcastChannel = channel;
+  }
+
+  void _removeDashboardBroadcast() {
+    final channel = _dashboardBroadcastChannel;
+    _dashboardBroadcastChannel = null;
+    _dashboardBroadcastTopic = null;
+    if (channel != null) {
+      Supabase.instance.client.removeChannel(channel);
+    }
+  }
+
+  void _removeDashboardRealtime() {
+    final channels = List<RealtimeChannel>.from(_dashboardRealtimeChannels);
+    _dashboardRealtimeChannels.clear();
+    for (final channel in channels) {
+      Supabase.instance.client.removeChannel(channel);
+    }
+  }
+
   Future<Map<String, dynamic>> _getGatewayJson(String path) async {
     final token = Supabase.instance.client.auth.currentSession?.accessToken;
     if (token == null || token.isEmpty) {
-      throw const _VetProfileException('Tu sesión expiró. Vuelve a iniciar sesión.');
+      throw const _VetProfileException(
+          'Tu sesión expiró. Vuelve a iniciar sesión.');
     }
 
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
     try {
-      final request = await client.getUrl(Uri.parse('${Environment.apiBaseUrl}$path'));
+      final request =
+          await client.getUrl(Uri.parse('${Environment.apiBaseUrl}$path'));
       request.headers.set(HttpHeaders.acceptHeader, 'application/json');
       request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
-      final response = await request.close().timeout(const Duration(seconds: 30));
+      final response =
+          await request.close().timeout(const Duration(seconds: 30));
       final rawBody = await utf8.decoder.bind(response).join();
-      final decoded = rawBody.trim().isEmpty ? <String, dynamic>{} : jsonDecode(rawBody);
+      final decoded =
+          rawBody.trim().isEmpty ? <String, dynamic>{} : jsonDecode(rawBody);
       final data = _asMap(decoded) ?? <String, dynamic>{};
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw _VetProfileException(_errorMessage(data, response.statusCode));
@@ -68,22 +190,58 @@ class _VetDashboardScreenState extends State<VetDashboardScreen> {
     }
   }
 
-  Future<Map<String, dynamic>> _patchGatewayJson(String path, Map<String, dynamic> body) async {
+  Future<Map<String, dynamic>> _patchGatewayJson(
+      String path, Map<String, dynamic> body) async {
     final token = Supabase.instance.client.auth.currentSession?.accessToken;
     if (token == null || token.isEmpty) {
-      throw const _VetProfileException('Tu sesión expiró. Vuelve a iniciar sesión.');
+      throw const _VetProfileException(
+          'Tu sesión expiró. Vuelve a iniciar sesión.');
     }
 
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
     try {
-      final request = await client.patchUrl(Uri.parse('${Environment.apiBaseUrl}$path'));
+      final request =
+          await client.patchUrl(Uri.parse('${Environment.apiBaseUrl}$path'));
       request.headers.set(HttpHeaders.acceptHeader, 'application/json');
       request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
       request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
       request.add(utf8.encode(jsonEncode(body)));
-      final response = await request.close().timeout(const Duration(seconds: 30));
+      final response =
+          await request.close().timeout(const Duration(seconds: 30));
       final rawBody = await utf8.decoder.bind(response).join();
-      final decoded = rawBody.trim().isEmpty ? <String, dynamic>{} : jsonDecode(rawBody);
+      final decoded =
+          rawBody.trim().isEmpty ? <String, dynamic>{} : jsonDecode(rawBody);
+      final data = _asMap(decoded) ?? <String, dynamic>{};
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw _VetProfileException(_errorMessage(data, response.statusCode));
+      }
+      return data;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Future<Map<String, dynamic>> _postGatewayJson(
+      String path, Map<String, dynamic> body) async {
+    final token = Supabase.instance.client.auth.currentSession?.accessToken;
+    if (token == null || token.isEmpty) {
+      throw const _VetProfileException(
+          'Tu sesión expiró. Vuelve a iniciar sesión.');
+    }
+
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    try {
+      final request =
+          await client.postUrl(Uri.parse('${Environment.apiBaseUrl}$path'));
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+      request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+      request.add(utf8.encode(jsonEncode(body)));
+      final response =
+          await request.close().timeout(const Duration(seconds: 30));
+      final rawBody = await utf8.decoder.bind(response).join();
+      final decoded =
+          rawBody.trim().isEmpty ? <String, dynamic>{} : jsonDecode(rawBody);
       final data = _asMap(decoded) ?? <String, dynamic>{};
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw _VetProfileException(_errorMessage(data, response.statusCode));
@@ -115,6 +273,68 @@ class _VetDashboardScreenState extends State<VetDashboardScreen> {
     context.push('/video/${Uri.encodeComponent(normalizedSessionId)}');
   }
 
+  void _openChat(String sessionId) {
+    final normalizedSessionId = sessionId.trim();
+    if (normalizedSessionId.isEmpty) return;
+    context.push('/chat/${Uri.encodeComponent(normalizedSessionId)}');
+  }
+
+  Future<void> _endActiveConsult(_ActiveConsult consult) async {
+    final sessionId = consult.sessionId.trim();
+    if (sessionId.isEmpty || _endingConsultIds.contains(sessionId)) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF141417),
+          title: const Text(
+            'Finalizar consulta',
+            style: TextStyle(color: Colors.white, fontFamily: 'ABC Diatype'),
+          ),
+          content: Text(
+            '¿Quieres cerrar la consulta de ${consult.name}?',
+            style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.72),
+                fontFamily: 'ABC Diatype'),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('cancelar'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('finalizar'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _endingConsultIds.add(sessionId));
+    try {
+      await _postGatewayJson(
+          '/vets/me/consults/${Uri.encodeComponent(sessionId)}/end',
+          const <String, dynamic>{});
+      if (!mounted) return;
+      _refreshDashboardQueue();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('consulta finalizada.')),
+      );
+    } catch (err) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo finalizar: $err')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _endingConsultIds.remove(sessionId));
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final content = _showProfile
@@ -123,13 +343,17 @@ class _VetDashboardScreenState extends State<VetDashboardScreen> {
             child: _ProfilePage(
               profileBundleFuture: _profileBundleFuture,
               onSave: _saveProfile,
-              onReload: () => setState(() => _profileBundleFuture = _loadProfileBundle()),
+              onReload: () =>
+                  setState(() => _profileBundleFuture = _loadProfileBundle()),
             ),
           )
         : _DashboardPage(
             availableNow: _availableNow,
             profileBundleFuture: _profileBundleFuture,
             onJoinVideo: _openVideoCall,
+            onOpenChat: _openChat,
+            onEndConsult: _endActiveConsult,
+            endingConsultIds: _endingConsultIds,
           );
 
     return Scaffold(
@@ -154,7 +378,8 @@ class _VetDashboardScreenState extends State<VetDashboardScreen> {
                     availableNow: _availableNow,
                     onHomeTap: _showHome,
                     onProfileTap: _showProfileScreen,
-                    onAvailabilityChanged: (value) => setState(() => _availableNow = value),
+                    onAvailabilityChanged: (value) =>
+                        setState(() => _availableNow = value),
                   ),
                 Expanded(child: content),
               ],
@@ -220,7 +445,8 @@ class _VetTopBar extends StatelessWidget {
                 child: SvgPicture.asset(
                   'assets/icons/user.svg',
                   fit: BoxFit.contain,
-                  colorFilter: const ColorFilter.mode(Colors.white, BlendMode.srcIn),
+                  colorFilter:
+                      const ColorFilter.mode(Colors.white, BlendMode.srcIn),
                 ),
               ),
             ),
@@ -270,9 +496,12 @@ class _TinyAvailabilitySwitch extends StatelessWidget {
             height: 22,
             padding: const EdgeInsets.all(2),
             decoration: BoxDecoration(
-              color: value ? Colors.white.withValues(alpha: 0.28) : Colors.white.withValues(alpha: 0.10),
+              color: value
+                  ? Colors.white.withValues(alpha: 0.28)
+                  : Colors.white.withValues(alpha: 0.10),
               borderRadius: BorderRadius.circular(999),
-              border: Border.all(color: Colors.white.withValues(alpha: value ? 0.45 : 0.22)),
+              border: Border.all(
+                  color: Colors.white.withValues(alpha: value ? 0.45 : 0.22)),
             ),
             child: AnimatedAlign(
               duration: const Duration(milliseconds: 180),
@@ -299,11 +528,17 @@ class _DashboardPage extends StatelessWidget {
     required this.availableNow,
     required this.profileBundleFuture,
     required this.onJoinVideo,
+    required this.onOpenChat,
+    required this.onEndConsult,
+    required this.endingConsultIds,
   });
 
   final bool availableNow;
   final Future<_VetProfileBundle> profileBundleFuture;
   final ValueChanged<String> onJoinVideo;
+  final ValueChanged<String> onOpenChat;
+  final ValueChanged<_ActiveConsult> onEndConsult;
+  final Set<String> endingConsultIds;
 
   @override
   Widget build(BuildContext context) {
@@ -318,7 +553,8 @@ class _DashboardPage extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const SizedBox(height: 96),
-                    _DashboardGreeting(profileBundleFuture: profileBundleFuture),
+                    _DashboardGreeting(
+                        profileBundleFuture: profileBundleFuture),
                     const SizedBox(height: 6),
                     const SizedBox(
                       width: 332,
@@ -340,6 +576,9 @@ class _DashboardPage extends StatelessWidget {
                       availableNow: availableNow,
                       profileBundleFuture: profileBundleFuture,
                       onJoinVideo: onJoinVideo,
+                      onOpenChat: onOpenChat,
+                      onEndConsult: onEndConsult,
+                      endingConsultIds: endingConsultIds,
                     ),
                   ],
                 ),
@@ -397,11 +636,21 @@ class _BoltMark extends StatelessWidget {
 }
 
 class _ActivitySections extends StatelessWidget {
-  const _ActivitySections({required this.availableNow, required this.profileBundleFuture, required this.onJoinVideo});
+  const _ActivitySections({
+    required this.availableNow,
+    required this.profileBundleFuture,
+    required this.onJoinVideo,
+    required this.onOpenChat,
+    required this.onEndConsult,
+    required this.endingConsultIds,
+  });
 
   final bool availableNow;
   final Future<_VetProfileBundle> profileBundleFuture;
   final ValueChanged<String> onJoinVideo;
+  final ValueChanged<String> onOpenChat;
+  final ValueChanged<_ActiveConsult> onEndConsult;
+  final Set<String> endingConsultIds;
 
   @override
   Widget build(BuildContext context) {
@@ -409,8 +658,10 @@ class _ActivitySections extends StatelessWidget {
       future: profileBundleFuture,
       builder: (context, snapshot) {
         final queue = snapshot.data?.queue;
-        final activeConsults = queue?.activeConsults ?? const <_ActiveConsult>[];
-        final upcomingAppointments = queue?.upcomingAppointments ?? const <_UpcomingAppointment>[];
+        final activeConsults =
+            queue?.activeConsults ?? const <_ActiveConsult>[];
+        final upcomingAppointments =
+            queue?.upcomingAppointments ?? const <_UpcomingAppointment>[];
         final isLoading = snapshot.connectionState == ConnectionState.waiting;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -430,7 +681,13 @@ class _ActivitySections extends StatelessWidget {
             else if (activeConsults.isEmpty)
               const _EmptyActivityText('No tienes consultas activas.')
             else
-              _ActiveConsultPills(consults: activeConsults, onJoinVideo: onJoinVideo),
+              _ActiveConsultEventList(
+                consults: activeConsults,
+                onJoinVideo: onJoinVideo,
+                onOpenChat: onOpenChat,
+                onEndConsult: onEndConsult,
+                endingConsultIds: endingConsultIds,
+              ),
             const SizedBox(height: 46),
             const Text(
               'próximas consultas:',
@@ -447,7 +704,8 @@ class _ActivitySections extends StatelessWidget {
             else if (upcomingAppointments.isEmpty)
               const _EmptyActivityText('No tienes videollamadas programadas.')
             else
-              _UpcomingAppointmentsList(appointments: upcomingAppointments, onJoinVideo: onJoinVideo),
+              _UpcomingAppointmentsList(
+                  appointments: upcomingAppointments, onJoinVideo: onJoinVideo),
           ],
         );
       },
@@ -455,62 +713,120 @@ class _ActivitySections extends StatelessWidget {
   }
 }
 
-class _ActiveConsultPills extends StatelessWidget {
-  const _ActiveConsultPills({required this.consults, required this.onJoinVideo});
+class _ActiveConsultEventList extends StatelessWidget {
+  const _ActiveConsultEventList({
+    required this.consults,
+    required this.onJoinVideo,
+    required this.onOpenChat,
+    required this.onEndConsult,
+    required this.endingConsultIds,
+  });
 
   final List<_ActiveConsult> consults;
   final ValueChanged<String> onJoinVideo;
+  final ValueChanged<String> onOpenChat;
+  final ValueChanged<_ActiveConsult> onEndConsult;
+  final Set<String> endingConsultIds;
 
   @override
   Widget build(BuildContext context) {
-    final consult = consults.first;
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      clipBehavior: Clip.none,
-      child: Row(
-        children: [
-          _PrimaryConsultPill(name: consult.name),
-          const SizedBox(width: 13),
-          _DarkTagPill(label: consult.status),
-          const SizedBox(width: 13),
-          _DarkTagPill(label: consult.mode),
-          if (consult.canJoinVideo) ...[
-            const SizedBox(width: 13),
-            _JoinVideoPill(onTap: () => onJoinVideo(consult.sessionId)),
-          ],
-        ],
-      ),
+    return Column(
+      children: consults.map((consult) {
+        final isEnding = endingConsultIds.contains(consult.sessionId);
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: _ActiveConsultEventRow(
+            consult: consult,
+            isEnding: isEnding,
+            onJoinVideo: consult.canJoinVideo
+                ? () => onJoinVideo(consult.sessionId)
+                : null,
+            onOpenChat: consult.canOpenChat
+                ? () => onOpenChat(consult.sessionId)
+                : null,
+            onEndConsult: isEnding ? null : () => onEndConsult(consult),
+          ),
+        );
+      }).toList(),
     );
   }
 }
 
-class _PrimaryConsultPill extends StatelessWidget {
-  const _PrimaryConsultPill({required this.name});
+class _ActiveConsultEventRow extends StatelessWidget {
+  const _ActiveConsultEventRow({
+    required this.consult,
+    required this.isEnding,
+    this.onJoinVideo,
+    this.onOpenChat,
+    this.onEndConsult,
+  });
 
-  final String name;
+  final _ActiveConsult consult;
+  final bool isEnding;
+  final VoidCallback? onJoinVideo;
+  final VoidCallback? onOpenChat;
+  final VoidCallback? onEndConsult;
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: 51,
-      padding: const EdgeInsets.only(left: 20, right: 24),
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(14, 13, 10, 13),
       decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(40),
+        color: Colors.white.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
       ),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          const Icon(Icons.chat_bubble_outline, color: Colors.black, size: 17),
+          _ConsultModeBadge(mode: consult.mode),
           const SizedBox(width: 12),
-          Text(
-            name,
-            style: const TextStyle(
-              color: Colors.black,
-              fontSize: 13,
-              fontFamily: 'ABC Diatype',
-              fontWeight: FontWeight.w500,
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  consult.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontFamily: 'ABC Diatype',
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  consult.startedLabel,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.48),
+                    fontSize: 11,
+                    fontFamily: 'ABC Diatype',
+                    fontWeight: FontWeight.w400,
+                  ),
+                ),
+                const SizedBox(height: 9),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: consult.tags
+                      .map((label) => _ConsultTag(label: label))
+                      .toList(),
+                ),
+              ],
             ),
+          ),
+          const SizedBox(width: 8),
+          if (onJoinVideo != null) _InlineJoinButton(onTap: onJoinVideo!),
+          if (onOpenChat != null) _InlineChatButton(onTap: onOpenChat!),
+          _ConsultOptionsButton(
+            enabled: onEndConsult != null,
+            isEnding: isEnding,
+            onEndConsult: onEndConsult,
           ),
         ],
       ),
@@ -518,26 +834,51 @@ class _PrimaryConsultPill extends StatelessWidget {
   }
 }
 
-class _DarkTagPill extends StatelessWidget {
-  const _DarkTagPill({required this.label});
+class _ConsultModeBadge extends StatelessWidget {
+  const _ConsultModeBadge({required this.mode});
+
+  final String mode;
+
+  @override
+  Widget build(BuildContext context) {
+    final isVideo = mode == 'video';
+    return Container(
+      width: 42,
+      height: 42,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Icon(
+        isVideo ? Icons.videocam_rounded : Icons.chat_bubble_outline_rounded,
+        color: Colors.black,
+        size: 20,
+      ),
+    );
+  }
+}
+
+class _ConsultTag extends StatelessWidget {
+  const _ConsultTag({required this.label});
 
   final String label;
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: 30,
-      padding: const EdgeInsets.symmetric(horizontal: 16),
+      height: 25,
+      padding: const EdgeInsets.symmetric(horizontal: 10),
       alignment: Alignment.center,
       decoration: BoxDecoration(
-        color: Colors.black,
-        borderRadius: BorderRadius.circular(40),
+        color: Colors.black.withValues(alpha: 0.45),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
       ),
       child: Text(
         label,
         style: const TextStyle(
           color: Colors.white,
-          fontSize: 13,
+          fontSize: 11,
           fontFamily: 'ABC Diatype',
           fontWeight: FontWeight.w500,
         ),
@@ -546,8 +887,134 @@ class _DarkTagPill extends StatelessWidget {
   }
 }
 
+class _InlineJoinButton extends StatelessWidget {
+  const _InlineJoinButton({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        height: 34,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.videocam_rounded, color: Colors.black, size: 16),
+            SizedBox(width: 6),
+            Text(
+              'entrar',
+              style: TextStyle(
+                color: Colors.black,
+                fontSize: 12,
+                fontFamily: 'ABC Diatype',
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _InlineChatButton extends StatelessWidget {
+  const _InlineChatButton({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        height: 34,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.chat_bubble_outline_rounded,
+                color: Colors.black, size: 15),
+            SizedBox(width: 6),
+            Text(
+              'abrir',
+              style: TextStyle(
+                color: Colors.black,
+                fontSize: 12,
+                fontFamily: 'ABC Diatype',
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ConsultOptionsButton extends StatelessWidget {
+  const _ConsultOptionsButton(
+      {required this.enabled,
+      required this.isEnding,
+      required this.onEndConsult});
+
+  final bool enabled;
+  final bool isEnding;
+  final VoidCallback? onEndConsult;
+
+  @override
+  Widget build(BuildContext context) {
+    if (isEnding) {
+      return const SizedBox(
+        width: 38,
+        height: 38,
+        child: Center(
+          child: SizedBox(
+            width: 15,
+            height: 15,
+            child: CircularProgressIndicator(
+                strokeWidth: 2,
+                valueColor: AlwaysStoppedAnimation<Color>(Colors.white)),
+          ),
+        ),
+      );
+    }
+    return PopupMenuButton<String>(
+      enabled: enabled,
+      color: const Color(0xFF161616),
+      icon: const Icon(Icons.more_horiz_rounded, color: Colors.white, size: 22),
+      onSelected: (value) {
+        if (value == 'end') onEndConsult?.call();
+      },
+      itemBuilder: (context) => const [
+        PopupMenuItem<String>(
+          value: 'end',
+          child: Text(
+            'finalizar consulta',
+            style: TextStyle(
+                color: Colors.white, fontFamily: 'ABC Diatype', fontSize: 13),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class _UpcomingAppointmentsList extends StatelessWidget {
-  const _UpcomingAppointmentsList({required this.appointments, required this.onJoinVideo});
+  const _UpcomingAppointmentsList(
+      {required this.appointments, required this.onJoinVideo});
 
   final List<_UpcomingAppointment> appointments;
   final ValueChanged<String> onJoinVideo;
@@ -576,7 +1043,9 @@ class _UpcomingAppointmentsList extends StatelessWidget {
               child: _UpcomingConsultPill(
                 name: appointment.name,
                 time: appointment.formattedStart,
-                onJoin: appointment.canJoinVideo ? () => onJoinVideo(appointment.sessionId) : null,
+                onJoin: appointment.canJoinVideo
+                    ? () => onJoinVideo(appointment.sessionId)
+                    : null,
               ),
             ),
           );
@@ -587,7 +1056,8 @@ class _UpcomingAppointmentsList extends StatelessWidget {
 }
 
 class _UpcomingConsultPill extends StatelessWidget {
-  const _UpcomingConsultPill({required this.name, required this.time, this.onJoin});
+  const _UpcomingConsultPill(
+      {required this.name, required this.time, this.onJoin});
 
   final String name;
   final String time;
@@ -637,44 +1107,6 @@ class _UpcomingConsultPill extends StatelessWidget {
   }
 }
 
-class _JoinVideoPill extends StatelessWidget {
-  const _JoinVideoPill({required this.onTap});
-
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: Container(
-        height: 51,
-        padding: const EdgeInsets.only(left: 18, right: 20),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(40),
-        ),
-        child: const Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.videocam_rounded, color: Colors.black, size: 18),
-            SizedBox(width: 10),
-            Text(
-              'entrar',
-              style: TextStyle(
-                color: Colors.black,
-                fontSize: 13,
-                fontFamily: 'ABC Diatype',
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 class _RoundVideoIconButton extends StatelessWidget {
   const _RoundVideoIconButton({required this.onTap});
 
@@ -692,7 +1124,8 @@ class _RoundVideoIconButton extends StatelessWidget {
           color: Colors.white,
           shape: BoxShape.circle,
         ),
-        child: const Icon(Icons.videocam_rounded, color: Colors.black, size: 18),
+        child:
+            const Icon(Icons.videocam_rounded, color: Colors.black, size: 18),
       ),
     );
   }
@@ -789,14 +1222,18 @@ class _ProfilePage extends StatelessWidget {
       future: profileBundleFuture,
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator(color: Colors.white));
+          return const Center(
+              child: CircularProgressIndicator(color: Colors.white));
         }
         if (snapshot.hasError) {
-          return _ProfileError(message: snapshot.error.toString(), onReload: onReload);
+          return _ProfileError(
+              message: snapshot.error.toString(), onReload: onReload);
         }
         final bundle = snapshot.data;
         if (bundle == null) {
-          return _ProfileError(message: 'No pude cargar el perfil veterinario.', onReload: onReload);
+          return _ProfileError(
+              message: 'No pude cargar el perfil veterinario.',
+              onReload: onReload);
         }
         return _ProfileEditor(bundle: bundle, onSave: onSave);
       },
@@ -916,7 +1353,8 @@ class _ProfileEditorState extends State<_ProfileEditor> {
                 alignment: Alignment.centerRight,
                 child: _OnboardingStyleAction(
                   label: 'listo',
-                  onPressed: () => Navigator.of(context).pop(draftController.text),
+                  onPressed: () =>
+                      Navigator.of(context).pop(draftController.text),
                 ),
               ),
             ],
@@ -946,7 +1384,8 @@ class _ProfileEditorState extends State<_ProfileEditor> {
       profile.email,
       profile.phone,
       profile.licenseNumber,
-      if (profile.ratingCount > 0) '${profile.ratingAverage.toStringAsFixed(1)} (${profile.ratingCount})',
+      if (profile.ratingCount > 0)
+        '${profile.ratingAverage.toStringAsFixed(1)} (${profile.ratingCount})',
     ].where((value) => value.trim().isNotEmpty).toList();
     return Column(
       children: [
@@ -972,7 +1411,9 @@ class _ProfileEditorState extends State<_ProfileEditor> {
                         ),
                         const SizedBox(height: 8),
                         Text(
-                          profile.fullName.isEmpty ? 'Veterinario Call a Vet' : profile.fullName,
+                          profile.fullName.isEmpty
+                              ? 'Veterinario Call a Vet'
+                              : profile.fullName,
                           style: TextStyle(
                             color: Colors.white.withAlpha(180),
                             fontSize: 13,
@@ -992,12 +1433,17 @@ class _ProfileEditorState extends State<_ProfileEditor> {
                 label: 'Bio profesional',
                 value: _bioController.text,
                 maxLines: 4,
-                onTap: () => _editField(_bioController, 'Bio profesional', maxLines: 5),
+                onTap: () =>
+                    _editField(_bioController, 'Bio profesional', maxLines: 5),
               ),
               const SizedBox(height: 10),
               const Text(
                 'Especialidades',
-                style: TextStyle(color: Colors.white, fontSize: 13, fontFamily: 'ABC Diatype', fontWeight: FontWeight.w500),
+                style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontFamily: 'ABC Diatype',
+                    fontWeight: FontWeight.w500),
               ),
               const SizedBox(height: 12),
               Wrap(
@@ -1017,7 +1463,9 @@ class _ProfileEditorState extends State<_ProfileEditor> {
                 Text(
                   _message!,
                   style: TextStyle(
-                    color: _message!.startsWith('No pude') ? const Color(0xFFFF8A80) : Colors.white.withAlpha(190),
+                    color: _message!.startsWith('No pude')
+                        ? const Color(0xFFFF8A80)
+                        : Colors.white.withAlpha(190),
                     fontSize: 12,
                     fontFamily: 'ABCDiatype',
                   ),
@@ -1117,7 +1565,8 @@ class _ProfileMetaText extends StatelessWidget {
 }
 
 class _SpecialtyToggleTag extends StatelessWidget {
-  const _SpecialtyToggleTag({required this.label, required this.selected, required this.onTap});
+  const _SpecialtyToggleTag(
+      {required this.label, required this.selected, required this.onTap});
 
   final String label;
   final bool selected;
@@ -1169,7 +1618,8 @@ class _SpecialtyToggleTag extends StatelessWidget {
 }
 
 class _OnboardingStyleAction extends StatelessWidget {
-  const _OnboardingStyleAction({required this.label, required this.onPressed, this.busy = false});
+  const _OnboardingStyleAction(
+      {required this.label, required this.onPressed, this.busy = false});
 
   final String label;
   final VoidCallback? onPressed;
@@ -1208,7 +1658,8 @@ class _OnboardingStyleAction extends StatelessWidget {
                         child: SizedBox(
                           width: 18,
                           height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.white),
                         ),
                       ),
                     )
@@ -1216,7 +1667,8 @@ class _OnboardingStyleAction extends StatelessWidget {
                       'assets/icons/continue.svg',
                       width: 48,
                       height: 48,
-                      colorFilter: const ColorFilter.mode(Colors.white, BlendMode.srcIn),
+                      colorFilter:
+                          const ColorFilter.mode(Colors.white, BlendMode.srcIn),
                     ),
             ],
           ),
@@ -1237,13 +1689,19 @@ class _ApprovalBadge extends StatelessWidget {
       decoration: BoxDecoration(
         color: isApproved ? const Color(0x3329D391) : const Color(0x33FFB4AB),
         borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: isApproved ? const Color(0xAA29D391) : const Color(0xAAFFB4AB)),
+        border: Border.all(
+            color:
+                isApproved ? const Color(0xAA29D391) : const Color(0xAAFFB4AB)),
       ),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         child: Text(
           isApproved ? 'aprobado' : 'pendiente',
-          style: const TextStyle(color: Colors.white, fontSize: 11, fontFamily: 'ABCDiatype', fontWeight: FontWeight.w500),
+          style: const TextStyle(
+              color: Colors.white,
+              fontSize: 11,
+              fontFamily: 'ABCDiatype',
+              fontWeight: FontWeight.w500),
         ),
       ),
     );
@@ -1266,11 +1724,23 @@ class _ProfileError extends StatelessWidget {
           children: [
             const Icon(Icons.badge_outlined, size: 42, color: Colors.white),
             const SizedBox(height: 14),
-            const Text('Perfil veterinario', style: TextStyle(color: Colors.white, fontSize: 24, fontFamily: 'ABCDiatype')),
+            const Text('Perfil veterinario',
+                style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 24,
+                    fontFamily: 'ABCDiatype')),
             const SizedBox(height: 8),
-            Text(message, style: TextStyle(color: Colors.white.withAlpha(175), fontSize: 13, fontFamily: 'ABCDiatype'), textAlign: TextAlign.center),
+            Text(message,
+                style: TextStyle(
+                    color: Colors.white.withAlpha(175),
+                    fontSize: 13,
+                    fontFamily: 'ABCDiatype'),
+                textAlign: TextAlign.center),
             const SizedBox(height: 12),
-            TextButton(onPressed: onReload, child: const Text('reintentar', style: TextStyle(color: Colors.white))),
+            TextButton(
+                onPressed: onReload,
+                child: const Text('reintentar',
+                    style: TextStyle(color: Colors.white))),
           ],
         ),
       ),
@@ -1279,15 +1749,25 @@ class _ProfileError extends StatelessWidget {
 }
 
 class _VetProfileBundle {
-  const _VetProfileBundle({required this.profile, required this.specialties, required this.queue});
+  const _VetProfileBundle(
+      {required this.profile, required this.specialties, required this.queue});
 
   final _VetProfile profile;
   final List<_VetSpecialty> specialties;
   final _VetQueue queue;
+
+  _VetProfileBundle copyWith({_VetQueue? queue}) {
+    return _VetProfileBundle(
+      profile: profile,
+      specialties: specialties,
+      queue: queue ?? this.queue,
+    );
+  }
 }
 
 class _VetQueue {
-  const _VetQueue({required this.activeConsults, required this.upcomingAppointments});
+  const _VetQueue(
+      {required this.activeConsults, required this.upcomingAppointments});
 
   factory _VetQueue.fromJson(Map<String, dynamic> json) {
     return _VetQueue(
@@ -1311,7 +1791,16 @@ class _VetQueue {
 }
 
 class _ActiveConsult {
-  const _ActiveConsult({required this.sessionId, required this.name, required this.status, required this.mode});
+  const _ActiveConsult({
+    required this.sessionId,
+    required this.name,
+    required this.status,
+    required this.mode,
+    required this.startedAt,
+    required this.lifecycleStatus,
+    required this.specialtyName,
+    required this.priority,
+  });
 
   factory _ActiveConsult.fromJson(Map<String, dynamic> json) {
     final mode = _normalizeConsultMode(json['mode']);
@@ -1320,6 +1809,10 @@ class _ActiveConsult {
       name: _displayName(json),
       status: json['status']?.toString() ?? 'activa',
       mode: mode,
+      startedAt: _parseDateTime(json['started_at']),
+      lifecycleStatus: json['lifecycle_status']?.toString(),
+      specialtyName: json['specialty_name']?.toString(),
+      priority: json['priority']?.toString(),
     );
   }
 
@@ -1327,12 +1820,43 @@ class _ActiveConsult {
   final String name;
   final String status;
   final String mode;
+  final DateTime? startedAt;
+  final String? lifecycleStatus;
+  final String? specialtyName;
+  final String? priority;
 
   bool get canJoinVideo => mode == 'video' && sessionId.trim().isNotEmpty;
+  bool get canOpenChat => mode == 'chat' && sessionId.trim().isNotEmpty;
+  String get startedLabel => startedAt == null
+      ? 'inicio por confirmar'
+      : 'inició ${_formatShortDateTime(startedAt!)}';
+
+  List<String> get tags {
+    final values = <String>[
+      _consultStatusLabel(status),
+      _consultModeLabel(mode),
+    ];
+    final lifecycle = lifecycleStatus?.trim().toLowerCase();
+    if (lifecycle != null &&
+        lifecycle.isNotEmpty &&
+        lifecycle != 'pending' &&
+        lifecycle != status.toLowerCase()) {
+      values.add(lifecycle.replaceAll('_', ' '));
+    }
+    final priorityLabel = _consultPriorityLabel(priority);
+    if (priorityLabel != null) values.add(priorityLabel);
+    final specialty = specialtyName?.trim();
+    if (specialty != null && specialty.isNotEmpty) values.add(specialty);
+    return values;
+  }
 }
 
 class _UpcomingAppointment {
-  const _UpcomingAppointment({required this.sessionId, required this.name, required this.startsAt, required this.mode});
+  const _UpcomingAppointment(
+      {required this.sessionId,
+      required this.name,
+      required this.startsAt,
+      required this.mode});
 
   factory _UpcomingAppointment.fromJson(Map<String, dynamic> json) {
     return _UpcomingAppointment(
@@ -1348,12 +1872,15 @@ class _UpcomingAppointment {
   final DateTime? startsAt;
   final String mode;
 
-  String get formattedStart => startsAt == null ? 'hora por confirmar' : _formatAppointmentDate(startsAt!);
+  String get formattedStart => startsAt == null
+      ? 'hora por confirmar'
+      : _formatAppointmentDate(startsAt!);
   bool get canJoinVideo => mode == 'video' && sessionId.trim().isNotEmpty;
 }
 
 class _VetProfile {
   const _VetProfile({
+    required this.id,
     required this.fullName,
     required this.email,
     required this.phone,
@@ -1370,6 +1897,7 @@ class _VetProfile {
 
   factory _VetProfile.fromJson(Map<String, dynamic> json) {
     return _VetProfile(
+      id: json['id']?.toString() ?? '',
       fullName: json['full_name']?.toString() ?? '',
       email: json['email']?.toString() ?? '',
       phone: json['phone']?.toString() ?? '',
@@ -1378,13 +1906,20 @@ class _VetProfile {
       bio: json['bio']?.toString() ?? '',
       yearsExperience: _toInt(json['years_experience']),
       isApproved: json['is_approved'] == true,
-      languages: _asList(json['languages'])?.map((value) => value.toString()).toList() ?? const <String>[],
-      specialtyIds: _asList(json['specialties'])?.map((value) => value.toString()).toList() ?? const <String>[],
+      languages: _asList(json['languages'])
+              ?.map((value) => value.toString())
+              .toList() ??
+          const <String>[],
+      specialtyIds: _asList(json['specialties'])
+              ?.map((value) => value.toString())
+              .toList() ??
+          const <String>[],
       ratingAverage: _toDouble(json['rating_average']) ?? 0,
       ratingCount: _toInt(json['rating_count']) ?? 0,
     );
   }
 
+  final String id;
   final String fullName;
   final String email;
   final String phone;
@@ -1400,7 +1935,8 @@ class _VetProfile {
 }
 
 class _VetSpecialty {
-  const _VetSpecialty({required this.id, required this.name, required this.isActive});
+  const _VetSpecialty(
+      {required this.id, required this.name, required this.isActive});
 
   factory _VetSpecialty.fromJson(Map<String, dynamic> json) {
     return _VetSpecialty(
@@ -1426,7 +1962,9 @@ class _VetProfileException implements Exception {
 
 Map<String, dynamic>? _asMap(Object? value) {
   if (value is Map<String, dynamic>) return value;
-  if (value is Map) return value.map((key, entry) => MapEntry(key.toString(), entry));
+  if (value is Map) {
+    return value.map((key, entry) => MapEntry(key.toString(), entry));
+  }
   return null;
 }
 
@@ -1476,6 +2014,39 @@ String _formatAppointmentDate(DateTime value) {
   final hour = value.hour.toString().padLeft(2, '0');
   final minute = value.minute.toString().padLeft(2, '0');
   return '$day/$month/${value.year}  $hour:${minute}hrs';
+}
+
+String _formatShortDateTime(DateTime value) {
+  final day = value.day.toString().padLeft(2, '0');
+  final month = value.month.toString().padLeft(2, '0');
+  final hour = value.hour.toString().padLeft(2, '0');
+  final minute = value.minute.toString().padLeft(2, '0');
+  return '$day/$month $hour:$minute';
+}
+
+String _consultStatusLabel(String value) {
+  final normalized = value.trim().toLowerCase();
+  if (normalized == 'active') return 'activa';
+  if (normalized == 'completed') return 'completada';
+  if (normalized == 'canceled') return 'cancelada';
+  return normalized.isEmpty ? 'activa' : normalized.replaceAll('_', ' ');
+}
+
+String _consultModeLabel(String value) {
+  final normalized = value.trim().toLowerCase();
+  if (normalized == 'video') return 'video';
+  if (normalized == 'chat') return 'chat';
+  return normalized.isEmpty ? 'consulta' : normalized.replaceAll('_', ' ');
+}
+
+String? _consultPriorityLabel(String? value) {
+  final normalized = value?.trim().toLowerCase();
+  if (normalized == null || normalized.isEmpty || normalized == 'routine') {
+    return null;
+  }
+  if (normalized == 'urgent') return 'urgente';
+  if (normalized == 'emergency') return 'emergencia';
+  return normalized.replaceAll('_', ' ');
 }
 
 String _errorMessage(Map<String, dynamic> data, int statusCode) {

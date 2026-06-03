@@ -535,13 +535,7 @@ export class VideoController {
     return { ok: true, provider: 'livekit', roomId: normalizedRoomId, ...result, settlement };
   }
 
-  @Post(['livekit/webhook', 'webhooks/livekit'])
-  async liveKitWebhook(
-    @Req() req: Request,
-    @Body() body: unknown,
-    @Headers('authorization') authorization?: string,
-    @Headers('authorize') authorize?: string,
-  ) {
+  private async processLiveKitWebhook(req: Request, body: unknown, authorization?: string, authorize?: string) {
     const rawBody = this.rawBodyFromRequest(req, body);
     let event: any;
     try {
@@ -552,6 +546,26 @@ export class VideoController {
     const payload = this.safeParseJson(rawBody);
     const result = await this.handleLiveKitEvent(event, payload);
     return { ok: true, provider: 'livekit', ...result };
+  }
+
+  @Post('livekit/webhook')
+  async liveKitWebhook(
+    @Req() req: Request,
+    @Body() body: unknown,
+    @Headers('authorization') authorization?: string,
+    @Headers('authorize') authorize?: string,
+  ) {
+    return this.processLiveKitWebhook(req, body, authorization, authorize);
+  }
+
+  @Post('webhooks/livekit')
+  async liveKitWebhookAlias(
+    @Req() req: Request,
+    @Body() body: unknown,
+    @Headers('authorization') authorization?: string,
+    @Headers('authorize') authorize?: string,
+  ) {
+    return this.processLiveKitWebhook(req, body, authorization, authorize);
   }
 
   @Post('reconcile')

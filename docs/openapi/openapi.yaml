@@ -157,6 +157,7 @@ components:
         petId: { type: string, format: uuid, nullable: true }
         vetId: { type: string, format: uuid, nullable: true }
         specialtyId: { type: string, format: uuid, nullable: true }
+        priority: { type: string, enum: [routine, urgent, emergency], nullable: true }
         consumptionId: { type: string, format: uuid, nullable: true }
         kind: { type: string, enum: [chat, video] }
         overage: { type: boolean }
@@ -1874,6 +1875,35 @@ paths:
       security: [{ bearerAuth: [] }]
       responses: { "200": { $ref: "#/components/responses/VetQueue" } }
 
+  /vets/me/consults/{sessionId}/end:
+    post:
+      tags: [Vets]
+      summary: End an active consult assigned to the current vet
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: sessionId
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Consult ended
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  sessionId: { type: string, format: uuid }
+                  ended: { type: boolean }
+                  provider:
+                    type: object
+                    nullable: true
+                    additionalProperties: true
+                  settlement:
+                    type: object
+                    additionalProperties: true
+
   /vets/referrals:
     get:
       tags: [Vets]
@@ -3080,6 +3110,8 @@ components:
               vet_id: { type: string, format: uuid, nullable: true }
               specialtyId: { type: string, format: uuid, nullable: true }
               specialty_id: { type: string, format: uuid, nullable: true }
+              priority: { type: string, enum: [routine, urgent, emergency], nullable: true }
+              urgency: { type: string, enum: [routine, urgent, emergency], nullable: true }
               text: { type: string }
     EndSession:
       content:
@@ -3783,6 +3815,7 @@ components:
         petId: { type: string, format: uuid, nullable: true }
         vetId: { type: string, format: uuid, nullable: true }
         specialtyId: { type: string, format: uuid, nullable: true }
+        priority: { type: string, enum: [routine, urgent, emergency], nullable: true }
         kind: { type: string, enum: [chat, video] }
         consumptionId: { type: string, format: uuid, nullable: true }
         overage: { type: boolean }

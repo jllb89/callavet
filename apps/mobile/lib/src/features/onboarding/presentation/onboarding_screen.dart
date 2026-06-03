@@ -67,7 +67,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                         ),
                       ),
                       TextButton(
-                        onPressed: () => context.go('/kyc'),
+                        onPressed: () => context.go('/login'),
                         style:
                             TextButton.styleFrom(foregroundColor: Colors.white),
                         child: const Text(
@@ -138,7 +138,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                                     curve: Curves.easeOut,
                                   );
                                 } else {
-                                  context.go('/kyc');
+                                  context.go('/login');
                                 }
                               },
                               behavior: HitTestBehavior.opaque,

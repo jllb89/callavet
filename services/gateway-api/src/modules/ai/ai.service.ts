@@ -78,6 +78,9 @@ type AiChatTurnContext = {
 type AiChatTurnState = {
   urgentIntakeAlreadyAsked: boolean;
   afterUrgentIntakeAnswer: boolean;
+  clinicalSignal: boolean;
+  caseDetailSignal: boolean;
+  explicitCareRequest: boolean;
 };
 
 type PromptVersion = {
@@ -438,7 +441,18 @@ export class AiService {
       schema: {
         type: 'object',
         additionalProperties: false,
-        required: ['message', 'urgency', 'recommendedService', 'actionLabel', 'safetyEscalation', 'intakeQuestions'],
+        required: [
+          'message',
+          'urgency',
+          'recommendedService',
+          'actionLabel',
+          'safetyEscalation',
+          'intakeQuestions',
+          'caseSummary',
+          'handoffSummary',
+          'routingRationale',
+          'commerceRecommendation',
+        ],
         properties: {
           message: { type: 'string' },
           urgency: { type: 'string', enum: ['routine', 'urgent', 'emergency'] },
@@ -446,6 +460,10 @@ export class AiService {
           actionLabel: { type: ['string', 'null'] },
           safetyEscalation: { type: 'boolean' },
           intakeQuestions: { type: 'array', items: { type: 'string' }, minItems: 0, maxItems: 3 },
+          caseSummary: { type: ['string', 'null'], description: 'Concise non-diagnostic summary of the user concern, or null if not enough case detail.' },
+          handoffSummary: { type: ['string', 'null'], description: 'Concise handoff context for the human veterinarian, not a diagnosis.' },
+          routingRationale: { type: ['string', 'null'], description: 'Brief reason for specialty/service routing, or null while gathering context.' },
+          commerceRecommendation: { type: ['string', 'null'], enum: ['included', 'one_off', 'upgrade_plan', 'ask_more', 'none', null] },
         },
       },
     };
@@ -690,11 +708,14 @@ export class AiService {
       'If the case may be urgent or emergency, especially appetite refusal for 24+ hours, colic signs, severe pain, fever, dehydration, respiratory distress, bleeding, or inability to stand, ask 2-3 concrete triage questions immediately. These questions must help determine urgency and create a useful handoff summary for the veterinarian.',
       'For urgent intake, do not lead with service-choice buttons or summary drafting. First ask the triage questions, then explain that the answers will help route to the right veterinarian faster.',
       'Ask the urgent triage question set only once. If the user has already answered those first urgent intake questions, do not ask another triage set or another generic follow-up.',
+      'If the latest user message includes a concrete horse/case detail and asks to talk, connect, chat, call, video, or consult with a veterinarian, route immediately with tools instead of asking a generic preference question.',
       'After the user answers the first urgent intake questions, decide the specialty, urgency, and service type from the available information. Then use tools to route: recommend_specialty, find_vets for that specialty, check_service_access for the recommended service, and get_available_slots only if scheduled_video is the best next step.',
       'After urgent intake answers, present the next action as chat, immediate video, or scheduled video. If red flags remain, bias toward immediate video/local emergency care; if stable but needs review, choose chat or scheduled video based on service access and availability.',
       'Before recommending a service, gather the minimum missing context for a useful vet handoff: affected horse, main concern, onset/duration, severity, appetite/water, relevant history/medications, and red flags. Ask at most one concise follow-up at a time.',
       'Do not immediately ask the user to choose a product. Decide whether chat, immediate video, or scheduled video is best based on urgency, symptoms, context, and entitlement signals; then explain the recommendation briefly.',
       'Prepare the conversation so a later veterinarian handoff can include a concise contextualization, not a diagnosis.',
+      'Populate caseSummary, handoffSummary, and routingRationale whenever there is concrete case detail. Keep them concise, factual, and non-diagnostic; use null only when there is not enough detail.',
+      'Set commerceRecommendation from entitlement context/tool results: included when the recommended service is available, one_off when allowance is exhausted but a one-time service is appropriate, upgrade_plan when there is no active subscription or a plan upgrade is the clearest next step, ask_more while context is missing, and none when no service should be offered.',
       'Use function tools to choose an existing specialty, find approved vets, check service access, and inspect availability.',
       'Do not invent specialty IDs, vet IDs, appointment slots, entitlements, prices, or session IDs.',
       'Before recommending chat or video activation, call check_service_access for the relevant service type.',
@@ -721,11 +742,20 @@ export class AiService {
 
   private chatTurnState(messages: Array<{ role: 'user' | 'assistant'; content: string }>): AiChatTurnState {
     const priorMessages = messages.slice(0, -1);
+    const latestMessage = messages[messages.length - 1]?.content || '';
     const latestPriorAssistant = [...priorMessages].reverse().find((message) => message.role === 'assistant')?.content || '';
     const urgentIntakeAlreadyAsked = /dolor abdominal|flancos|hecho heces|encías pálidas|respiración agitada|responder preguntas de urgencia|valorar urgencia/i.test(latestPriorAssistant)
       || priorMessages.some((message) => message.role === 'assistant' && /dolor abdominal|hecho heces|encías pálidas|responder preguntas de urgencia/i.test(message.content));
     const afterUrgentIntakeAnswer = urgentIntakeAlreadyAsked && messages[messages.length - 1]?.role === 'user';
-    return { urgentIntakeAlreadyAsked, afterUrgentIntakeAnswer };
+    const clinicalSignal = this.hasClinicalSignal(latestMessage);
+    const caseDetailSignal = clinicalSignal || this.hasCaseDetailSignal(latestMessage);
+    return {
+      urgentIntakeAlreadyAsked,
+      afterUrgentIntakeAnswer,
+      clinicalSignal,
+      caseDetailSignal,
+      explicitCareRequest: caseDetailSignal && this.wantsCareRequest(latestMessage),
+    };
   }
 
   private parseToolArguments(raw: string) {
@@ -841,24 +871,69 @@ export class AiService {
 
   private shouldAskUrgentIntake(payload: any, latestMessage: string, state: AiChatTurnState) {
     if (state.urgentIntakeAlreadyAsked) return false;
-    const text = latestMessage.toLowerCase();
+    const text = this.normalizeCareText(latestMessage);
     return payload?.urgency === 'urgent'
       || payload?.urgency === 'emergency'
       || payload?.safetyEscalation === true
-      || /no quiere comer|no come|dej[oó] de comer|apetito|desde antier|desde ayer|colic|cólico|dolor|fiebre|no se levanta|respira/.test(text);
+      || /no quiere comer|no come|dejo de comer|apetito|desde antier|desde ayer|colic|colico|dolor|fiebre|no se levanta|respira/.test(text);
+  }
+
+  private normalizeCareText(text: string) {
+    return String(text || '')
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '');
   }
 
   private hasClinicalSignal(text: string) {
-    return /no quiere comer|no come|dej[oó] de comer|apetito|colic|cólico|dolor|fiebre|no se levanta|respira|respiraci[oó]n|hinchaz[oó]n|babea|baba|sangre|herida|coj[eó]a|cojera|tos|diarrea|v[oó]mito|mal aliento|descarga|secreci[oó]n|deca[ií]do|suda|inquieto|abdomen|mand[ií]bula|tragar/.test(text.toLowerCase());
+    const normalized = this.normalizeCareText(text);
+    return /no quiere comer|no come|dejo de comer|apetito|colic|colico|dolor|fiebre|no se levanta|respira|respiracion|hinchazon|babea|baba|sangre|herida|cojea|cojera|cojo|renquea|renguea|claudica|pata|extremidad|casco|tendon|tos|diarrea|vomito|mal aliento|descarga|secrecion|decaido|suda|inquieto|abdomen|mandibula|tragar/.test(normalized);
+  }
+
+  private hasCaseDetailSignal(latestMessage: string) {
+    const normalized = this.normalizeCareText(latestMessage);
+    const hasAnimalReference = /\b(caballo|caballos|yegua|yeguas|potro|potra|equino|equinos|animal|mascota)\b/.test(normalized);
+    const genericStripped = normalized
+      .replace(/\b(hablar|platicar|contactar|conectar|consultar|consulta|necesito|necesita|necesitan|quiero|quiere|quisiera|ayuda|ayudar|veterinario|veterinaria|veterinarios|veterinarias|vet|doctor|doctora|chat|video|videollamada|llamada|llamar|atencion|servicio|ahora|hoy|por favor)\b/g, ' ')
+      .replace(/\b(mi|mis|el|la|los|las|un|una|unos|unas|de|del|con|para|por|que|se|le|lo|su|sus|es|esta|estan|tiene|tengo|hay)\b/g, ' ');
+    const detailTokens = genericStripped
+      .split(/[^a-z0-9]+/)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 3);
+    return hasAnimalReference ? detailTokens.length >= 2 : detailTokens.length >= 4;
+  }
+
+  private wantsCareRequest(latestMessage: string) {
+    const text = this.normalizeCareText(latestMessage);
+    return /\b(hablar|platicar|contactar|conectar|consultar|necesito|quiero|quisiera)\b.*\b(veterinari[oa]|vet|doctor|doctora)\b|\b(veterinari[oa]|vet|doctor|doctora)\b.*\b(hablar|consulta|chat|video|videollamada|llamada)\b|\b(chat|video|videollamada|llamada)\b.*\b(ahora|hoy|veterinari[oa]|vet|doctor|doctora)\b/.test(text);
   }
 
   private isGenericVetRequest(latestMessage: string) {
-    const text = latestMessage.toLowerCase();
-    const wantsVet = /\b(hablar|platicar|contactar|conectar|consultar|necesito|quiero)\b.*\b(veterinari[oa]|vet)\b|\b(veterinari[oa]|vet)\b.*\b(hablar|consulta|chat|video|videollamada)\b/.test(text);
-    return wantsVet && !this.hasClinicalSignal(text);
+    return this.wantsCareRequest(latestMessage) && !this.hasClinicalSignal(latestMessage) && !this.hasCaseDetailSignal(latestMessage);
   }
 
-  private normalizeChatTurnPayload(payload: any, context: AiChatTurnContext, latestMessage: string, state: AiChatTurnState) {
+  private latestServiceAccessToolResult(toolResults: Array<{ name: string; output: any }>) {
+    for (const result of [...toolResults].reverse()) {
+      if (result.name !== 'check_service_access') continue;
+      const output = result.output || {};
+      const serviceType = String(output.serviceType || '').toLowerCase();
+      if (serviceType === 'chat' || serviceType === 'video') return output;
+    }
+    return null;
+  }
+
+  private fallbackCommerceRecommendation(serviceAccess: any) {
+    if (!serviceAccess) return null;
+    if (serviceAccess.canUse === true) return 'included';
+    return serviceAccess.reason === 'no_active_subscription' ? 'upgrade_plan' : 'one_off';
+  }
+
+  private fallbackActionLabel(serviceType: string, canUse: boolean | null | undefined) {
+    if (canUse === true) return serviceType === 'video' ? 'Iniciar video' : 'Iniciar chat';
+    return serviceType === 'video' ? 'Comprar video único' : 'Comprar chat único';
+  }
+
+  private normalizeChatTurnPayload(payload: any, context: AiChatTurnContext, latestMessage: string, state: AiChatTurnState, toolResults: Array<{ name: string; output: any }> = []) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload;
     const normalized = { ...payload };
     if (this.isGenericVetRequest(latestMessage)) {
@@ -867,6 +942,10 @@ export class AiService {
       normalized.recommendedService = null;
       normalized.actionLabel = null;
       normalized.intakeQuestions = [];
+      normalized.caseSummary = null;
+      normalized.handoffSummary = null;
+      normalized.routingRationale = null;
+      normalized.commerceRecommendation = 'ask_more';
       const message = String(normalized.message || '').trim();
       if (!message || this.hasClinicalSignal(message)) {
         normalized.message = 'Claro, puedo ayudarte a contactar a un veterinario. Cuéntame brevemente qué necesitas hoy y si prefieres seguir por chat o videollamada.';
@@ -900,6 +979,25 @@ export class AiService {
       if (!normalized.recommendedService && !normalized.actionLabel) {
         normalized.actionLabel = 'Ver opciones de atención';
       }
+    }
+    const serviceAccess = this.latestServiceAccessToolResult(toolResults);
+    if (state.explicitCareRequest && serviceAccess) {
+      const serviceType = String(serviceAccess.serviceType || '').toLowerCase();
+      if ((serviceType === 'chat' || serviceType === 'video') && !normalized.recommendedService) {
+        normalized.recommendedService = serviceType;
+      }
+      if ((serviceType === 'chat' || serviceType === 'video') && !normalized.actionLabel) {
+        normalized.actionLabel = this.fallbackActionLabel(serviceType, serviceAccess.canUse === true);
+      }
+      if (!normalized.commerceRecommendation) {
+        normalized.commerceRecommendation = this.fallbackCommerceRecommendation(serviceAccess);
+      }
+    }
+    if (state.caseDetailSignal && !normalized.caseSummary) {
+      normalized.caseSummary = latestMessage.slice(0, 240);
+    }
+    if (state.caseDetailSignal && !normalized.handoffSummary) {
+      normalized.handoffSummary = latestMessage.slice(0, 360);
     }
     return normalized;
   }
@@ -1102,7 +1200,10 @@ export class AiService {
     for (let step = 0; step < 6; step += 1) {
       const hasSpecialty = toolResults.some((result) => result.name === 'recommend_specialty');
       const hasVets = toolResults.some((result) => result.name === 'find_vets');
-      const needsRoutingTools = state.afterUrgentIntakeAnswer && (!hasSpecialty || !hasVets);
+      const hasAccess = toolResults.some((result) => result.name === 'check_service_access');
+      const needsRoutingTools = state.afterUrgentIntakeAnswer
+        ? (!hasSpecialty || !hasVets)
+        : state.explicitCareRequest && (!hasSpecialty || !hasVets || !hasAccess);
       const body: Record<string, any> = {
         model: cfg.model,
         store: false,
@@ -1119,7 +1220,7 @@ export class AiService {
       const toolCalls = output.filter((item: any): item is AiChatToolCall => item?.type === 'function_call');
 
       if (!toolCalls.length) {
-        const payload = this.normalizeChatTurnPayload(this.parseProviderPayload(this.extractResponsesText(data)), context, latestMessage, state);
+        const payload = this.normalizeChatTurnPayload(this.parseProviderPayload(this.extractResponsesText(data)), context, latestMessage, state, toolResults);
         return { ok: true, provider: cfg.provider, model: cfg.model, responseId: data?.id || null, payload, toolResults, context };
       }
 

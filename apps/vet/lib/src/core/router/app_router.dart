@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../features/auth/presentation/login_screen.dart';
+import '../../features/chat/presentation/vet_chat_screen.dart';
 import '../../features/dashboard/presentation/vet_dashboard_screen.dart';
 import '../../features/onboarding/presentation/splash_screen.dart';
 import '../../features/video/presentation/vet_video_call_screen.dart';
@@ -31,6 +32,14 @@ class AppRouter {
         builder: (context, state) {
           final sessionId = state.pathParameters['sessionId'] ?? '';
           return VetVideoCallScreen(sessionId: sessionId);
+        },
+      ),
+      GoRoute(
+        path: '/chat/:sessionId',
+        name: 'chat',
+        builder: (context, state) {
+          final sessionId = state.pathParameters['sessionId'] ?? '';
+          return VetChatScreen(sessionId: sessionId);
         },
       ),
     ],

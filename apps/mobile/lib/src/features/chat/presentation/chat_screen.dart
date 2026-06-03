@@ -712,6 +712,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (result.petId != null) 'petId': result.petId,
       if (result.vetId != null) 'vetId': result.vetId,
       if (result.specialtyId != null) 'specialtyId': result.specialtyId,
+      'priority': result.payload.urgency,
     });
   }
 

@@ -9,5 +9,6 @@ import { LiveKitService } from './livekit.service';
   imports: [ConfigModule, DbModule, EntitlementModule],
   controllers: [VideoController],
   providers: [LiveKitService],
+  exports: [LiveKitService],
 })
 export class VideoModule {}

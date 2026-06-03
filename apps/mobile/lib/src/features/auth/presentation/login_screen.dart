@@ -235,8 +235,8 @@ class _LoginScreenState extends State<LoginScreen> {
 
     if (isNotFound) {
       return channel == 'sms'
-          ? 'No encontramos una cuenta con ese número. Toca crear una cuenta.'
-          : 'No encontramos una cuenta con ese correo. Toca crear una cuenta.';
+          ? 'No pudimos enviar el código a ese número. Revísalo e intenta de nuevo.'
+          : 'No encontramos una cuenta con ese correo. Usa tu número de teléfono para continuar.';
     }
 
     return _retryMessage(err.message, err.retryAfterSeconds);
@@ -362,18 +362,19 @@ class _LoginScreenState extends State<LoginScreen> {
     required String channel,
     String? phone,
     String? email,
+    bool shouldCreateUser = false,
   }) async {
     final client = Supabase.instance.client;
     if (channel == 'sms') {
       await client.auth.signInWithOtp(
         phone: phone,
-        shouldCreateUser: false,
+        shouldCreateUser: shouldCreateUser,
         channel: OtpChannel.sms,
       );
     } else {
       await client.auth.signInWithOtp(
         email: email,
-        shouldCreateUser: false,
+        shouldCreateUser: shouldCreateUser,
       );
     }
     return {
@@ -387,28 +388,44 @@ class _LoginScreenState extends State<LoginScreen> {
     required String channel,
     String? phone,
     String? email,
+    bool shouldCreateUser = false,
   }) async {
     if (channel == 'sms' && _isTrustedDevPhone(phone)) {
       _loginLog(
         'Trusted dev phone detected; bypassing gateway OTP send and using direct Supabase OTP for phone=$phone',
       );
-      return _sendOtpDirectSupabase(channel: channel, phone: phone, email: email);
+      return _sendOtpDirectSupabase(
+        channel: channel,
+        phone: phone,
+        email: email,
+        shouldCreateUser: shouldCreateUser,
+      );
     }
     if (_gatewayOtpUnavailable) {
-      return _sendOtpDirectSupabase(channel: channel, phone: phone, email: email);
+      return _sendOtpDirectSupabase(
+        channel: channel,
+        phone: phone,
+        email: email,
+        shouldCreateUser: shouldCreateUser,
+      );
     }
     try {
       return await _gatewayPost('/auth/otp/send', {
         'channel': channel,
         if (phone != null) 'phone': phone,
         if (email != null) 'email': email,
-        'shouldCreateUser': false,
+        'shouldCreateUser': shouldCreateUser,
       });
     } on _GatewayOtpException catch (err) {
       if (_isGatewayRouteMissing(err)) {
         _loginLog('Gateway OTP routes unavailable on this env. Falling back to direct Supabase OTP.');
         _gatewayOtpUnavailable = true;
-        return _sendOtpDirectSupabase(channel: channel, phone: phone, email: email);
+        return _sendOtpDirectSupabase(
+          channel: channel,
+          phone: phone,
+          email: email,
+          shouldCreateUser: shouldCreateUser,
+        );
       }
       rethrow;
     }
@@ -639,8 +656,12 @@ class _LoginScreenState extends State<LoginScreen> {
         return;
       }
 
-      _loginLog('Requesting OTP for existing user phone=$normalized');
-      final response = await _sendOtpViaGateway(channel: 'sms', phone: normalized);
+      _loginLog('Requesting phone OTP for unified auth flow phone=$normalized');
+      final response = await _sendOtpViaGateway(
+        channel: 'sms',
+        phone: normalized,
+        shouldCreateUser: true,
+      );
       final cooldownSeconds = (response['cooldownSeconds'] as num?)?.toInt() ?? 60;
 
       _loginLog('OTP requested successfully for phone=$normalized');
@@ -824,7 +845,7 @@ class _LoginScreenState extends State<LoginScreen> {
       setState(() => _errorText = err.message);
     } catch (err) {
       _loginLog('verifyOTP error: $err');
-      setState(() => _errorText = 'No se pudo iniciar sesión: $err');
+      setState(() => _errorText = 'No se pudo continuar: $err');
     } finally {
       if (mounted) {
         setState(() => _isVerifyingOtp = false);
@@ -842,7 +863,7 @@ class _LoginScreenState extends State<LoginScreen> {
         const SizedBox(
           width: 351,
           child: Text(
-            'bienvenido a call a vet.\npor favor introduce tu número de teléfono para iniciar sesión:',
+            'bienvenido a call a vet.\npor favor introduce tu número de teléfono para continuar:',
             style: TextStyle(
               color: Colors.white,
               fontSize: 16,
@@ -1142,7 +1163,7 @@ class _LoginScreenState extends State<LoginScreen> {
             mainAxisAlignment: MainAxisAlignment.end,
             children: [
               const Text(
-                'iniciar',
+                'continuar',
                 textAlign: TextAlign.right,
                 style: TextStyle(
                   color: Colors.white,
@@ -1194,7 +1215,7 @@ class _LoginScreenState extends State<LoginScreen> {
         const SizedBox(
           width: 351,
           child: Text(
-            'bienvenido a call a vet.\npor favor introduce tu correo electrónico para iniciar sesión:',
+            'bienvenido a call a vet.\npor favor introduce tu correo electrónico para continuar:',
             style: TextStyle(
               color: Colors.white,
               fontSize: 16,
@@ -1321,29 +1342,7 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   Widget build(BuildContext context) {
     final headerAction = _step == 0
-        ? SizedBox(
-            height: 38,
-            child: TextButton(
-              onPressed: () => context.go('/kyc'),
-              style: TextButton.styleFrom(
-                backgroundColor: Colors.white,
-                foregroundColor: Colors.black,
-                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(33.5),
-                ),
-              ),
-              child: const Text(
-                'crear una cuenta',
-                style: TextStyle(
-                  color: Colors.black,
-                  fontSize: 14,
-                  fontFamily: 'ABC Diatype',
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ),
-          )
+        ? const SizedBox(height: 38, width: 38)
         : TextButton(
             onPressed: () {
               final currentStep = _step;

@@ -48,44 +48,46 @@ cd /Users/jorge/Desktop/call-a-vet/apps/mobile && flutter run \
 #   [AIChat][Mobile]      auth snapshot, request, response, parsing, UI state
 
 
-## LiveKit gateway webhook smoke
+## LiveKit webhook smoke
 
-Set this in LiveKit Cloud as the webhook URL:
+Current LiveKit Cloud webhook URL for staging:
 
-https://cav-gateway-staging-ugvx.onrender.com/video/webhooks/livekit
+https://cav-webhooks-staging-ugvx.onrender.com/livekit/webhook
 
-Before setting it, make sure the latest gateway code is deployed to Render. A 404 means the new route is not deployed yet; a 401 on the unsigned probe means the route exists and is correctly rejecting unsigned requests.
+The dedicated webhooks service should return `200` on health/readiness and reject unsigned fake events with `signature_verification_failed`. The gateway fallback route is `https://cav-gateway-staging-ugvx.onrender.com/video/livekit/webhook`.
 
 ```bash
-curl -sS -i https://cav-gateway-staging-ugvx.onrender.com/health | sed -n '1,20p'
+curl -sS -i https://cav-webhooks-staging-ugvx.onrender.com/health | sed -n '1,20p'
 
-curl -sS -i -X POST https://cav-gateway-staging-ugvx.onrender.com/video/webhooks/livekit \
+curl -sS -i https://cav-webhooks-staging-ugvx.onrender.com/livekit/webhook | sed -n '1,45p'
+
+curl -sS -i -X POST https://cav-webhooks-staging-ugvx.onrender.com/livekit/webhook \
   -H 'Content-Type: application/json' \
   --data '{}' | sed -n '1,30p'
 ```
 
-Expected after gateway deploy:
+Expected unsigned probe:
 
 ```text
-HTTP/2 401
-{"message":"invalid_livekit_webhook_signature",...}
+HTTP/2 400
+{"ok":false,"reason":"signature_verification_failed"}
 ```
 
 Run stale-room reconciliation manually only with the internal secret loaded in your shell:
 
 ```bash
-curl -sS -i -X POST https://cav-gateway-staging-ugvx.onrender.com/video/reconcile \
+curl -sS -i -X POST https://cav-webhooks-staging-ugvx.onrender.com/livekit/reconcile \
   -H "x-internal-secret: $INTERNAL_LIVEKIT_RECONCILE_SECRET" \
   -H 'Content-Type: application/json' \
-  --data '{"maxAgeMinutes":20,"limit":25}' | sed -n '1,80p'
+  --data '{"timeoutMinutes":20,"limit":25}' | sed -n '1,80p'
 ```
 
 LiveKit Cloud setup:
 
-1. Open the LiveKit Cloud project that matches `LIVEKIT_URL` on `cav-gateway-staging`.
-2. Go to Webhooks and add `https://cav-gateway-staging-ugvx.onrender.com/video/webhooks/livekit`.
+1. Open the LiveKit Cloud project that matches the staging LiveKit credentials.
+2. Go to Webhooks and confirm `https://cav-webhooks-staging-ugvx.onrender.com/livekit/webhook`.
 3. Enable room, participant, track, and egress lifecycle events if event selection is shown.
-4. Save. LiveKit signs events with the project API key/secret; do not add a separate webhook secret for this gateway endpoint.
+4. Save. LiveKit signs events with the project API key/secret; do not add a separate webhook secret for this endpoint.
 
 Two-sided smoke:
 
@@ -108,3 +110,10 @@ cd /Users/jorge/Desktop/call-a-vet/apps/vet && flutter run \
   --dart-define=BYPASS_OTP=false \
   --dart-define=VET_AUTH_DEBUG=true \
   -d "vet"
+
+
+  Run owner app on simulator A (terminal 1)
+cd /Users/jorge/Desktop/call-a-vet/apps/mobile && flutter run -d 014D86FE-511C-490C-BD95-893A67FF2774 --dart-define=SUPABASE_URL=https://oajnhvizipicnypdxcrb.supabase.co --dart-define=SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9ham5odml6aXBpY255cGR4Y3JiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjE2MDc5MzcsImV4cCI6MjA3NzE4MzkzN30.aSAu4SZVrZjxIyik50rraOmm7Ni2Wk7tFdLXDE_Jelc --dart-define=API_BASE_URL=https://cav-gateway-staging-ugvx.onrender.com --dart-define=DEV_FORCE_SIGNOUT_ON_START=true --dart-define=BYPASS_OTP=false --dart-define=KYC_LOCATION_DEBUG=false --dart-define=KYC_FLOW_DEBUG=true --dart-define=CAV_AI_CHAT_DRY_RUN=false
+
+Run vet app on simulator B (terminal 2)
+cd /Users/jorge/Desktop/call-a-vet/apps/vet && flutter run -d D344C088-92BE-4393-B3A5-3E786FD17498 --dart-define=SUPABASE_URL=https://oajnhvizipicnypdxcrb.supabase.co --dart-define=SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9ham5odml6aXBpY255cGR4Y3JiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjE2MDc5MzcsImV4cCI6MjA3NzE4MzkzN30.aSAu4SZVrZjxIyik50rraOmm7Ni2Wk7tFdLXDE_Jelc --dart-define=API_BASE_URL=https://cav-gateway-staging-ugvx.onrender.com --dart-define=DEV_FORCE_SIGNOUT_ON_START=true --dart-define=BYPASS_OTP=false --dart-define=VET_AUTH_DEBUG=true

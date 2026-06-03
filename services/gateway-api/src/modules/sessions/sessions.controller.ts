@@ -20,7 +20,11 @@ type SessionStartBody = {
   vet_id?: string;
   specialtyId?: string;
   specialty_id?: string;
+  priority?: string;
+  urgency?: string;
 };
+
+const SESSION_PRIORITIES = new Set(['routine', 'urgent', 'emergency']);
 
 @Controller('sessions')
 @UseGuards(AuthGuard)
@@ -169,12 +173,14 @@ export class SessionsController {
       const petId = (body.petId || body.pet_id || '').toString().trim() || null;
       const vetId = (body.vetId || body.vet_id || '').toString().trim() || null;
       const specialtyId = (body.specialtyId || body.specialty_id || '').toString().trim() || null;
+      const priority = (body.priority || body.urgency || '').toString().trim().toLowerCase() || null;
       if (petId) this.validator.validateUUID(petId, 'petId');
       if (vetId) this.validator.validateUUID(vetId, 'vetId');
       if (specialtyId) this.validator.validateUUID(specialtyId, 'specialtyId');
+      if (priority && !SESSION_PRIORITIES.has(priority)) throw new HttpException('invalid_priority', HttpStatus.BAD_REQUEST);
       if (this.db.isStub) {
         const sessionId = body.sessionId || `sess_${Date.now()}`;
-        return { ok: true, mode: 'stub', sessionId, kind, petId, vetId, specialtyId };
+        return { ok: true, mode: 'stub', sessionId, kind, petId, vetId, specialtyId, priority };
       }
       const result = await this.db.runInTx(async (q) => {
         if (petId) {
@@ -214,15 +220,17 @@ export class SessionsController {
         }
 
         // 1) Create session first (FK target) using auth.uid() for user_id
-        const { rows: r2 } = await q<{ id: string; pet_id: string | null; vet_id: string | null }>(
-          `insert into chat_sessions (id, user_id, vet_id, pet_id, status, mode, started_at)
-           values (gen_random_uuid(), auth.uid(), $1::uuid, $2::uuid, $3, $4, now())
-           returning id, pet_id, vet_id`,
-          [vetId, petId, 'active', kind]
+        const { rows: r2 } = await q<{ id: string; pet_id: string | null; vet_id: string | null; specialty_id: string | null; priority: string | null }>(
+          `insert into chat_sessions (id, user_id, vet_id, pet_id, specialty_id, priority, status, mode, started_at)
+           values (gen_random_uuid(), auth.uid(), $1::uuid, $2::uuid, $3::uuid, $4, $5, $6, now())
+           returning id, pet_id, vet_id, specialty_id, priority`,
+          [vetId, petId, specialtyId, priority, 'active', kind]
         );
         const dbSessionId = r2?.[0]?.id as string;
         const routedPetId = r2?.[0]?.pet_id || null;
         const routedVetId = r2?.[0]?.vet_id || null;
+        const routedSpecialtyId = r2?.[0]?.specialty_id || null;
+        const routedPriority = r2?.[0]?.priority || null;
         // 2) Reserve entitlement referencing the created session id
         const reserve = await this.entitlements.reserveForAuthUser(q, kind, dbSessionId);
         const ok = reserve?.ok === true;
@@ -319,7 +327,7 @@ export class SessionsController {
             }
           }
         }
-        return { dbSessionId, petId: routedPetId, vetId: routedVetId, specialtyId, consumptionId, overage, msg, creditConsumptionId, creditUsedCode, creditRemaining, checkout };
+        return { dbSessionId, petId: routedPetId, vetId: routedVetId, specialtyId: routedSpecialtyId, priority: routedPriority, consumptionId, overage, msg, creditConsumptionId, creditUsedCode, creditRemaining, checkout };
       });
       if (result.overage) {
         return {
@@ -328,6 +336,7 @@ export class SessionsController {
           petId: result.petId,
           vetId: result.vetId,
           specialtyId: result.specialtyId,
+          priority: result.priority,
           kind,
           overage: true,
           overageReason: result.msg || 'no_entitlement',
@@ -354,6 +363,7 @@ export class SessionsController {
         petId: result.petId,
         vetId: result.vetId,
         specialtyId: result.specialtyId,
+        priority: result.priority,
         consumptionId: finalConsumption,
         kind,
         overage: false,

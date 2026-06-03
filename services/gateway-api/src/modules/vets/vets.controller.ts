@@ -5,6 +5,8 @@ import {
   ForbiddenException,
   Get,
   Headers,
+  HttpException,
+  HttpStatus,
   Param,
   Patch,
   Post,
@@ -17,6 +19,7 @@ import { DbService } from '../db/db.service';
 import { RequestContext } from '../auth/request-context.service';
 import { ValidatorService } from '../config/validator.service';
 import { EnumService } from '../config/enum.service';
+import { LiveKitService } from '../video/livekit.service';
 
 type AvailabilityRow = {
   weekday: number;
@@ -74,7 +77,25 @@ export class VetsController {
     private readonly rc: RequestContext,
     private readonly validator: ValidatorService,
     private readonly enumService: EnumService,
+    private readonly livekit: LiveKitService,
   ) {}
+
+  private activeConsultMaxAgeMinutes() {
+    return this.positiveEnvInt('VET_ACTIVE_CONSULT_MAX_AGE_MINUTES', 120);
+  }
+
+  private activeConsultLeftGraceMinutes() {
+    return this.positiveEnvInt('VET_ACTIVE_CONSULT_LEFT_GRACE_MINUTES', 5);
+  }
+
+  private activeConsultWaitingTimeoutMinutes() {
+    return this.positiveEnvInt('VET_ACTIVE_CONSULT_WAITING_TIMEOUT_MINUTES', 20);
+  }
+
+  private positiveEnvInt(name: string, fallback: number) {
+    const raw = Number.parseInt((process.env[name] || '').trim(), 10);
+    return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+  }
 
   private async currentActor(): Promise<{ id: string; role: string }> {
     const actorId = this.rc.requireUuidUserId();
@@ -169,6 +190,9 @@ export class VetsController {
   private async getVetStatus(vetId: string) {
     const base = await this.getVetBase(vetId);
     if (!base) throw new BadRequestException('not_found');
+    const maxAgeMinutes = this.activeConsultMaxAgeMinutes();
+    const leftGraceMinutes = this.activeConsultLeftGraceMinutes();
+    const waitingTimeoutMinutes = this.activeConsultWaitingTimeoutMinutes();
     const { rows } = await this.db.query<any>(
       `select
          (select count(*)::int
@@ -176,8 +200,43 @@ export class VetsController {
            where a.vet_id = $1::uuid
              and a.status in ('scheduled', 'confirmed')
              and a.starts_at >= now()) as upcoming_appointments,
-         ((select count(*)::int from appointments a where a.vet_id = $1::uuid and a.status = 'active')
-           + (select count(*)::int from chat_sessions s where s.vet_id = $1::uuid and s.status = 'active')) as active_consults,
+         (select count(*)::int
+            from (
+              select a.id
+                from appointments a
+                left join chat_sessions s on s.id = a.session_id
+                left join video_session_lifecycle v on v.session_id = a.session_id
+               where a.vet_id = $1::uuid
+                 and a.status = 'active'
+                 and a.starts_at >= now() - ($2::int * interval '1 minute')
+                 and (
+                   coalesce(s.mode, 'video') <> 'video'
+                   or (
+                     coalesce(v.status, 'pending') not in ('ended', 'released', 'timed_out', 'host_absent', 'forced_ended')
+                     and v.room_finished_at is null
+                     and v.forced_end_at is null
+                     and (v.last_participant_left_at is null or v.last_participant_left_at >= now() - ($3::int * interval '1 minute'))
+                     and (v.first_both_joined_at is not null or v.first_participant_joined_at is null or v.first_participant_joined_at >= now() - ($4::int * interval '1 minute'))
+                   )
+                 )
+              union all
+              select s.id
+                from chat_sessions s
+                left join video_session_lifecycle v on v.session_id = s.id
+               where s.vet_id = $1::uuid
+                 and s.status = 'active'
+                 and coalesce(s.started_at, s.created_at) >= now() - ($2::int * interval '1 minute')
+                 and (
+                   coalesce(s.mode, 'chat') <> 'video'
+                   or (
+                     coalesce(v.status, 'pending') not in ('ended', 'released', 'timed_out', 'host_absent', 'forced_ended')
+                     and v.room_finished_at is null
+                     and v.forced_end_at is null
+                     and (v.last_participant_left_at is null or v.last_participant_left_at >= now() - ($3::int * interval '1 minute'))
+                     and (v.first_both_joined_at is not null or v.first_participant_joined_at is null or v.first_participant_joined_at >= now() - ($4::int * interval '1 minute'))
+                   )
+                 )
+            ) active_rows) as active_consults,
          (select count(*)::int
             from chat_sessions s
             left join consultation_notes n on n.session_id = s.id
@@ -190,7 +249,7 @@ export class VetsController {
            where (vr.assigned_vet_id = $1::uuid
                or (vr.assigned_vet_id is null and (vr.specialty_id is null or array_position(v.specialties, vr.specialty_id) is not null)))
              and vr.status in ('intake', 'assigned', 'accepted')) as open_referrals`,
-      [vetId]
+      [vetId, maxAgeMinutes, leftGraceMinutes, waitingTimeoutMinutes]
     );
     return {
       id: base.id,
@@ -377,6 +436,9 @@ export class VetsController {
     const actor = await this.currentActor();
     if (actor.role !== 'vet' && actor.role !== 'admin') throw new ForbiddenException('vet_role_required');
     const vetId = actor.id;
+    const maxAgeMinutes = this.activeConsultMaxAgeMinutes();
+    const leftGraceMinutes = this.activeConsultLeftGraceMinutes();
+    const waitingTimeoutMinutes = this.activeConsultWaitingTimeoutMinutes();
     const [upcomingAppointments, activeConsults, pendingNotes, referrals] = await Promise.all([
       this.db.query<any>(
         `select a.id,
@@ -406,12 +468,29 @@ export class VetsController {
                 a.starts_at as started_at,
                 a.ends_at,
                 a.status,
-                coalesce(s.mode, 'video') as mode
+                 coalesce(s.mode, 'video') as mode,
+                 s.specialty_id,
+                 vs.name as specialty_name,
+                 s.priority,
+                v.status as lifecycle_status
            from appointments a
            join users u on u.id = a.user_id
       left join chat_sessions s on s.id = a.session_id
+             left join vet_specialties vs on vs.id = s.specialty_id
+      left join video_session_lifecycle v on v.session_id = a.session_id
           where a.vet_id = $1::uuid
             and a.status = 'active'
+            and a.starts_at >= now() - ($2::int * interval '1 minute')
+            and (
+              coalesce(s.mode, 'video') <> 'video'
+              or (
+                coalesce(v.status, 'pending') not in ('ended', 'released', 'timed_out', 'host_absent', 'forced_ended')
+                and v.room_finished_at is null
+                and v.forced_end_at is null
+                and (v.last_participant_left_at is null or v.last_participant_left_at >= now() - ($3::int * interval '1 minute'))
+                and (v.first_both_joined_at is not null or v.first_participant_joined_at is null or v.first_participant_joined_at >= now() - ($4::int * interval '1 minute'))
+              )
+            )
          union all
          select 'session' as source,
                 s.id,
@@ -420,15 +499,32 @@ export class VetsController {
                 u.full_name as user_name,
                 s.started_at,
                 s.ended_at,
-                 s.status,
-                 s.mode
+                s.status,
+                s.mode,
+                 s.specialty_id,
+                 vs.name as specialty_name,
+                 s.priority,
+                v.status as lifecycle_status
            from chat_sessions s
            join users u on u.id = s.user_id
+             left join vet_specialties vs on vs.id = s.specialty_id
+      left join video_session_lifecycle v on v.session_id = s.id
           where s.vet_id = $1::uuid
             and s.status = 'active'
+            and coalesce(s.started_at, s.created_at) >= now() - ($2::int * interval '1 minute')
+            and (
+              coalesce(s.mode, 'chat') <> 'video'
+              or (
+                coalesce(v.status, 'pending') not in ('ended', 'released', 'timed_out', 'host_absent', 'forced_ended')
+                and v.room_finished_at is null
+                and v.forced_end_at is null
+                and (v.last_participant_left_at is null or v.last_participant_left_at >= now() - ($3::int * interval '1 minute'))
+                and (v.first_both_joined_at is not null or v.first_participant_joined_at is null or v.first_participant_joined_at >= now() - ($4::int * interval '1 minute'))
+              )
+            )
           order by started_at desc
           limit 20`,
-        [vetId]
+        [vetId, maxAgeMinutes, leftGraceMinutes, waitingTimeoutMinutes]
       ),
       this.db.query<any>(
         `select s.id as session_id,
@@ -480,6 +576,158 @@ export class VetsController {
       activeConsults: activeConsults.rows,
       pendingNotes: pendingNotes.rows,
       referrals: referrals.rows,
+    };
+  }
+
+  @Post('me/consults/:sessionId/end')
+  async endActiveConsult(@Param('sessionId') sessionId: string) {
+    const actor = await this.currentActor();
+    if (actor.role !== 'vet' && actor.role !== 'admin') throw new ForbiddenException('vet_role_required');
+    const normalizedSessionId = String(sessionId || '').trim();
+    this.validator.validateUUID(normalizedSessionId, 'sessionId');
+
+    if (this.db.isStub) return { ok: true, sessionId: normalizedSessionId, ended: true, mode: 'stub' };
+
+    const { rows: sessionRows } = await this.db.query<any>(
+      `select id, vet_id, status, mode
+         from chat_sessions
+        where id = $1::uuid
+          and ($2 = 'admin' or vet_id = $3::uuid)
+        limit 1`,
+      [normalizedSessionId, actor.role, actor.id]
+    );
+    const session = sessionRows[0];
+    if (!session) throw new HttpException('not_found', HttpStatus.NOT_FOUND);
+
+    const isVideo = String(session.mode || '').toLowerCase() === 'video';
+    const roomName = isVideo ? this.livekit.roomNameForSession(normalizedSessionId) : null;
+    let providerResult: any = null;
+    let providerError: string | null = null;
+
+    if (roomName) {
+      try {
+        providerResult = await this.livekit.endRoom(roomName);
+      } catch (err: any) {
+        providerError = err?.message || 'livekit_end_failed';
+      }
+    }
+
+    const settlement = await this.db.runInTx(async (q) => {
+      const { rows: lockedRows } = await q<any>(
+        `select id, status, mode
+           from chat_sessions
+          where id = $1::uuid
+            and ($2 = 'admin' or vet_id = $3::uuid)
+          for update`,
+        [normalizedSessionId, actor.role, actor.id]
+      );
+      const locked = lockedRows[0];
+      if (!locked) return null;
+      const alreadyClosed = ['completed', 'canceled', 'no_show'].includes(String(locked.status || '').toLowerCase());
+      const lockedIsVideo = String(locked.mode || '').toLowerCase() === 'video';
+      let engaged = !lockedIsVideo;
+      let entitlementAction = 'none';
+      let consumptionId: string | null = null;
+
+      if (lockedIsVideo) {
+        const resolvedRoomName = roomName || this.livekit.roomNameForSession(normalizedSessionId);
+        await q(
+          `insert into video_session_lifecycle (session_id, room_name, status, forced_end_at, safety_reason, created_at, updated_at)
+           values ($1::uuid, $2, 'forced_ended', now(), 'manual_vet_end', now(), now())
+           on conflict (session_id) do update
+             set room_name = coalesce(video_session_lifecycle.room_name, excluded.room_name),
+                 forced_end_at = coalesce(video_session_lifecycle.forced_end_at, now()),
+                 safety_reason = 'manual_vet_end',
+                 updated_at = now()`,
+          [normalizedSessionId, resolvedRoomName]
+        );
+
+        const { rows: stateRows } = await q<any>(
+          `select v.first_both_joined_at::text,
+                  v.entitlement_finalized_at::text,
+                  ec.id as consumption_id,
+                  ec.finalized as consumption_finalized
+             from video_session_lifecycle v
+        left join lateral (
+              select id, finalized
+                from entitlement_consumptions
+               where session_id = v.session_id
+                 and consumption_type = 'video'
+                 and canceled_at is null
+               order by created_at desc
+               limit 1
+             ) ec on true
+            where v.session_id = $1::uuid
+            limit 1`,
+          [normalizedSessionId]
+        );
+        const state = stateRows[0];
+        consumptionId = state?.consumption_id || null;
+        engaged = !!state?.first_both_joined_at || state?.consumption_finalized === true || !!state?.entitlement_finalized_at;
+
+        if (consumptionId && engaged && state?.consumption_finalized !== true) {
+          const { rows } = await q<any>(`select fn_commit_consumption($1::uuid) as ok`, [consumptionId]);
+          if (rows[0]?.ok) entitlementAction = 'committed';
+        } else if (consumptionId && !engaged) {
+          const { rows } = await q<any>(`select fn_release_consumption($1::uuid) as ok`, [consumptionId]);
+          if (rows[0]?.ok) entitlementAction = 'released';
+        }
+
+        await q(
+          `update video_session_lifecycle
+              set status = $2,
+                  room_finished_at = coalesce(room_finished_at, now()),
+                  entitlement_consumption_id = coalesce(entitlement_consumption_id, $3::uuid),
+                  entitlement_finalized_at = case when $4 then coalesce(entitlement_finalized_at, now()) else entitlement_finalized_at end,
+                  entitlement_released_at = case when $5 then coalesce(entitlement_released_at, now()) else entitlement_released_at end,
+                  safety_reason = 'manual_vet_end',
+                  updated_at = now()
+            where session_id = $1::uuid`,
+          [normalizedSessionId, engaged ? 'ended' : 'forced_ended', consumptionId, entitlementAction === 'committed', entitlementAction === 'released']
+        );
+      }
+
+      const finalSessionStatus = engaged ? 'completed' : 'canceled';
+      await q(
+        `update chat_sessions
+            set status = $2,
+                ended_at = coalesce(ended_at, now()),
+                updated_at = now()
+          where id = $1::uuid`,
+        [normalizedSessionId, finalSessionStatus]
+      );
+      await q(
+        `update appointments
+            set status = case when $2 then 'completed' else case when status = 'completed' then status else 'no_show' end end
+          where session_id = $1::uuid`,
+        [normalizedSessionId, engaged]
+      );
+      await q(
+        `update clinical_encounters
+            set status = 'closed',
+                ended_at = coalesce(ended_at, now()),
+                updated_at = now()
+          where session_id = $1::uuid`,
+        [normalizedSessionId]
+      );
+
+      return {
+        alreadyClosed,
+        status: finalSessionStatus,
+        mode: locked.mode,
+        engaged,
+        entitlementAction,
+        consumptionId,
+      };
+    });
+
+    if (!settlement) throw new HttpException('not_found', HttpStatus.NOT_FOUND);
+    return {
+      ok: true,
+      sessionId: normalizedSessionId,
+      ended: true,
+      provider: roomName ? { roomName, result: providerResult, error: providerError } : null,
+      settlement,
     };
   }
 

@@ -81,7 +81,7 @@ class _SplashScreenState extends State<SplashScreen> {
                             ),
                             child: const Center(
                               child: Text(
-                                'iniciar sesión',
+                                'ingresar',
                                 style: TextStyle(
                                   color: Colors.black,
                                   fontSize: 14,
@@ -150,7 +150,7 @@ class _SplashScreenState extends State<SplashScreen> {
                                   crossAxisAlignment: CrossAxisAlignment.center,
                                   children: [
                                     const Text(
-                                      'empezar',
+                                      'comenzar',
                                       textAlign: TextAlign.right,
                                       style: TextStyle(
                                         color: Colors.white,
