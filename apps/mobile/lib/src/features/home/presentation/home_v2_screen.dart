@@ -41,8 +41,9 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
 
   Future<void> _loadFirstName() async {
     final user = Supabase.instance.client.auth.currentUser;
-    final fallback = _firstNameFrom(user?.userMetadata?['full_name']?.toString()) ??
-        _firstNameFrom(user?.email?.split('@').first);
+    final fallback =
+        _firstNameFrom(user?.userMetadata?['full_name']?.toString()) ??
+            _firstNameFrom(user?.email?.split('@').first);
     if (fallback != null && mounted) {
       setState(() => _firstName = fallback);
     }
@@ -72,7 +73,8 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
   }
 
   Future<void> _enterAiMode() async {
-    _homeAiLog('enterAiMode requested phase=$_aiPhase textLength=${_messageCtrl.text.trim().length}');
+    _homeAiLog(
+        'enterAiMode requested phase=$_aiPhase textLength=${_messageCtrl.text.trim().length}');
     if (_aiPhase == _HomeAiPhase.prompt) {
       _homeAiLog('enterAiMode already prompt; focusing composer');
       _messageFocusNode.requestFocus();
@@ -101,13 +103,15 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
   }
 
   void _useSuggestion(String text) {
-    _homeAiLog('suggestion selected length=${text.length} preview="${text.length > 80 ? '${text.substring(0, 80)}...' : text}"');
+    _homeAiLog(
+        'suggestion selected length=${text.length} preview="${text.length > 80 ? '${text.substring(0, 80)}...' : text}"');
     _openAiChatWithText(text);
   }
 
   void _openAiChat() {
     final text = _messageCtrl.text.trim();
-    _homeAiLog('openAiChat requested phase=$_aiPhase textLength=${text.length}');
+    _homeAiLog(
+        'openAiChat requested phase=$_aiPhase textLength=${text.length}');
     if (text.isEmpty) {
       _homeAiLog('openAiChat empty text; staying in AI prompt mode');
       _enterAiMode();
@@ -126,7 +130,8 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
       _conversationKey += 1;
       _aiPhase = _HomeAiPhase.conversation;
     });
-    _homeAiLog('opened inline AI conversation key=$_conversationKey initialMessageLength=${text.length}');
+    _homeAiLog(
+        'opened inline AI conversation key=$_conversationKey initialMessageLength=${text.length}');
   }
 
   @override
@@ -149,7 +154,8 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
         ),
         child: SafeArea(
           child: Padding(
-            padding: EdgeInsets.fromLTRB(horizontalPadding, 24, horizontalPadding, 24 + bottomInset),
+            padding: EdgeInsets.fromLTRB(
+                horizontalPadding, 24, horizontalPadding, 24 + bottomInset),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -199,7 +205,8 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
                         )
                       : isPrompt
                           ? _AiSuggestionList(onSelected: _useSuggestion)
-                          : _HomeDefaultSection(visible: _aiPhase == _HomeAiPhase.home),
+                          : _HomeDefaultSection(
+                              visible: _aiPhase == _HomeAiPhase.home),
                 ),
                 if (!isConversation)
                   _MessageComposer(
@@ -230,7 +237,8 @@ class _HomeTopBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final showHomeChrome = phase == _HomeAiPhase.home;
-    final showBack = phase == _HomeAiPhase.prompt || phase == _HomeAiPhase.conversation;
+    final showBack =
+        phase == _HomeAiPhase.prompt || phase == _HomeAiPhase.conversation;
 
     return SizedBox(
       height: 42,
@@ -256,7 +264,8 @@ class _HomeTopBar extends StatelessWidget {
                         child: SvgPicture.asset(
                           'assets/icons/user.svg',
                           fit: BoxFit.contain,
-                          colorFilter: const ColorFilter.mode(Colors.white, BlendMode.srcIn),
+                          colorFilter: const ColorFilter.mode(
+                              Colors.white, BlendMode.srcIn),
                         ),
                       ),
                     ),
@@ -277,7 +286,8 @@ class _HomeTopBar extends StatelessWidget {
                         child: SvgPicture.asset(
                           'assets/icons/caballo.svg',
                           fit: BoxFit.contain,
-                          colorFilter: const ColorFilter.mode(Colors.white, BlendMode.srcIn),
+                          colorFilter: const ColorFilter.mode(
+                              Colors.white, BlendMode.srcIn),
                         ),
                       ),
                     ),
@@ -329,8 +339,6 @@ class _HomeDefaultSection extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _AiShortcut(),
-          SizedBox(height: 76),
-          _EventsEmptyState(),
         ],
       ),
     );
@@ -346,24 +354,6 @@ class _AiShortcut extends StatelessWidget {
       'assets/icons/ai.svg',
       width: 26,
       height: 26,
-    );
-  }
-}
-
-class _EventsEmptyState extends StatelessWidget {
-  const _EventsEmptyState();
-
-  @override
-  Widget build(BuildContext context) {
-    return const Text(
-      'No tienes eventos programados o activos.',
-      style: TextStyle(
-        color: Colors.white,
-        fontSize: 10,
-        fontFamily: 'ABCDiatype',
-        fontWeight: FontWeight.w300,
-        height: 2.40,
-      ),
     );
   }
 }
@@ -411,7 +401,8 @@ class _AiSuggestionListState extends State<_AiSuggestionList> {
           final maxWidths = [309.0, 254.0, 306.0];
           final visible = _visibleCount > index;
           return Padding(
-            padding: EdgeInsets.only(bottom: index == _suggestions.length - 1 ? 0 : 24),
+            padding: EdgeInsets.only(
+                bottom: index == _suggestions.length - 1 ? 0 : 24),
             child: _SuggestionBubble(
               maxWidth: maxWidths[index],
               text: _suggestions[index],
@@ -456,7 +447,8 @@ class _SuggestionBubble extends StatelessWidget {
               onTap: onTap,
               child: Container(
                 constraints: BoxConstraints(maxWidth: maxWidth),
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 11),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 20, vertical: 11),
                 decoration: BoxDecoration(
                   color: Colors.white.withValues(alpha: 0.06),
                   borderRadius: BorderRadius.circular(40),

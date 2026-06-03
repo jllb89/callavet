@@ -95,8 +95,9 @@ class _VetDashboardScreenState extends State<VetDashboardScreen>
   void _refreshDashboardQueue() {
     if (!mounted) return;
     final currentBundleFuture = _profileBundleFuture;
-    setState(
-        () => _profileBundleFuture = _loadQueueIntoBundle(currentBundleFuture));
+    setState(() {
+      _profileBundleFuture = _loadQueueIntoBundle(currentBundleFuture);
+    });
   }
 
   void _scheduleDashboardRefresh() {
@@ -126,7 +127,8 @@ class _VetDashboardScreenState extends State<VetDashboardScreen>
     final normalizedVetId = vetId.trim();
     if (normalizedVetId.isEmpty) return;
     final topic = 'vet-dashboard:$normalizedVetId';
-    if (_dashboardBroadcastTopic == topic && _dashboardBroadcastChannel != null) {
+    if (_dashboardBroadcastTopic == topic &&
+        _dashboardBroadcastChannel != null) {
       return;
     }
 
@@ -343,8 +345,9 @@ class _VetDashboardScreenState extends State<VetDashboardScreen>
             child: _ProfilePage(
               profileBundleFuture: _profileBundleFuture,
               onSave: _saveProfile,
-              onReload: () =>
-                  setState(() => _profileBundleFuture = _loadProfileBundle()),
+              onReload: () => setState(() {
+                _profileBundleFuture = _loadProfileBundle();
+              }),
             ),
           )
         : _DashboardPage(
@@ -663,9 +666,15 @@ class _ActivitySections extends StatelessWidget {
         final upcomingAppointments =
             queue?.upcomingAppointments ?? const <_UpcomingAppointment>[];
         final isLoading = snapshot.connectionState == ConnectionState.waiting;
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+        if (!isLoading &&
+            activeConsults.isEmpty &&
+            upcomingAppointments.isEmpty) {
+          return const SizedBox.shrink();
+        }
+
+        final children = <Widget>[];
+        if (isLoading || activeConsults.isNotEmpty) {
+          children.addAll([
             Text(
               availableNow ? 'consultas activas:' : 'fuera de guardia:',
               style: const TextStyle(
@@ -678,8 +687,6 @@ class _ActivitySections extends StatelessWidget {
             const SizedBox(height: 24),
             if (isLoading)
               const _LoadingTag()
-            else if (activeConsults.isEmpty)
-              const _EmptyActivityText('No tienes consultas activas.')
             else
               _ActiveConsultEventList(
                 consults: activeConsults,
@@ -688,7 +695,14 @@ class _ActivitySections extends StatelessWidget {
                 onEndConsult: onEndConsult,
                 endingConsultIds: endingConsultIds,
               ),
-            const SizedBox(height: 46),
+          ]);
+        }
+
+        if (isLoading || upcomingAppointments.isNotEmpty) {
+          if (children.isNotEmpty) {
+            children.add(const SizedBox(height: 46));
+          }
+          children.addAll([
             const Text(
               'próximas consultas:',
               style: TextStyle(
@@ -701,12 +715,17 @@ class _ActivitySections extends StatelessWidget {
             const SizedBox(height: 28),
             if (isLoading)
               const _LoadingTag()
-            else if (upcomingAppointments.isEmpty)
-              const _EmptyActivityText('No tienes videollamadas programadas.')
             else
               _UpcomingAppointmentsList(
-                  appointments: upcomingAppointments, onJoinVideo: onJoinVideo),
-          ],
+                appointments: upcomingAppointments,
+                onJoinVideo: onJoinVideo,
+              ),
+          ]);
+        }
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: children,
         );
       },
     );
@@ -1142,26 +1161,6 @@ class _LoadingTag extends StatelessWidget {
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.06),
         borderRadius: BorderRadius.circular(40),
-      ),
-    );
-  }
-}
-
-class _EmptyActivityText extends StatelessWidget {
-  const _EmptyActivityText(this.text);
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    return Text(
-      text,
-      style: const TextStyle(
-        color: Colors.white,
-        fontSize: 10,
-        fontFamily: 'ABC Diatype',
-        fontWeight: FontWeight.w300,
-        height: 2.40,
       ),
     );
   }

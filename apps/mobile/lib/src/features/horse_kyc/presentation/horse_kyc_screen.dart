@@ -16,7 +16,7 @@ void _horseKycLog(String message) {
 const int _kMaxHorseKycImageBytes = 15 * 1024 * 1024;
 const int _kMaxHorseKycVideoBytes = 150 * 1024 * 1024;
 const double _kHorseBadgeCircleSize = 59;
-const double _kHorseBadgeIconSize = 18;
+const double _kHorseBadgeIconSize = 27;
 
 class HorseKycScreen extends StatefulWidget {
   const HorseKycScreen({super.key});
@@ -61,7 +61,8 @@ class _HorseKycScreenState extends State<HorseKycScreen> {
         _loadSubscriptionCapacity(),
         _loadPets(),
       ]);
-      _horseKycLog('Initial load complete. petsIncludedLimit=$_petsIncludedLimit petsLoaded=${_pets.length}');
+      _horseKycLog(
+          'Initial load complete. petsIncludedLimit=$_petsIncludedLimit petsLoaded=${_pets.length}');
     } catch (err) {
       _horseKycLog('Initial load failed: $err');
       _error = 'No se pudo cargar la información: $err';
@@ -92,7 +93,8 @@ class _HorseKycScreenState extends State<HorseKycScreen> {
       if (state != null && state.isNotEmpty) {
         _defaultState = state;
       }
-      _horseKycLog('Owner location defaults resolved: country=$_defaultCountry state=$_defaultState');
+      _horseKycLog(
+          'Owner location defaults resolved: country=$_defaultCountry state=$_defaultState');
     } catch (err) {
       _horseKycLog('Location defaults lookup failed: $err; using fallback');
     }
@@ -128,9 +130,11 @@ class _HorseKycScreenState extends State<HorseKycScreen> {
 
       final explicitIncluded = _toInt(active['pets_included']);
       final plan = active['plan'];
-      final defaultIncluded = plan is Map ? _toInt(plan['pets_included_default']) : null;
+      final defaultIncluded =
+          plan is Map ? _toInt(plan['pets_included_default']) : null;
       _petsIncludedLimit = explicitIncluded ?? defaultIncluded;
-      _horseKycLog('Subscription capacity loaded: limit=$_petsIncludedLimit explicit=$explicitIncluded default=$defaultIncluded');
+      _horseKycLog(
+          'Subscription capacity loaded: limit=$_petsIncludedLimit explicit=$explicitIncluded default=$defaultIncluded');
     } catch (err) {
       _horseKycLog('Subscription capacity load failed: $err');
       _petsIncludedLimit = null;
@@ -173,7 +177,8 @@ class _HorseKycScreenState extends State<HorseKycScreen> {
     if (_isSaving) return;
     if (!_canAddMoreHorses) {
       final limit = _petsIncludedLimit ?? 0;
-      _horseKycLog('Cannot add more horses: limit=$limit current=${_pets.length}');
+      _horseKycLog(
+          'Cannot add more horses: limit=$limit current=${_pets.length}');
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Tu plan permite hasta $limit caballo(s).'),
@@ -231,8 +236,9 @@ class _HorseKycScreenState extends State<HorseKycScreen> {
     }
 
     final isCreate = petId == null || petId.isEmpty;
-    _horseKycLog('Save horse started: name=${draft.name} isCreate=$isCreate petId=$petId');
-    
+    _horseKycLog(
+        'Save horse started: name=${draft.name} isCreate=$isCreate petId=$petId');
+
     if (isCreate && !_canAddMoreHorses) {
       final limit = _petsIncludedLimit ?? 0;
       _horseKycLog('Save horse blocked: capacity exceeded limit=$limit');
@@ -276,8 +282,11 @@ class _HorseKycScreenState extends State<HorseKycScreen> {
         }
       }
 
-      if (savedPetId != null && savedPetId.isNotEmpty && draft.pendingMedia.isNotEmpty) {
-        _horseKycLog('Starting media upload for petId=$savedPetId mediaCount=${draft.pendingMedia.length}');
+      if (savedPetId != null &&
+          savedPetId.isNotEmpty &&
+          draft.pendingMedia.isNotEmpty) {
+        _horseKycLog(
+            'Starting media upload for petId=$savedPetId mediaCount=${draft.pendingMedia.length}');
         await _uploadMediaForPet(
           petId: savedPetId,
           token: token,
@@ -319,8 +328,10 @@ class _HorseKycScreenState extends State<HorseKycScreen> {
         item.file.name,
         fallback: item.kind == _PendingMediaKind.video ? '.mp4' : '.jpg',
       );
-      final path = 'pets/$petId/mobile-${DateTime.now().millisecondsSinceEpoch}-$i$ext';
-      _horseKycLog('Uploading media [$i/${media.length}]: file=${item.file.name} path=$path contentType=${item.contentType}');
+      final path =
+          'pets/$petId/mobile-${DateTime.now().millisecondsSinceEpoch}-$i$ext';
+      _horseKycLog(
+          'Uploading media [$i/${media.length}]: file=${item.file.name} path=$path contentType=${item.contentType}');
 
       try {
         final signed = await _request(
@@ -354,7 +365,8 @@ class _HorseKycScreenState extends State<HorseKycScreen> {
             throw Exception('upload_failed_${res.statusCode}: $raw');
           }
           uploaded += 1;
-          _horseKycLog('Media uploaded successfully [$i]: statusCode=${res.statusCode}');
+          _horseKycLog(
+              'Media uploaded successfully [$i]: statusCode=${res.statusCode}');
         } finally {
           putClient.close(force: true);
         }
@@ -365,7 +377,8 @@ class _HorseKycScreenState extends State<HorseKycScreen> {
     }
 
     if (!mounted) return;
-    _horseKycLog('All media uploads complete: $uploaded/${media.length} uploaded');
+    _horseKycLog(
+        'All media uploads complete: $uploaded/${media.length} uploaded');
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('Se subieron $uploaded archivo(s).')),
     );
@@ -437,7 +450,8 @@ class _HorseKycScreenState extends State<HorseKycScreen> {
             child: Padding(
               padding: const EdgeInsets.fromLTRB(24, 32, 24, 30),
               child: _isLoading
-                  ? const Center(child: CircularProgressIndicator(color: Colors.white))
+                  ? const Center(
+                      child: CircularProgressIndicator(color: Colors.white))
                   : _error != null
                       ? _ErrorCard(
                           message: _error!,
@@ -449,11 +463,15 @@ class _HorseKycScreenState extends State<HorseKycScreen> {
                             Align(
                               alignment: Alignment.topRight,
                               child: TextButton(
-                                onPressed: _canContinue ? () => context.go('/home') : null,
+                                onPressed: _canContinue
+                                    ? () => context.go('/home')
+                                    : null,
                                 child: Text(
                                   'saltar',
                                   style: TextStyle(
-                                    color: _canContinue ? Colors.white : Colors.white.withValues(alpha: 0.45),
+                                    color: _canContinue
+                                        ? Colors.white
+                                        : Colors.white.withValues(alpha: 0.45),
                                     fontSize: 13,
                                     fontWeight: FontWeight.w500,
                                   ),
@@ -497,7 +515,8 @@ class _HorseKycScreenState extends State<HorseKycScreen> {
                               runSpacing: 14,
                               children: [
                                 ..._pets.map((pet) => _HorseBadge(
-                                      name: (pet['name']?.toString() ?? '').trim(),
+                                      name: (pet['name']?.toString() ?? '')
+                                          .trim(),
                                       onTap: () => _onEditHorse(pet),
                                     )),
                                 _AddHorseBadge(
@@ -532,7 +551,8 @@ class _HorseKycScreenState extends State<HorseKycScreen> {
                                       shape: BoxShape.circle,
                                       color: _canContinue
                                           ? Colors.white
-                                          : Colors.white.withValues(alpha: 0.35),
+                                          : Colors.white
+                                              .withValues(alpha: 0.35),
                                     ),
                                     child: const Icon(
                                       Icons.arrow_forward,
@@ -584,7 +604,8 @@ class _HorseBadge extends StatelessWidget {
                 child: SvgPicture.asset(
                   'assets/icons/caballo.svg',
                   fit: BoxFit.contain,
-                  colorFilter: const ColorFilter.mode(Colors.white, BlendMode.srcIn),
+                  colorFilter:
+                      const ColorFilter.mode(Colors.white, BlendMode.srcIn),
                 ),
               ),
             ),
@@ -838,13 +859,15 @@ class _HorseEditorSheetState extends State<_HorseEditorSheet> {
       if (accepted.isNotEmpty) {
         setState(() => _draft.pendingMedia.addAll(accepted));
       }
-      _horseKycLog('Pending media updated: total=${_draft.pendingMedia.length}');
+      _horseKycLog(
+          'Pending media updated: total=${_draft.pendingMedia.length}');
 
       if (rejected.isNotEmpty && mounted) {
         final summary = rejected.length == 1
             ? 'No se agregó ${rejected.first}. Máximo: fotos ${_formatBytes(_kMaxHorseKycImageBytes)}, videos ${_formatBytes(_kMaxHorseKycVideoBytes)}.'
             : 'No se agregaron ${rejected.length} archivos. Máximo: fotos ${_formatBytes(_kMaxHorseKycImageBytes)}, videos ${_formatBytes(_kMaxHorseKycVideoBytes)}.';
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(summary)));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(summary)));
       }
     } catch (err) {
       _horseKycLog('Media picker error: $err');
@@ -857,8 +880,12 @@ class _HorseEditorSheetState extends State<_HorseEditorSheet> {
 
   _PendingMediaKind? _inferMediaKind(XFile file) {
     final mime = file.mimeType?.toLowerCase();
-    if (mime != null && mime.startsWith('video/')) return _PendingMediaKind.video;
-    if (mime != null && mime.startsWith('image/')) return _PendingMediaKind.image;
+    if (mime != null && mime.startsWith('video/')) {
+      return _PendingMediaKind.video;
+    }
+    if (mime != null && mime.startsWith('image/')) {
+      return _PendingMediaKind.image;
+    }
 
     final name = file.name.toLowerCase();
     final path = file.path.toLowerCase();
@@ -930,7 +957,8 @@ class _HorseEditorSheetState extends State<_HorseEditorSheet> {
                         'assets/icons/x-circle 1.svg',
                         width: 22,
                         height: 22,
-                        colorFilter: const ColorFilter.mode(Colors.white, BlendMode.srcIn),
+                        colorFilter: const ColorFilter.mode(
+                            Colors.white, BlendMode.srcIn),
                       ),
                     ),
                   ],
@@ -955,14 +983,18 @@ class _HorseEditorSheetState extends State<_HorseEditorSheet> {
                     children: [
                       _CompactCheckbox(
                         value: _draft.allowPreventiveSuggestions,
-                        label: 'Autorizo el uso de esta información para sugerencias de cuidado preventivo.',
-                        onChanged: (v) => setState(() => _draft.allowPreventiveSuggestions = v),
+                        label:
+                            'Autorizo el uso de esta información para sugerencias de cuidado preventivo.',
+                        onChanged: (v) => setState(
+                            () => _draft.allowPreventiveSuggestions = v),
                       ),
                       const SizedBox(height: 10),
                       _CompactCheckbox(
                         value: _draft.acceptsDisclaimer,
-                        label: 'Entiendo que Call a Vet no reemplaza una revisión presencial',
-                        onChanged: (v) => setState(() => _draft.acceptsDisclaimer = v),
+                        label:
+                            'Entiendo que Call a Vet no reemplaza una revisión presencial',
+                        onChanged: (v) =>
+                            setState(() => _draft.acceptsDisclaimer = v),
                       ),
                     ],
                   ),
@@ -982,7 +1014,8 @@ class _HorseEditorSheetState extends State<_HorseEditorSheet> {
                             shape: BoxShape.circle,
                             color: Colors.white,
                           ),
-                          child: const Icon(Icons.arrow_back, color: Colors.black, size: 20),
+                          child: const Icon(Icons.arrow_back,
+                              color: Colors.black, size: 20),
                         ),
                       ),
                       const SizedBox(width: 10),
@@ -999,7 +1032,9 @@ class _HorseEditorSheetState extends State<_HorseEditorSheet> {
                     Text(
                       _isLastStep ? 'guardar' : 'siguiente',
                       style: TextStyle(
-                        color: _isNextEnabled() ? Colors.white : Colors.white.withValues(alpha: 0.45),
+                        color: _isNextEnabled()
+                            ? Colors.white
+                            : Colors.white.withValues(alpha: 0.45),
                         fontSize: 13,
                         fontWeight: FontWeight.w500,
                       ),
@@ -1011,10 +1046,16 @@ class _HorseEditorSheetState extends State<_HorseEditorSheet> {
                         width: 45,
                         height: 45,
                         decoration: BoxDecoration(
-                          color: _isNextEnabled() ? Colors.white : Colors.white.withValues(alpha: 0.35),
+                          color: _isNextEnabled()
+                              ? Colors.white
+                              : Colors.white.withValues(alpha: 0.35),
                           shape: BoxShape.circle,
                         ),
-                        child: Icon(Icons.arrow_forward, color: _isNextEnabled() ? Colors.black : Colors.black.withValues(alpha: 0.35), size: 20),
+                        child: Icon(Icons.arrow_forward,
+                            color: _isNextEnabled()
+                                ? Colors.black
+                                : Colors.black.withValues(alpha: 0.35),
+                            size: 20),
                       ),
                     ),
                   ],
@@ -1092,7 +1133,9 @@ class _HorseEditorSheetState extends State<_HorseEditorSheet> {
         const _Question(text: '¿tu caballo está asegurado?'),
         const SizedBox(height: 10),
         _ChipGroup.single(
-          value: _draft.isInsured == null ? null : (_draft.isInsured! ? 'yes' : 'no'),
+          value: _draft.isInsured == null
+              ? null
+              : (_draft.isInsured! ? 'yes' : 'no'),
           options: const [
             _Option('yes', 'sí'),
             _Option('no', 'no'),
@@ -1164,7 +1207,8 @@ class _HorseEditorSheetState extends State<_HorseEditorSheet> {
                                 _Option('trakehner', 'Trakehner'),
                                 _Option('other', 'otro'),
                               ],
-                              onChanged: (v) => setState(() => _draft.warmbloodSubbreed = v),
+                              onChanged: (v) =>
+                                  setState(() => _draft.warmbloodSubbreed = v),
                             ),
                           ],
                         ),
@@ -1201,7 +1245,8 @@ class _HorseEditorSheetState extends State<_HorseEditorSheet> {
           onChanged: (v) => setState(() => _draft.trainingIntensity = v),
         ),
         const SizedBox(height: 32),
-        const _Question(text: 'sobre que tipo de terreno pisa tu caballo mayormente?'),
+        const _Question(
+            text: 'sobre que tipo de terreno pisa tu caballo mayormente?'),
         const SizedBox(height: 10),
         _ChipGroup.single(
           value: _singleValue(_draft.terrains),
@@ -1236,7 +1281,8 @@ class _HorseEditorSheetState extends State<_HorseEditorSheet> {
             _Option('none', 'ninguno de los anteriores'),
           ],
           onToggle: (v) => setState(
-            () => _draft.observedLastSixMonths = _toggleMulti(_draft.observedLastSixMonths, v),
+            () => _draft.observedLastSixMonths =
+                _toggleMulti(_draft.observedLastSixMonths, v),
           ),
         ),
         const SizedBox(height: 32),
@@ -1252,11 +1298,14 @@ class _HorseEditorSheetState extends State<_HorseEditorSheet> {
             _Option('none', 'ninguno'),
           ],
           onToggle: (v) => setState(
-            () => _draft.knownConditions = _toggleMulti(_draft.knownConditions, v),
+            () => _draft.knownConditions =
+                _toggleMulti(_draft.knownConditions, v),
           ),
         ),
         const SizedBox(height: 32),
-        const _Question(text: 'tu caballo está bajo algún tratamiento o tomando un suplemento actualmente?'),
+        const _Question(
+            text:
+                'tu caballo está bajo algún tratamiento o tomando un suplemento actualmente?'),
         const SizedBox(height: 10),
         _TextFieldCard(
           controller: _treatmentsCtrl,
@@ -1273,7 +1322,8 @@ class _HorseEditorSheetState extends State<_HorseEditorSheet> {
       children: [
         _TitleLine(text: widget.title),
         const SizedBox(height: 32),
-        const _Question(text: 'recuerdas cuándo fue su última revisión veterinaria?'),
+        const _Question(
+            text: 'recuerdas cuándo fue su última revisión veterinaria?'),
         const SizedBox(height: 10),
         _ChipGroup.single(
           value: _draft.lastVetCheck,
@@ -1310,7 +1360,9 @@ class _HorseEditorSheetState extends State<_HorseEditorSheet> {
           onChanged: (v) => setState(() => _draft.dewormingStatus = v),
         ),
         const SizedBox(height: 32),
-        const _Question(text: 'a continuación puedes escribir o detallar cualquier cosa que consideres necesaria para nosotros saberlo:'),
+        const _Question(
+            text:
+                'a continuación puedes escribir o detallar cualquier cosa que consideres necesaria para nosotros saberlo:'),
         const SizedBox(height: 10),
         _TextFieldCard(
           controller: _notesCtrl,
@@ -1327,7 +1379,9 @@ class _HorseEditorSheetState extends State<_HorseEditorSheet> {
       children: [
         _TitleLine(text: widget.title),
         const SizedBox(height: 32),
-        const _Question(text: 'adjunta fotos o videos que consideres necesario compartir con nosotros:'),
+        const _Question(
+            text:
+                'adjunta fotos o videos que consideres necesario compartir con nosotros:'),
         const SizedBox(height: 24),
         _ActionPill(
           icon: Icons.photo_library_outlined,
@@ -1338,7 +1392,8 @@ class _HorseEditorSheetState extends State<_HorseEditorSheet> {
           const SizedBox(height: 12),
           _MediaMosaic(
             media: _draft.pendingMedia,
-            onRemove: (index) => setState(() => _draft.pendingMedia.removeAt(index)),
+            onRemove: (index) =>
+                setState(() => _draft.pendingMedia.removeAt(index)),
           ),
         ],
       ],
@@ -1613,7 +1668,8 @@ class _MediaMosaicTile extends StatelessWidget {
           ),
           if (item.kind == _PendingMediaKind.video)
             const Center(
-              child: Icon(Icons.play_circle_fill, color: Colors.white, size: 34),
+              child:
+                  Icon(Icons.play_circle_fill, color: Colors.white, size: 34),
             ),
           Positioned(
             top: 6,
@@ -1647,7 +1703,9 @@ class _MediaFallback extends StatelessWidget {
     return Container(
       color: Colors.white.withValues(alpha: 0.08),
       child: Icon(
-        kind == _PendingMediaKind.image ? Icons.image_outlined : Icons.videocam_outlined,
+        kind == _PendingMediaKind.image
+            ? Icons.image_outlined
+            : Icons.videocam_outlined,
         color: Colors.white.withValues(alpha: 0.72),
         size: 28,
       ),
@@ -1692,10 +1750,10 @@ class _HorseDraft {
     this.acceptsDisclaimer = false,
     List<_PendingMedia>? pendingMedia,
   })  : primaryActivities = primaryActivities ?? <String>{},
-      terrains = terrains ?? <String>{},
-      observedLastSixMonths = observedLastSixMonths ?? <String>{},
-      knownConditions = knownConditions ?? <String>{},
-      pendingMedia = pendingMedia ?? <_PendingMedia>[];
+        terrains = terrains ?? <String>{},
+        observedLastSixMonths = observedLastSixMonths ?? <String>{},
+        knownConditions = knownConditions ?? <String>{},
+        pendingMedia = pendingMedia ?? <_PendingMedia>[];
 
   String name;
   String? sex;
@@ -1728,12 +1786,14 @@ class _HorseDraft {
       weightRange: _asText(pet['weight_range']),
       breed: _asText(pet['breed']),
       warmbloodSubbreed: _asText(pet['warmblood_subbreed']),
-      primaryActivities: _asTextSet(pet['primary_activities'] ?? pet['primary_activity']),
+      primaryActivities:
+          _asTextSet(pet['primary_activities'] ?? pet['primary_activity']),
       trainingIntensity: _asText(pet['training_intensity']),
       terrains: _asTextSet(pet['terrains'] ?? pet['terrain']),
       observedLastSixMonths: _asTextSet(pet['observed_last_6_months']),
       knownConditions: _asTextSet(pet['known_conditions']),
-      currentTreatments: _asText(pet['current_treatments_or_supplements']) ?? '',
+      currentTreatments:
+          _asText(pet['current_treatments_or_supplements']) ?? '',
       lastVetCheck: _asText(pet['last_vet_check']),
       vaccinesUpToDate: _asText(pet['vaccines_up_to_date']),
       dewormingStatus: _asText(pet['deworming_status']),
@@ -1790,11 +1850,13 @@ class _HorseDraft {
     addString('weight_range', weightRange);
     addString('breed', breed);
     addString('warmblood_subbreed', warmbloodSubbreed);
-    addString('primary_activity', primaryActivities.isEmpty ? null : primaryActivities.first);
+    addString('primary_activity',
+        primaryActivities.isEmpty ? null : primaryActivities.first);
     addString('training_intensity', trainingIntensity);
     addString('terrain', terrains.isEmpty ? null : terrains.first);
     if (observedLastSixMonths.isNotEmpty) {
-      payload['observed_last_6_months'] = observedLastSixMonths.toList(growable: false);
+      payload['observed_last_6_months'] =
+          observedLastSixMonths.toList(growable: false);
     }
     if (knownConditions.isNotEmpty) {
       payload['known_conditions'] = knownConditions.toList(growable: false);
@@ -1856,7 +1918,8 @@ class _CompactCheckbox extends StatelessWidget {
               visualDensity: VisualDensity.compact,
               activeColor: Colors.white,
               checkColor: Colors.black,
-              side: BorderSide(color: Colors.white.withValues(alpha: 0.4), width: 1.5),
+              side: BorderSide(
+                  color: Colors.white.withValues(alpha: 0.4), width: 1.5),
             ),
           ),
           const SizedBox(width: 10),

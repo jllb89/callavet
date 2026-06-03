@@ -87,7 +87,9 @@ class _VetChatScreenState extends State<VetChatScreen> {
 
   void _refreshMessages() {
     if (!mounted) return;
-    setState(() => _messagesFuture = _loadMessages());
+    setState(() {
+      _messagesFuture = _loadMessages();
+    });
   }
 
   Future<void> _sendMessage() async {

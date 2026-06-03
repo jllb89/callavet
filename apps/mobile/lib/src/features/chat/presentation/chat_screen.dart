@@ -1137,9 +1137,9 @@ class _MessageBubble extends StatelessWidget {
     const textColor = Colors.white;
     final viewportWidth = MediaQuery.sizeOf(context).width;
     final widthFactor =
-        isUser ? (embedded ? 0.90 : 0.78) : (embedded ? 0.96 : 0.86);
+        isUser ? (embedded ? 0.74 : 0.66) : (embedded ? 0.82 : 0.72);
     final fixedCap =
-        isUser ? (embedded ? 360.0 : 420.0) : (embedded ? 390.0 : 460.0);
+        isUser ? (embedded ? 300.0 : 350.0) : (embedded ? 330.0 : 380.0);
     final maxBubbleWidth = math.min(viewportWidth * widthFactor, fixedCap);
 
     return Padding(
