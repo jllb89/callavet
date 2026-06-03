@@ -113,16 +113,16 @@ export class VideoController {
     });
   }
 
-  private async markForcedEnd(sessionId: string, roomName: string) {
+  private async markVideoRoomEnded(sessionId: string, roomName: string) {
     if (this.db.isStub) return { action: 'stub', reason: 'stub' };
     return this.db.runInTx(async (q) => {
       await q(
-        `insert into video_session_lifecycle (session_id, room_name, status, forced_end_at, safety_reason, created_at, updated_at)
-         values ($1::uuid, $2, 'forced_ended', now(), 'forced_end', now(), now())
+        `insert into video_session_lifecycle (session_id, room_name, status, room_finished_at, safety_reason, created_at, updated_at)
+         values ($1::uuid, $2, 'ended', now(), 'room_end', now(), now())
          on conflict (session_id) do update
            set room_name = coalesce(excluded.room_name, video_session_lifecycle.room_name),
-               forced_end_at = coalesce(video_session_lifecycle.forced_end_at, now()),
-               safety_reason = 'forced_end',
+               room_finished_at = coalesce(video_session_lifecycle.room_finished_at, now()),
+               safety_reason = 'room_end',
                updated_at = now()`,
         [sessionId, roomName]
       );
@@ -167,34 +167,12 @@ export class VideoController {
                 entitlement_consumption_id = coalesce(entitlement_consumption_id, $3::uuid),
                 entitlement_finalized_at = case when $4 then coalesce(entitlement_finalized_at, now()) else entitlement_finalized_at end,
                 entitlement_released_at = case when $5 then coalesce(entitlement_released_at, now()) else entitlement_released_at end,
-                safety_reason = 'forced_end',
+                safety_reason = 'room_end',
                 updated_at = now()
           where session_id = $1::uuid`,
-        [sessionId, engaged ? 'ended' : 'forced_ended', state?.consumption_id || null, entitlementAction === 'committed', entitlementAction === 'released']
+        [sessionId, engaged ? 'ended' : 'released', state?.consumption_id || null, entitlementAction === 'committed', entitlementAction === 'released']
       );
-      await q(
-        `update chat_sessions
-            set status = case when $2 then 'completed' else 'canceled' end,
-                ended_at = coalesce(ended_at, now()),
-                updated_at = now()
-          where id = $1::uuid`,
-        [sessionId, engaged]
-      );
-      await q(
-        `update appointments
-            set status = case when $2 then 'completed' else case when status = 'completed' then status else 'no_show' end end
-          where session_id = $1::uuid`,
-        [sessionId, engaged]
-      );
-      await q(
-        `update clinical_encounters
-            set status = 'closed',
-                ended_at = coalesce(ended_at, now()),
-                updated_at = now()
-          where session_id = $1::uuid`,
-        [sessionId]
-      );
-      return { action: entitlementAction, reason: 'forced_end', settled: true };
+      return { action: entitlementAction, reason: 'room_end', settled: true };
     });
   }
 
@@ -531,7 +509,7 @@ export class VideoController {
     this.validator.validateUUID(sessionId, 'sessionId');
     await this.getAuthorizedVideoSession(sessionId);
     const result = await this.livekit.endRoom(normalizedRoomId);
-    const settlement = await this.markForcedEnd(sessionId, normalizedRoomId);
+    const settlement = await this.markVideoRoomEnded(sessionId, normalizedRoomId);
     return { ok: true, provider: 'livekit', roomId: normalizedRoomId, ...result, settlement };
   }
 

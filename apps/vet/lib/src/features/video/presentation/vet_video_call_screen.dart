@@ -67,7 +67,7 @@ class _VetVideoCallScreenState extends State<VetVideoCallScreen> {
         ..on<LocalTrackUnpublishedEvent>((_) => _handleRoomUpdate())
         ..on<TrackSubscribedEvent>((_) => _handleRoomUpdate())
         ..on<TrackUnsubscribedEvent>((_) => _handleRoomUpdate())
-        ..on<RoomDisconnectedEvent>((_) => _handleRoomUpdate());
+        ..on<RoomDisconnectedEvent>((_) => _handleRoomDisconnected());
       room.addListener(_handleRoomUpdate);
 
       if (!mounted) {
@@ -122,6 +122,13 @@ class _VetVideoCallScreenState extends State<VetVideoCallScreen> {
         _cameraEnabled = _hasActiveVideo(localParticipant);
       }
     });
+  }
+
+  void _handleRoomDisconnected() {
+    _handleRoomUpdate();
+    if (!mounted || _ending) return;
+    setState(() => _ending = true);
+    context.go('/dashboard');
   }
 
   Future<void> _toggleMicrophone() async {

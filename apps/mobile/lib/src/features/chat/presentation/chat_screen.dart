@@ -2055,11 +2055,11 @@ String _readableAssistantText(String text) {
   formatted = formatted.replaceAll(RegExp(r'\n{3,}'), '\n\n');
   formatted = formatted.replaceAllMapped(
     RegExp(r'(:)\s+(\d+\.\s)'),
-    (match) => '${match[1]}\n\n${match[2]}',
+    (match) => '${match[1]}\n${match[2]}',
   );
   formatted = formatted.replaceAllMapped(
     RegExp(r'([^\n])\n(\d+\.\s)'),
-    (match) => '${match[1]}\n\n${match[2]}',
+    (match) => '${match[1]}\n${match[2]}',
   );
   formatted = formatted.replaceAllMapped(
     RegExp(

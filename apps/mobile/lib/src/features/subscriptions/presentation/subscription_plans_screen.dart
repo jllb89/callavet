@@ -62,10 +62,7 @@ class _SubscriptionPlansLoaderScreenState
     );
 
     final elapsed = DateTime.now().difference(startedAt);
-    const minDuration = Duration(milliseconds: 1200);
-    if (elapsed < minDuration) {
-      await Future.delayed(minDuration - elapsed);
-    }
+    _subscriptionLog('Loader active check elapsed=${elapsed.inMilliseconds}ms');
     if (!mounted) return;
 
     if (active.hasActive) {
@@ -98,68 +95,9 @@ class _SubscriptionPlansLoaderScreenState
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: Stack(
-        fit: StackFit.expand,
-        children: [
-          const DecoratedBox(
-            decoration: BoxDecoration(
-              image: DecorationImage(
-                image: AssetImage('assets/images/onboarding/rectangle_1.png'),
-                fit: BoxFit.cover,
-              ),
-            ),
-          ),
-          Positioned.fill(
-            child: BackdropFilter(
-              filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
-              child: Container(
-                color: Colors.black.withValues(alpha: 0.08),
-              ),
-            ),
-          ),
-          const Align(
-            alignment: Alignment(0, 0.45),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  'call a vet',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 24,
-                    fontFamily: 'ABC Diatype',
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-                SizedBox(height: 18),
-                SizedBox(
-                  width: 312,
-                  child: Text(
-                    'estamos casi listos...',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 15,
-                      fontFamily: 'ABC Diatype',
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const Positioned(
-            right: 24,
-            bottom: 86,
-            child: _ContinueCta(
-              label: 'conoce nuestros planes',
-              enabled: false,
-            ),
-          ),
-        ],
-      ),
+    return const Scaffold(
+      backgroundColor: Colors.black,
+      body: SizedBox.expand(),
     );
   }
 }
@@ -168,9 +106,11 @@ class SubscriptionPlansScreen extends StatefulWidget {
   const SubscriptionPlansScreen({
     super.key,
     this.recommendedCode,
+    this.horsesTarget,
   });
 
   final String? recommendedCode;
+  final int? horsesTarget;
 
   @override
   State<SubscriptionPlansScreen> createState() =>
@@ -201,7 +141,7 @@ class _SubscriptionPlansScreenState extends State<SubscriptionPlansScreen> {
 
   Future<void> _load() async {
     _subscriptionLog(
-      'Plans screen load started. recommendedCode=${widget.recommendedCode}',
+      'Plans screen load started. recommendedCode=${widget.recommendedCode} horsesTarget=${widget.horsesTarget}',
     );
     setState(() {
       _isLoading = true;
@@ -225,12 +165,21 @@ class _SubscriptionPlansScreenState extends State<SubscriptionPlansScreen> {
         for (final plan in plans) plan.code.toLowerCase(): plan,
       };
       final suggestedCode = widget.recommendedCode?.trim().toLowerCase();
+      final cachedCode =
+          _SubscriptionPlansRepository.instance.cachedRecommendedCode;
       String? resolvedRecommendedCode =
           (suggestedCode != null && planByCode.containsKey(suggestedCode))
               ? suggestedCode
-              : _SubscriptionPlansRepository.instance.cachedRecommendedCode;
+              : cachedCode != null && planByCode.containsKey(cachedCode)
+                  ? cachedCode
+                  : null;
 
-      resolvedRecommendedCode ??= await _SubscriptionPlansRepository.instance.prepareSuggestions();
+        resolvedRecommendedCode ??= await _SubscriptionPlansRepository.instance
+          .prepareSuggestions(horsesTarget: widget.horsesTarget);
+      if (resolvedRecommendedCode != null &&
+          !planByCode.containsKey(resolvedRecommendedCode)) {
+        resolvedRecommendedCode = null;
+      }
 
       setState(() {
         _plans = plans;
@@ -402,7 +351,7 @@ class _SubscriptionPlansScreenState extends State<SubscriptionPlansScreen> {
                             text: 'nuestros planes: ',
                             style: TextStyle(
                               color: Colors.white,
-                              fontSize: 16,
+                              fontSize: 14,
                               fontFamily: 'ABC Diatype',
                               fontWeight: FontWeight.w500,
                               height: 1.10,
@@ -413,7 +362,7 @@ class _SubscriptionPlansScreenState extends State<SubscriptionPlansScreen> {
                                 'desde un solo caballo hasta operaciones completas.',
                             style: TextStyle(
                               color: Colors.white,
-                              fontSize: 16,
+                              fontSize: 14,
                               fontFamily: 'ABC Diatype',
                               fontWeight: FontWeight.w300,
                               height: 1.10,
@@ -464,8 +413,6 @@ class _SubscriptionPlansScreenState extends State<SubscriptionPlansScreen> {
                             (plan) => _PlanChip(
                               label: plan.displayName,
                               selected: _selectedPlan?.id == plan.id,
-                              isRecommended:
-                                  _recommendedCode == plan.code.toLowerCase(),
                               onTap: () => _handlePlanSelected(plan),
                             ),
                           )
@@ -527,6 +474,8 @@ class _SubscriptionPlansScreenState extends State<SubscriptionPlansScreen> {
                         child: _PlanDescription(
                           plan: selected,
                           isAnnual: _isAnnual,
+                          isRecommended: selected != null &&
+                              _recommendedCode == selected.code.toLowerCase(),
                         ),
                       ),
                     ),
@@ -591,10 +540,12 @@ class _PlanDescription extends StatelessWidget {
   const _PlanDescription({
     required this.plan,
     required this.isAnnual,
+    required this.isRecommended,
   });
 
   final _SubscriptionPlan? plan;
   final bool isAnnual;
+  final bool isRecommended;
 
   @override
   Widget build(BuildContext context) {
@@ -606,12 +557,14 @@ class _PlanDescription extends StatelessWidget {
     final priceText =
         _formatPrice(isAnnual ? plan!.annualCents : plan!.monthlyCents);
     final periodText = isAnnual ? 'al año' : 'al mes';
+    final recommendedText = isRecommended ? ' · recomendado' : '';
 
     return Text.rich(
       TextSpan(
         children: [
           TextSpan(
-            text: '${plan!.displayName} - $priceText $periodText\n',
+            text:
+                '${plan!.displayName} - $priceText $periodText$recommendedText\n',
             style: const TextStyle(
               color: Colors.white,
               fontSize: 20,
@@ -721,71 +674,35 @@ class _PlanChip extends StatelessWidget {
     required this.label,
     required this.selected,
     required this.onTap,
-    required this.isRecommended,
   });
 
   final String label;
   final bool selected;
   final VoidCallback onTap;
-  final bool isRecommended;
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        if (isRecommended)
-          Container(
-            margin: const EdgeInsets.only(left: 14, bottom: 4),
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-            decoration: ShapeDecoration(
-              color: const Color(0xFF101010),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(40),
-              ),
-            ),
-            child: const Text(
-              'recomendado',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 8,
-                fontFamily: 'ABC Diatype',
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-        GestureDetector(
-          onTap: onTap,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-            decoration: ShapeDecoration(
-              color: selected ? Colors.white : Colors.white.withValues(alpha: 0.06),
-              shape: RoundedRectangleBorder(
-                side: selected && isRecommended
-                    ? const BorderSide(width: 1, color: Colors.white)
-                    : BorderSide.none,
-                borderRadius: BorderRadius.circular(40),
-              ),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  label,
-                  style: TextStyle(
-                    color: selected ? Colors.black : Colors.white,
-                    fontSize: 13,
-                    fontFamily: 'ABC Diatype',
-                    fontWeight: FontWeight.w500,
-                    height: 1.40,
-                  ),
-                ),
-              ],
-            ),
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+        decoration: ShapeDecoration(
+          color: selected ? Colors.white : Colors.white.withValues(alpha: 0.06),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(40),
           ),
         ),
-      ],
+        child: Text(
+          label,
+          style: TextStyle(
+            color: selected ? Colors.black : Colors.white,
+            fontSize: 13,
+            fontFamily: 'ABC Diatype',
+            fontWeight: FontWeight.w500,
+            height: 1.40,
+          ),
+        ),
+      ),
     );
   }
 }
@@ -794,48 +711,43 @@ class _ContinueCta extends StatelessWidget {
   const _ContinueCta({
     required this.label,
     this.onTap,
-    this.enabled = true,
   });
 
   final String label;
   final VoidCallback? onTap;
-  final bool enabled;
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onTap: enabled ? onTap : null,
-      child: Opacity(
-        opacity: enabled ? 1 : 0.7,
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              label,
-              textAlign: TextAlign.right,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 13,
-                fontFamily: 'ABC Diatype',
-                fontWeight: FontWeight.w500,
-              ),
+      onTap: onTap,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            label,
+            textAlign: TextAlign.right,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 13,
+              fontFamily: 'ABC Diatype',
+              fontWeight: FontWeight.w500,
             ),
-            const SizedBox(width: 10),
-            Container(
-              width: 45,
-              height: 45,
-              decoration: const ShapeDecoration(
-                color: Colors.white,
-                shape: OvalBorder(),
-              ),
-              child: const Icon(
-                Icons.arrow_forward,
-                color: Colors.black,
-                size: 20,
-              ),
+          ),
+          const SizedBox(width: 10),
+          Container(
+            width: 45,
+            height: 45,
+            decoration: const ShapeDecoration(
+              color: Colors.white,
+              shape: OvalBorder(),
             ),
-          ],
-        ),
+            child: const Icon(
+              Icons.arrow_forward,
+              color: Colors.black,
+              size: 20,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -974,6 +886,7 @@ class _SubscriptionPlansRepository {
           .whereType<Map>()
           .map((raw) =>
               _SubscriptionPlan.fromJson(Map<String, dynamic>.from(raw)))
+          .where((plan) => plan.isSelectableSubscription)
           .toList();
 
       plans.sort((a, b) {
@@ -1194,6 +1107,17 @@ class _SubscriptionPlan {
       'rancho-trabajo' => 'rancho de trabajo',
       _ => name.toLowerCase(),
     };
+  }
+
+  bool get isSelectableSubscription {
+    final key = code.toLowerCase();
+    if (_planOrder.contains(key)) return true;
+    return !key.endsWith('_unit') &&
+        !key.endsWith('-unit') &&
+        !key.contains('chat_unit') &&
+        !key.contains('video_unit') &&
+        monthlyCents > 0 &&
+        (includedChats > 0 || includedVideos > 0 || petsIncludedDefault > 0);
   }
 
   factory _SubscriptionPlan.fromJson(Map<String, dynamic> json) {

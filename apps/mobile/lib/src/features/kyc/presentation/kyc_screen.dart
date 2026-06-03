@@ -867,11 +867,11 @@ class _KycScreenState extends State<KycScreen> {
       if (!mounted) return;
       final query = '?horses=$horsesTarget';
       postLoginRouteLog(
-        'Routing from KYC quick questions completion to /subscription-loader$query for userId=${user.id}',
+        'Routing from KYC quick questions completion to /subscription-plans$query for userId=${user.id}',
       );
       PostLoginRoutingController.routeTo(
         context,
-        route: '/subscription-loader$query',
+        route: '/subscription-plans$query',
         source: 'kyc-quick-questions-complete',
         userId: user.id,
         reason: 'quick-questions-complete-horses-target',
@@ -1811,7 +1811,7 @@ class _KycProfileScreenState extends State<_KycProfileScreen> {
                             ),
                             const SizedBox(height: 36),
                             const Text(
-                              'call a vet es un servicio exclusivo para México. dónde\nestás ubicado?',
+                              'call a vet es un servicio exclusivo para México. dónde estás ubicado?',
                               style: TextStyle(
                                 color: Colors.white,
                                 fontSize: 15,
@@ -1942,6 +1942,7 @@ class _KycInputField extends StatelessWidget {
       child: TextField(
         controller: controller,
         keyboardType: keyboardType,
+        textAlignVertical: TextAlignVertical.center,
         style: const TextStyle(
           color: Colors.white,
           fontSize: 15,
@@ -1949,6 +1950,8 @@ class _KycInputField extends StatelessWidget {
           fontWeight: FontWeight.w400,
         ),
         decoration: InputDecoration(
+          isDense: true,
+          contentPadding: EdgeInsets.zero,
           border: InputBorder.none,
           hintText: hint,
           suffixIcon: trailingIcon,
@@ -1997,189 +2000,200 @@ class _KycQuickQuestionsScreenState extends State<_KycQuickQuestionsScreen> {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 11),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const SizedBox(height: 24),
-          const SizedBox(
-            width: 351,
-            child: Text(
-              'cuéntanos de ti.',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 20,
-                fontFamily: 'ABC Diatype',
-                fontWeight: FontWeight.w500,
-                height: 1.10,
-              ),
-            ),
-          ),
-          const SizedBox(height: 40),
-          const Text(
-            '¿con cuál te identificas más?',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 16,
-              fontFamily: 'ABC Diatype',
-              fontWeight: FontWeight.w400,
-            ),
-          ),
-          const SizedBox(height: 16),
-          Wrap(
-            spacing: 11,
-            runSpacing: 11,
-            children: [
-              _QuestionChip(
-                label: 'soy dueño',
-                selected: _identityIndex == 0,
-                onTap: () => setState(() => _identityIndex = 0),
-              ),
-              _QuestionChip(
-                label: 'soy caballerango',
-                selected: _identityIndex == 1,
-                onTap: () => setState(() => _identityIndex = 1),
-              ),
-              _QuestionChip(
-                label: 'soy veterinario',
-                selected: _identityIndex == 2,
-                onTap: () => setState(() => _identityIndex = 2),
-              ),
-              _QuestionChip(
-                label: 'soy entrenador',
-                selected: _identityIndex == 3,
-                onTap: () => setState(() => _identityIndex = 3),
-              ),
-              _QuestionChip(
-                label: 'soy dueño o responsable de un rancho',
-                selected: _identityIndex == 4,
-                onTap: () => setState(() => _identityIndex = 4),
-              ),
-            ],
-          ),
-          const SizedBox(height: 36),
-          const Text(
-            '¿para quién vas a usar la cuenta?',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 16,
-              fontFamily: 'ABC Diatype',
-              fontWeight: FontWeight.w400,
-            ),
-          ),
-          const SizedBox(height: 16),
-          Wrap(
-            spacing: 11,
-            runSpacing: 11,
-            children: [
-              _QuestionChip(
-                label: 'solo para mis caballos',
-                selected: _usageIndex == 0,
-                onTap: () => setState(() => _usageIndex = 0),
-              ),
-              _QuestionChip(
-                label: 'para una cuadra / rancho',
-                selected: _usageIndex == 1,
-                onTap: () => setState(() => _usageIndex = 1),
-              ),
-              _QuestionChip(
-                label: 'para clientes',
-                selected: _usageIndex == 2,
-                onTap: () => setState(() => _usageIndex = 2),
-              ),
-            ],
-          ),
-          const SizedBox(height: 36),
-          const Text(
-            '¿cuántos caballos necesitas cubrir?',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 16,
-              fontFamily: 'ABC Diatype',
-              fontWeight: FontWeight.w400,
-            ),
-          ),
-          const SizedBox(height: 16),
-          Wrap(
-            spacing: 11,
-            runSpacing: 11,
-            children: [
-              _QuestionChip(
-                label: '1',
-                selected: _coverageIndex == 0,
-                onTap: () => setState(() => _coverageIndex = 0),
-              ),
-              _QuestionChip(
-                label: '2-5',
-                selected: _coverageIndex == 1,
-                onTap: () => setState(() => _coverageIndex = 1),
-              ),
-              _QuestionChip(
-                label: '6-15',
-                selected: _coverageIndex == 2,
-                onTap: () => setState(() => _coverageIndex = 2),
-              ),
-              _QuestionChip(
-                label: '16-25',
-                selected: _coverageIndex == 3,
-                onTap: () => setState(() => _coverageIndex = 3),
-              ),
-              _QuestionChip(
-                label: '26+',
-                selected: _coverageIndex == 4,
-                onTap: () => setState(() => _coverageIndex = 4),
-              ),
-            ],
-          ),
-          const Spacer(),
-          Padding(
-            padding: const EdgeInsets.only(bottom: 16),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.end,
+      child: CustomScrollView(
+        slivers: [
+          SliverToBoxAdapter(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                const SizedBox(height: 24),
+                const SizedBox(
+                  width: 351,
+                  child: Text(
+                    'cuéntanos de ti.',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontFamily: 'ABC Diatype',
+                      fontWeight: FontWeight.w500,
+                      height: 1.10,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 34),
                 const Text(
-                  'nuestros planes',
-                  textAlign: TextAlign.right,
+                  '¿con cuál te identificas más?',
                   style: TextStyle(
                     color: Colors.white,
-                    fontSize: 13,
+                    fontSize: 16,
                     fontFamily: 'ABC Diatype',
-                    fontWeight: FontWeight.w500,
+                    fontWeight: FontWeight.w400,
                   ),
                 ),
-                const SizedBox(width: 10),
-                SizedBox(
-                  width: 45,
-                  height: 45,
-                  child: ElevatedButton(
-                    onPressed: widget.isSaving
-                        ? null
-                        : () => widget
-                            .onSubmit(
-                              _customerTypeByIndex[_identityIndex],
-                              _horseTargetsByCoverageIndex[_coverageIndex],
-                            ),
-                    style: ElevatedButton.styleFrom(
-                      shape: const CircleBorder(),
-                      padding: EdgeInsets.zero,
-                      backgroundColor: Colors.white,
-                      foregroundColor: const Color(0xFF101010),
-                      disabledBackgroundColor:
-                          Colors.white.withValues(alpha: 0.2),
+                const SizedBox(height: 14),
+                Wrap(
+                  spacing: 11,
+                  runSpacing: 11,
+                  children: [
+                    _QuestionChip(
+                      label: 'soy dueño',
+                      selected: _identityIndex == 0,
+                      onTap: () => setState(() => _identityIndex = 0),
                     ),
-                    child: widget.isSaving
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              valueColor: AlwaysStoppedAnimation<Color>(
-                                  Color(0xFF101010)),
-                            ),
-                          )
-                        : const Icon(Icons.arrow_forward, size: 18),
+                    _QuestionChip(
+                      label: 'soy caballerango',
+                      selected: _identityIndex == 1,
+                      onTap: () => setState(() => _identityIndex = 1),
+                    ),
+                    _QuestionChip(
+                      label: 'soy veterinario',
+                      selected: _identityIndex == 2,
+                      onTap: () => setState(() => _identityIndex = 2),
+                    ),
+                    _QuestionChip(
+                      label: 'soy entrenador',
+                      selected: _identityIndex == 3,
+                      onTap: () => setState(() => _identityIndex = 3),
+                    ),
+                    _QuestionChip(
+                      label: 'soy dueño o responsable de un rancho',
+                      selected: _identityIndex == 4,
+                      onTap: () => setState(() => _identityIndex = 4),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 30),
+                const Text(
+                  '¿para quién vas a usar la cuenta?',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 16,
+                    fontFamily: 'ABC Diatype',
+                    fontWeight: FontWeight.w400,
                   ),
                 ),
+                const SizedBox(height: 14),
+                Wrap(
+                  spacing: 11,
+                  runSpacing: 11,
+                  children: [
+                    _QuestionChip(
+                      label: 'solo para mis caballos',
+                      selected: _usageIndex == 0,
+                      onTap: () => setState(() => _usageIndex = 0),
+                    ),
+                    _QuestionChip(
+                      label: 'para una cuadra / rancho',
+                      selected: _usageIndex == 1,
+                      onTap: () => setState(() => _usageIndex = 1),
+                    ),
+                    _QuestionChip(
+                      label: 'para clientes',
+                      selected: _usageIndex == 2,
+                      onTap: () => setState(() => _usageIndex = 2),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 30),
+                const Text(
+                  '¿cuántos caballos necesitas cubrir?',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 16,
+                    fontFamily: 'ABC Diatype',
+                    fontWeight: FontWeight.w400,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Wrap(
+                  spacing: 11,
+                  runSpacing: 11,
+                  children: [
+                    _QuestionChip(
+                      label: '1',
+                      selected: _coverageIndex == 0,
+                      onTap: () => setState(() => _coverageIndex = 0),
+                    ),
+                    _QuestionChip(
+                      label: '2-5',
+                      selected: _coverageIndex == 1,
+                      onTap: () => setState(() => _coverageIndex = 1),
+                    ),
+                    _QuestionChip(
+                      label: '6-15',
+                      selected: _coverageIndex == 2,
+                      onTap: () => setState(() => _coverageIndex = 2),
+                    ),
+                    _QuestionChip(
+                      label: '16-25',
+                      selected: _coverageIndex == 3,
+                      onTap: () => setState(() => _coverageIndex = 3),
+                    ),
+                    _QuestionChip(
+                      label: '26+',
+                      selected: _coverageIndex == 4,
+                      onTap: () => setState(() => _coverageIndex = 4),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 26),
               ],
+            ),
+          ),
+          SliverFillRemaining(
+            hasScrollBody: false,
+            child: Align(
+              alignment: Alignment.bottomRight,
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: 16),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      'nuestros planes',
+                      textAlign: TextAlign.right,
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        fontFamily: 'ABC Diatype',
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    SizedBox(
+                      width: 45,
+                      height: 45,
+                      child: ElevatedButton(
+                        onPressed: widget.isSaving
+                            ? null
+                            : () => widget.onSubmit(
+                                  _customerTypeByIndex[_identityIndex],
+                                  _horseTargetsByCoverageIndex[_coverageIndex],
+                                ),
+                        style: ElevatedButton.styleFrom(
+                          shape: const CircleBorder(),
+                          padding: EdgeInsets.zero,
+                          backgroundColor: Colors.white,
+                          foregroundColor: const Color(0xFF101010),
+                          disabledBackgroundColor:
+                              Colors.white.withValues(alpha: 0.2),
+                        ),
+                        child: widget.isSaving
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  valueColor: AlwaysStoppedAnimation<Color>(
+                                      Color(0xFF101010)),
+                                ),
+                              )
+                            : const Icon(Icons.arrow_forward, size: 18),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ),
           ),
         ],
@@ -2209,6 +2223,7 @@ class _QuestionChip extends StatelessWidget {
         child: Container(
           constraints: const BoxConstraints(minHeight: 51),
           padding: const EdgeInsets.symmetric(horizontal: 19, vertical: 12),
+          alignment: Alignment.center,
           decoration: ShapeDecoration(
             color:
                 selected ? Colors.white : Colors.white.withValues(alpha: 0.06),
@@ -2223,7 +2238,7 @@ class _QuestionChip extends StatelessWidget {
               fontSize: 13,
               fontFamily: 'ABC Diatype',
               fontWeight: FontWeight.w400,
-              height: 1.85,
+              height: 1.0,
             ),
           ),
         ),

@@ -64,12 +64,15 @@ class AppRouter {
         name: 'subscriptionPlans',
         builder: (context, state) {
           final recommended = state.uri.queryParameters['recommended'];
+          final horses =
+              int.tryParse(state.uri.queryParameters['horses'] ?? '');
           postLoginRouteLog(
             'Router entered /subscription-plans uri=${state.uri} '
-            'recommended=$recommended',
+            'recommended=$recommended horses=$horses',
           );
           return SubscriptionPlansScreen(
             recommendedCode: recommended,
+            horsesTarget: horses,
           );
         },
       ),

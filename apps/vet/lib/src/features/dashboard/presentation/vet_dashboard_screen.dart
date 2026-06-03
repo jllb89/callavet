@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
@@ -666,6 +667,8 @@ class _ActivitySections extends StatelessWidget {
         final upcomingAppointments =
             queue?.upcomingAppointments ?? const <_UpcomingAppointment>[];
         final isLoading = snapshot.connectionState == ConnectionState.waiting;
+        final hasJoinableVideo =
+          activeConsults.any((consult) => consult.canJoinVideo);
         if (!isLoading &&
             activeConsults.isEmpty &&
             upcomingAppointments.isEmpty) {
@@ -675,14 +678,9 @@ class _ActivitySections extends StatelessWidget {
         final children = <Widget>[];
         if (isLoading || activeConsults.isNotEmpty) {
           children.addAll([
-            Text(
-              availableNow ? 'consultas activas:' : 'fuera de guardia:',
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 16,
-                fontFamily: 'ABC Diatype',
-                fontWeight: FontWeight.w400,
-              ),
+            _ActiveConsultsTitle(
+              label: availableNow ? 'consultas activas:' : 'fuera de guardia:',
+              live: availableNow && hasJoinableVideo,
             ),
             const SizedBox(height: 24),
             if (isLoading)
@@ -771,6 +769,49 @@ class _ActiveConsultEventList extends StatelessWidget {
   }
 }
 
+class _ActiveConsultsTitle extends StatelessWidget {
+  const _ActiveConsultsTitle({required this.label, required this.live});
+
+  final String label;
+  final bool live;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (live) ...[
+          Container(
+            width: 9,
+            height: 9,
+            decoration: BoxDecoration(
+              color: const Color(0xFF29D391),
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(
+                  color: const Color(0xFF29D391).withValues(alpha: 0.55),
+                  blurRadius: 12,
+                  spreadRadius: 3,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 9),
+        ],
+        Text(
+          label,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 16,
+            fontFamily: 'ABC Diatype',
+            fontWeight: FontWeight.w400,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class _ActiveConsultEventRow extends StatelessWidget {
   const _ActiveConsultEventRow({
     required this.consult,
@@ -788,90 +829,70 @@ class _ActiveConsultEventRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(14, 13, 10, 13),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.06),
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
+    final action = onJoinVideo != null
+        ? _InlineJoinButton(label: consult.name, onTap: onJoinVideo!)
+        : onOpenChat != null
+            ? _InlineChatButton(label: consult.name, onTap: onOpenChat!)
+            : null;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _ConsultModeBadge(mode: consult.mode),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  consult.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 14,
-                    fontFamily: 'ABC Diatype',
-                    fontWeight: FontWeight.w500,
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              if (action != null)
+                Flexible(flex: 5, child: action)
+              else
+                Flexible(
+                  flex: 5,
+                  child: Text(
+                    consult.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      fontFamily: 'ABC Diatype',
+                      fontWeight: FontWeight.w500,
+                    ),
                   ),
                 ),
-                const SizedBox(height: 4),
-                Text(
-                  consult.startedLabel,
-                  maxLines: 1,
+              const SizedBox(width: 10),
+              Expanded(
+                flex: 4,
+                child: Text(
+                  consult.waitingLabel,
+                  maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.48),
                     fontSize: 11,
                     fontFamily: 'ABC Diatype',
                     fontWeight: FontWeight.w400,
+                    height: 1.15,
                   ),
                 ),
-                const SizedBox(height: 9),
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  children: consult.tags
-                      .map((label) => _ConsultTag(label: label))
-                      .toList(),
-                ),
-              ],
-            ),
+              ),
+              const SizedBox(width: 4),
+              _ConsultOptionsButton(
+                enabled: onEndConsult != null,
+                isEnding: isEnding,
+                onEndConsult: onEndConsult,
+              ),
+            ],
           ),
-          const SizedBox(width: 8),
-          if (onJoinVideo != null) _InlineJoinButton(onTap: onJoinVideo!),
-          if (onOpenChat != null) _InlineChatButton(onTap: onOpenChat!),
-          _ConsultOptionsButton(
-            enabled: onEndConsult != null,
-            isEnding: isEnding,
-            onEndConsult: onEndConsult,
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: consult.tags
+                .map((label) => _ConsultTag(label: label))
+                .toList(),
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _ConsultModeBadge extends StatelessWidget {
-  const _ConsultModeBadge({required this.mode});
-
-  final String mode;
-
-  @override
-  Widget build(BuildContext context) {
-    final isVideo = mode == 'video';
-    return Container(
-      width: 42,
-      height: 42,
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: Icon(
-        isVideo ? Icons.videocam_rounded : Icons.chat_bubble_outline_rounded,
-        color: Colors.black,
-        size: 20,
       ),
     );
   }
@@ -907,8 +928,9 @@ class _ConsultTag extends StatelessWidget {
 }
 
 class _InlineJoinButton extends StatelessWidget {
-  const _InlineJoinButton({required this.onTap});
+  const _InlineJoinButton({required this.label, required this.onTap});
 
+  final String label;
   final VoidCallback onTap;
 
   @override
@@ -917,24 +939,28 @@ class _InlineJoinButton extends StatelessWidget {
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
       child: Container(
-        height: 34,
+        height: 36,
         padding: const EdgeInsets.symmetric(horizontal: 12),
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(999),
         ),
-        child: const Row(
+        child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.videocam_rounded, color: Colors.black, size: 16),
-            SizedBox(width: 6),
-            Text(
-              'entrar',
-              style: TextStyle(
-                color: Colors.black,
-                fontSize: 12,
-                fontFamily: 'ABC Diatype',
-                fontWeight: FontWeight.w500,
+            const Icon(Icons.videocam_rounded, color: Colors.black, size: 16),
+            const SizedBox(width: 7),
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Colors.black,
+                  fontSize: 12,
+                  fontFamily: 'ABC Diatype',
+                  fontWeight: FontWeight.w500,
+                ),
               ),
             ),
           ],
@@ -945,8 +971,9 @@ class _InlineJoinButton extends StatelessWidget {
 }
 
 class _InlineChatButton extends StatelessWidget {
-  const _InlineChatButton({required this.onTap});
+  const _InlineChatButton({required this.label, required this.onTap});
 
+  final String label;
   final VoidCallback onTap;
 
   @override
@@ -955,25 +982,29 @@ class _InlineChatButton extends StatelessWidget {
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
       child: Container(
-        height: 34,
+        height: 36,
         padding: const EdgeInsets.symmetric(horizontal: 12),
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(999),
         ),
-        child: const Row(
+        child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.chat_bubble_outline_rounded,
+            const Icon(Icons.chat_bubble_outline_rounded,
                 color: Colors.black, size: 15),
-            SizedBox(width: 6),
-            Text(
-              'abrir',
-              style: TextStyle(
-                color: Colors.black,
-                fontSize: 12,
-                fontFamily: 'ABC Diatype',
-                fontWeight: FontWeight.w500,
+            const SizedBox(width: 7),
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Colors.black,
+                  fontSize: 12,
+                  fontFamily: 'ABC Diatype',
+                  fontWeight: FontWeight.w500,
+                ),
               ),
             ),
           ],
@@ -1010,23 +1041,40 @@ class _ConsultOptionsButton extends StatelessWidget {
         ),
       );
     }
-    return PopupMenuButton<String>(
-      enabled: enabled,
-      color: const Color(0xFF161616),
-      icon: const Icon(Icons.more_horiz_rounded, color: Colors.white, size: 22),
-      onSelected: (value) {
-        if (value == 'end') onEndConsult?.call();
-      },
-      itemBuilder: (context) => const [
-        PopupMenuItem<String>(
-          value: 'end',
-          child: Text(
-            'finalizar consulta',
-            style: TextStyle(
-                color: Colors.white, fontFamily: 'ABC Diatype', fontSize: 13),
+    return IconButton(
+      onPressed: enabled ? () => _showActions(context) : null,
+      icon: Icon(
+        Icons.more_horiz_rounded,
+        color: enabled ? Colors.white : Colors.white.withValues(alpha: 0.35),
+        size: 22,
+      ),
+      visualDensity: VisualDensity.compact,
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints.tightFor(width: 38, height: 38),
+    );
+  }
+
+  void _showActions(BuildContext context) {
+    showCupertinoModalPopup<void>(
+      context: context,
+      builder: (sheetContext) {
+        return CupertinoActionSheet(
+          actions: [
+            CupertinoActionSheetAction(
+              isDestructiveAction: true,
+              onPressed: () {
+                Navigator.of(sheetContext).pop();
+                onEndConsult?.call();
+              },
+              child: const Text('finalizar consulta'),
+            ),
+          ],
+          cancelButton: CupertinoActionSheetAction(
+            onPressed: () => Navigator.of(sheetContext).pop(),
+            child: const Text('cancelar'),
           ),
-        ),
-      ],
+        );
+      },
     );
   }
 }
@@ -1829,6 +1877,11 @@ class _ActiveConsult {
   String get startedLabel => startedAt == null
       ? 'inicio por confirmar'
       : 'inició ${_formatShortDateTime(startedAt!)}';
+  String get waitingLabel {
+    final started = startedAt;
+    if (started == null) return 'en espera';
+    return 'en espera desde hace ${_formatElapsedSince(started)}';
+  }
 
   List<String> get tags {
     final values = <String>[
@@ -2021,6 +2074,16 @@ String _formatShortDateTime(DateTime value) {
   final hour = value.hour.toString().padLeft(2, '0');
   final minute = value.minute.toString().padLeft(2, '0');
   return '$day/$month $hour:$minute';
+}
+
+String _formatElapsedSince(DateTime value) {
+  final elapsed = DateTime.now().difference(value);
+  if (elapsed.inMinutes < 1) return 'menos de 1 min';
+  if (elapsed.inMinutes < 60) return '${elapsed.inMinutes} min';
+  final hours = elapsed.inHours;
+  final minutes = elapsed.inMinutes.remainder(60);
+  if (minutes == 0) return '$hours h';
+  return '$hours h $minutes min';
 }
 
 String _consultStatusLabel(String value) {

@@ -70,7 +70,7 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
         ..on<LocalTrackUnpublishedEvent>((_) => _handleRoomUpdate())
         ..on<TrackSubscribedEvent>((_) => _handleRoomUpdate())
         ..on<TrackUnsubscribedEvent>((_) => _handleRoomUpdate())
-        ..on<RoomDisconnectedEvent>((_) => _handleRoomUpdate());
+        ..on<RoomDisconnectedEvent>((_) => _handleRoomDisconnected());
       room.addListener(_handleRoomUpdate);
 
       if (!mounted) {
@@ -125,6 +125,13 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
         _cameraEnabled = _hasActiveVideo(localParticipant);
       }
     });
+  }
+
+  void _handleRoomDisconnected() {
+    _handleRoomUpdate();
+    if (!mounted || _ending) return;
+    setState(() => _ending = true);
+    context.go('/home');
   }
 
   Future<void> _toggleMicrophone() async {
