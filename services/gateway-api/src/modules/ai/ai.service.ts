@@ -1,4 +1,4 @@
-import { BadGatewayException, BadRequestException, ForbiddenException, Injectable, ServiceUnavailableException } from '@nestjs/common';
+import { BadGatewayException, BadRequestException, ForbiddenException, GatewayTimeoutException, Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { DbService } from '../db/db.service';
 import { RequestContext } from '../auth/request-context.service';
 import { ValidatorService } from '../config/validator.service';
@@ -553,6 +553,11 @@ export class AiService {
         throw new BadGatewayException(data?.error?.message || `${errorPrefix}_${response.status}`);
       }
       return data;
+    } catch (error: any) {
+      if (error?.name === 'AbortError') {
+        throw new GatewayTimeoutException(`${errorPrefix}_timeout`);
+      }
+      throw error;
     } finally {
       clearTimeout(timer);
     }
@@ -869,6 +874,18 @@ export class AiService {
     ];
   }
 
+  private fallbackIntakeQuestions(latestMessage: string, context: AiChatTurnContext) {
+    const text = this.normalizeCareText(latestMessage);
+    if (/cojea|cojera|cojo|renquea|renguea|claudica|pata|extremidad|casco|tendon/.test(text)) {
+      return [
+        '¿Desde cuándo cojea y fue de golpe o empezó poco a poco?',
+        '¿Apoya la pata o casi no la usa?',
+        '¿Ves hinchazón, calor en la pata o el casco, o alguna herida?',
+      ];
+    }
+    return this.urgentIntakeQuestions(context);
+  }
+
   private shouldAskUrgentIntake(payload: any, latestMessage: string, state: AiChatTurnState) {
     if (state.urgentIntakeAlreadyAsked) return false;
     const text = this.normalizeCareText(latestMessage);
@@ -1174,6 +1191,77 @@ export class AiService {
     };
   }
 
+  private isRecoverableChatTurnError(error: any) {
+    if (error instanceof BadGatewayException || error instanceof GatewayTimeoutException) return true;
+    const name = String(error?.name || '').toLowerCase();
+    const message = String(error?.message || error || '').toLowerCase();
+    return name.includes('abort') ||
+      message.includes('timeout') ||
+      message.includes('aborted') ||
+      message.includes('fetch failed') ||
+      message.includes('ai_provider') ||
+      message.includes('ai_chat_provider');
+  }
+
+  private async chatTurnFallback(input: AiChatTurnInput, context: AiChatTurnContext, error: any) {
+    const messages = this.normalizeChatMessages(input);
+    const latestMessage = messages[messages.length - 1]?.content || '';
+    const state = this.chatTurnState(messages);
+    const toolResults: Array<{ name: string; output: any }> = [];
+    const providerError = String(error?.message || error || 'ai_chat_provider_unavailable').slice(0, 240);
+    const shouldRoute = state.caseDetailSignal || state.explicitCareRequest;
+
+    if (shouldRoute) {
+      const specialty = await this.recommendSpecialtyTool({ symptoms: latestMessage, petId: context.petId }, context);
+      toolResults.push({ name: 'recommend_specialty', output: specialty });
+
+      const specialtyId = specialty?.specialty?.id || null;
+      if (specialtyId) {
+        const vets = await this.findVetsTool({ specialtyId, limit: 3 });
+        toolResults.push({ name: 'find_vets', output: vets });
+      }
+
+      const serviceType = state.explicitCareRequest || /urgente|dolor|cojea|renquea|renguea|no se levanta|respira/.test(this.normalizeCareText(latestMessage))
+        ? 'video'
+        : 'chat';
+      const access = await this.checkServiceAccessTool({ serviceType }, context);
+      toolResults.push({ name: 'check_service_access', output: access });
+    }
+
+    const serviceAccess = this.latestServiceAccessToolResult(toolResults);
+    const serviceType = String(serviceAccess?.serviceType || (shouldRoute ? 'video' : 'chat')).toLowerCase();
+    const questions = shouldRoute ? this.fallbackIntakeQuestions(latestMessage, context) : [];
+    const payload = this.normalizeChatTurnPayload({
+      message: shouldRoute
+        ? [
+            'Lo siento, eso puede requerir revisión pronto. Para orientarte rápido con el veterinario adecuado, respóndeme por favor estas 3 cosas:',
+            ...questions.map((question, index) => `${index + 1}. ${question}`),
+          ].join('\n')
+        : 'Claro, puedo ayudarte. Cuéntame brevemente qué necesitas y si prefieres seguir por chat o videollamada.',
+      urgency: shouldRoute ? 'urgent' : 'routine',
+      recommendedService: shouldRoute ? serviceType : null,
+      actionLabel: shouldRoute ? this.fallbackActionLabel(serviceType, serviceAccess?.canUse === true) : null,
+      safetyEscalation: shouldRoute,
+      intakeQuestions: questions,
+      caseSummary: shouldRoute ? latestMessage.slice(0, 240) : null,
+      handoffSummary: shouldRoute ? latestMessage.slice(0, 360) : null,
+      routingRationale: shouldRoute ? 'Respuesta de respaldo por indisponibilidad temporal del proveedor de IA.' : null,
+      commerceRecommendation: serviceAccess ? this.fallbackCommerceRecommendation(serviceAccess) : 'ask_more',
+    }, context, latestMessage, state, toolResults);
+
+    return {
+      ok: true,
+      provider: 'fallback',
+      model: 'deterministic-chat-turn-fallback',
+      responseId: null,
+      payload,
+      toolResults,
+      context,
+      fallback: true,
+      fallbackReason: providerError,
+    };
+  }
+
   private chatTurnFunctionCallInput(call: AiChatToolCall) {
     return {
       type: 'function_call',
@@ -1277,6 +1365,27 @@ export class AiService {
       });
       return { ...result, eventId };
     } catch (e: any) {
+      if (this.isRecoverableChatTurnError(e)) {
+        try {
+          const fallback = await this.chatTurnFallback(input, context, e);
+          await this.completeEvent(eventId, 'succeeded', {
+            provider: fallback.provider,
+            model: fallback.model,
+            responsePayload: {
+              payload: fallback.payload,
+              toolResults: fallback.toolResults,
+              responseId: null,
+              fallback: true,
+              fallbackReason: fallback.fallbackReason,
+            },
+            errorText: fallback.fallbackReason,
+            latencyMs: Date.now() - startedAt,
+          });
+          return { ...fallback, eventId };
+        } catch (fallbackError: any) {
+          e = fallbackError || e;
+        }
+      }
       await this.completeEvent(eventId, 'failed', {
         errorText: (e?.message || 'ai_chat_turn_failed').slice(0, 1000),
         latencyMs: Date.now() - startedAt,

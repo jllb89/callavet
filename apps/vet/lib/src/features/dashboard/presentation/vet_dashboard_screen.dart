@@ -843,40 +843,45 @@ class _ActiveConsultEventRow extends StatelessWidget {
           Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              if (action != null)
-                Flexible(flex: 5, child: action)
-              else
-                Flexible(
-                  flex: 5,
-                  child: Text(
-                    consult.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 14,
-                      fontFamily: 'ABC Diatype',
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ),
-              const SizedBox(width: 10),
               Expanded(
-                flex: 4,
-                child: Text(
-                  consult.waitingLabel,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.48),
-                    fontSize: 11,
-                    fontFamily: 'ABC Diatype',
-                    fontWeight: FontWeight.w400,
-                    height: 1.15,
-                  ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    if (action != null)
+                      Flexible(child: action)
+                    else
+                      Flexible(
+                        child: Text(
+                          consult.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 14,
+                            fontFamily: 'ABC Diatype',
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    const SizedBox(width: 12),
+                    Flexible(
+                      child: Text(
+                        consult.waitingLabel,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.58),
+                          fontSize: 13,
+                          fontFamily: 'ABC Diatype',
+                          fontWeight: FontWeight.w400,
+                          height: 1.05,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
-              const SizedBox(width: 4),
+              const SizedBox(width: 8),
               _ConsultOptionsButton(
                 enabled: onEndConsult != null,
                 isEnding: isEnding,
@@ -884,13 +889,16 @@ class _ActiveConsultEventRow extends StatelessWidget {
               ),
             ],
           ),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 6,
-            runSpacing: 6,
-            children: consult.tags
-                .map((label) => _ConsultTag(label: label))
-                .toList(),
+          const SizedBox(height: 10),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: consult.tags
+                  .map((label) => _ConsultTag(label: label))
+                  .toList(),
+            ),
           ),
         ],
       ),
@@ -906,8 +914,8 @@ class _ConsultTag extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: 25,
-      padding: const EdgeInsets.symmetric(horizontal: 10),
+      constraints: const BoxConstraints(minHeight: 31, maxWidth: 190),
+      padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 7),
       alignment: Alignment.center,
       decoration: BoxDecoration(
         color: Colors.black.withValues(alpha: 0.45),
@@ -916,11 +924,15 @@ class _ConsultTag extends StatelessWidget {
       ),
       child: Text(
         label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        softWrap: false,
         style: const TextStyle(
           color: Colors.white,
-          fontSize: 11,
+          fontSize: 12,
           fontFamily: 'ABC Diatype',
           fontWeight: FontWeight.w500,
+          height: 1.0,
         ),
       ),
     );
@@ -1879,8 +1891,8 @@ class _ActiveConsult {
       : 'inició ${_formatShortDateTime(startedAt!)}';
   String get waitingLabel {
     final started = startedAt;
-    if (started == null) return 'en espera';
-    return 'en espera desde hace ${_formatElapsedSince(started)}';
+    if (started == null) return 'hace un momento...';
+    return 'hace ${_formatElapsedSince(started)}...';
   }
 
   List<String> get tags {
@@ -2078,12 +2090,15 @@ String _formatShortDateTime(DateTime value) {
 
 String _formatElapsedSince(DateTime value) {
   final elapsed = DateTime.now().difference(value);
-  if (elapsed.inMinutes < 1) return 'menos de 1 min';
-  if (elapsed.inMinutes < 60) return '${elapsed.inMinutes} min';
+  if (elapsed.inMinutes < 1) return 'menos de 1 minuto';
+  if (elapsed.inMinutes == 1) return '1 minuto';
+  if (elapsed.inMinutes < 60) return '${elapsed.inMinutes} minutos';
   final hours = elapsed.inHours;
   final minutes = elapsed.inMinutes.remainder(60);
-  if (minutes == 0) return '$hours h';
-  return '$hours h $minutes min';
+  final hourText = hours == 1 ? '1 hora' : '$hours horas';
+  if (minutes == 0) return hourText;
+  final minuteText = minutes == 1 ? '1 minuto' : '$minutes minutos';
+  return '$hourText $minuteText';
 }
 
 String _consultStatusLabel(String value) {
