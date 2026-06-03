@@ -914,7 +914,7 @@ class _ConsultTag extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      constraints: const BoxConstraints(minHeight: 31, maxWidth: 190),
+      constraints: const BoxConstraints(minHeight: 31),
       padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 7),
       alignment: Alignment.center,
       decoration: BoxDecoration(
@@ -1896,15 +1896,15 @@ class _ActiveConsult {
   }
 
   List<String> get tags {
-    final values = <String>[
-      _consultStatusLabel(status),
-      _consultModeLabel(mode),
-    ];
+    final values = <String>[];
     final lifecycle = lifecycleStatus?.trim().toLowerCase();
     if (lifecycle != null &&
         lifecycle.isNotEmpty &&
         lifecycle != 'pending' &&
-        lifecycle != status.toLowerCase()) {
+        lifecycle != 'waiting' &&
+        lifecycle != 'live' &&
+        lifecycle != status.toLowerCase() &&
+        lifecycle != mode.toLowerCase()) {
       values.add(lifecycle.replaceAll('_', ' '));
     }
     final priorityLabel = _consultPriorityLabel(priority);
@@ -2099,21 +2099,6 @@ String _formatElapsedSince(DateTime value) {
   if (minutes == 0) return hourText;
   final minuteText = minutes == 1 ? '1 minuto' : '$minutes minutos';
   return '$hourText $minuteText';
-}
-
-String _consultStatusLabel(String value) {
-  final normalized = value.trim().toLowerCase();
-  if (normalized == 'active') return 'activa';
-  if (normalized == 'completed') return 'completada';
-  if (normalized == 'canceled') return 'cancelada';
-  return normalized.isEmpty ? 'activa' : normalized.replaceAll('_', ' ');
-}
-
-String _consultModeLabel(String value) {
-  final normalized = value.trim().toLowerCase();
-  if (normalized == 'video') return 'video';
-  if (normalized == 'chat') return 'chat';
-  return normalized.isEmpty ? 'consulta' : normalized.replaceAll('_', ' ');
 }
 
 String? _consultPriorityLabel(String? value) {

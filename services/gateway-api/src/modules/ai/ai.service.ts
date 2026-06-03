@@ -986,7 +986,7 @@ export class AiService {
           message || 'Esto puede requerir valoración veterinaria hoy.',
           'Para valorar urgencia y dejarle buen contexto al veterinario, respóndeme rápido:',
           ...questions.map((question: string, index: number) => `${index + 1}. ${question}`),
-        ].join('\n\n');
+        ].join('\n');
       }
       if (!normalized.actionLabel || /resumen/i.test(String(normalized.actionLabel))) {
         normalized.actionLabel = 'Responder preguntas de urgencia';

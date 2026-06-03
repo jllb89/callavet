@@ -2054,17 +2054,21 @@ String _readableAssistantText(String text) {
   formatted = formatted.replaceAll(RegExp(r'\n[ \t]+'), '\n');
   formatted = formatted.replaceAll(RegExp(r'\n{3,}'), '\n\n');
   formatted = formatted.replaceAllMapped(
-    RegExp(r'(:)\s+(\d+\.\s)'),
+    RegExp(r'(:)\s+(\d+[.)]\s)'),
     (match) => '${match[1]}\n${match[2]}',
   );
   formatted = formatted.replaceAllMapped(
-    RegExp(r'([^\n])\n(\d+\.\s)'),
+    RegExp(r'([^\n])\n+(\d+[.)]\s)'),
     (match) => '${match[1]}\n${match[2]}',
   );
   formatted = formatted.replaceAllMapped(
     RegExp(
         r'([.!?])\s+(?=(Te recomiendo|Para |Si ves|Si empeora|Mientras|Respóndeme|¿))'),
     (match) => '${match[1]}\n\n',
+  );
+  formatted = formatted.replaceAllMapped(
+    RegExp(r'\n{2,}(\d+[.)]\s)'),
+    (match) => '\n${match[1]}',
   );
   return formatted;
 }
