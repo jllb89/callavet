@@ -83,11 +83,11 @@ class _VetVideoCallScreenState extends State<VetVideoCallScreen> {
       });
 
       await room.connect(url, token);
-      await _publishInitialTracks(room);
+      final mediaWarning = await _publishInitialTracks(room);
       if (!mounted) return;
       setState(() {
         _connecting = false;
-        _error = null;
+        _error = mediaWarning;
         _micEnabled = _hasActiveAudio(room.localParticipant);
         _cameraEnabled = _hasActiveVideo(room.localParticipant);
       });
@@ -100,17 +100,21 @@ class _VetVideoCallScreenState extends State<VetVideoCallScreen> {
     }
   }
 
-  Future<void> _publishInitialTracks(Room room) async {
-    try {
-      await room.localParticipant?.setCameraEnabled(true);
-    } catch (error) {
-      debugPrint('[VetVideo] Camera publish failed: $error');
-    }
+  Future<String?> _publishInitialTracks(Room room) async {
+    final warnings = <String>[];
     try {
       await room.localParticipant?.setMicrophoneEnabled(true);
     } catch (error) {
       debugPrint('[VetVideo] Microphone publish failed: $error');
+      warnings.add('No pude activar el microfono. Revisa permisos de audio.');
     }
+    try {
+      await room.localParticipant?.setCameraEnabled(true);
+    } catch (error) {
+      debugPrint('[VetVideo] Camera publish failed: $error');
+      warnings.add('No pude activar la camara. Puedes continuar con audio o intentar activarla de nuevo.');
+    }
+    return warnings.isEmpty ? null : warnings.join(' ');
   }
 
   void _handleRoomUpdate() {
@@ -127,8 +131,11 @@ class _VetVideoCallScreenState extends State<VetVideoCallScreen> {
   void _handleRoomDisconnected() {
     _handleRoomUpdate();
     if (!mounted || _ending) return;
-    setState(() => _ending = true);
-    context.go('/dashboard');
+    setState(() {
+      _connecting = false;
+      _room = null;
+      _error = 'La videollamada se desconecto. Puedes volver e intentarlo otra vez.';
+    });
   }
 
   Future<void> _toggleMicrophone() async {
@@ -168,7 +175,12 @@ class _VetVideoCallScreenState extends State<VetVideoCallScreen> {
     if (participant == null) return;
     final track = _localCameraTrack(participant);
     if (track == null) {
-      await participant.setCameraEnabled(true);
+      try {
+        await participant.setCameraEnabled(true);
+      } catch (error) {
+        if (!mounted) return;
+        setState(() => _error = 'No pude activar la camara: $error');
+      }
       return;
     }
     final nextPosition = _cameraPosition == CameraPosition.front ? CameraPosition.back : CameraPosition.front;
@@ -207,7 +219,8 @@ class _VetVideoCallScreenState extends State<VetVideoCallScreen> {
   }
 
   Future<Map<String, dynamic>> _createVideoRoom(String sessionId) {
-    return _postGatewayJson('/video/rooms', {'sessionId': sessionId});
+    return _postGatewayJson(
+        '/video/rooms', {'sessionId': sessionId, 'participantRole': 'vet'});
   }
 
   Future<void> _endRoom(String roomName) async {

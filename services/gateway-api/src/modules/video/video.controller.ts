@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Headers, HttpException, HttpStatus, NotFoundException, Param, Post, Req, UnauthorizedException, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, ForbiddenException, Headers, HttpException, HttpStatus, NotFoundException, Param, Post, Req, UnauthorizedException, UseGuards } from '@nestjs/common';
 import type { Request } from 'express';
 import { AuthGuard } from '../auth/auth.guard';
 import { EndpointRateLimitGuard } from '../rate-limit/endpoint-rate-limit.guard';
@@ -176,8 +176,27 @@ export class VideoController {
     });
   }
 
-  private resolveParticipantRole(session: { user_id: string | null; vet_id: string | null }): LiveKitParticipantRole {
+  private normalizeRequestedParticipantRole(value: unknown): LiveKitParticipantRole | null {
+    const role = String(value || '').trim().toLowerCase();
+    if (role === 'owner' || role === 'vet' || role === 'admin') return role;
+    return null;
+  }
+
+  private resolveParticipantRole(session: { user_id: string | null; vet_id: string | null }, requestedRole?: unknown): LiveKitParticipantRole {
     const userId = this.rc.requireUuidUserId();
+    const requested = this.normalizeRequestedParticipantRole(requestedRole);
+    if (requested === 'owner') {
+      if (session.user_id === userId) return 'owner';
+      throw new ForbiddenException('video_owner_role_not_allowed');
+    }
+    if (requested === 'vet') {
+      if (session.vet_id === userId) return 'vet';
+      throw new ForbiddenException('video_vet_role_not_allowed');
+    }
+    if (requested === 'admin') {
+      if (this.rc.isAdmin) return 'admin';
+      throw new ForbiddenException('video_admin_role_not_allowed');
+    }
     if (session.vet_id === userId) return 'vet';
     if (session.user_id === userId) return 'owner';
     if (this.rc.isAdmin) return 'admin';
@@ -460,13 +479,13 @@ export class VideoController {
   @Post('rooms')
   @UseGuards(AuthGuard, EndpointRateLimitGuard)
   @RateLimit({ key: 'video.rooms.create', limit: 10, windowMs: 60_000 })
-  async createRoom(@Body() body: { sessionId?: string }) {
+  async createRoom(@Body() body: { sessionId?: string; participantRole?: string; role?: string }) {
     const sessionId = (body?.sessionId || '').toString().trim();
     if (!sessionId) throw new BadRequestException('sessionId is required');
     this.validator.validateUUID(sessionId, 'sessionId');
     const session = await this.getAuthorizedVideoSession(sessionId);
     this.assertVideoSessionCanJoin(session);
-    const role = this.resolveParticipantRole(session);
+    const role = this.resolveParticipantRole(session, body?.participantRole || body?.role);
     const consumptionId = await this.ensureVideoEntitlementReservation(session, role);
     const userId = this.rc.requireUuidUserId();
     const roomName = this.livekit.roomNameForSession(sessionId);

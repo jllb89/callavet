@@ -86,11 +86,11 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
       });
 
       await room.connect(url, token);
-      await _publishInitialTracks(room);
+      final mediaWarning = await _publishInitialTracks(room);
       if (!mounted) return;
       setState(() {
         _connecting = false;
-        _error = null;
+        _error = mediaWarning;
         _micEnabled = _hasActiveAudio(room.localParticipant);
         _cameraEnabled = _hasActiveVideo(room.localParticipant);
       });
@@ -103,17 +103,21 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
     }
   }
 
-  Future<void> _publishInitialTracks(Room room) async {
-    try {
-      await room.localParticipant?.setCameraEnabled(true);
-    } catch (error) {
-      debugPrint('[VideoCall] Camera publish failed: $error');
-    }
+  Future<String?> _publishInitialTracks(Room room) async {
+    final warnings = <String>[];
     try {
       await room.localParticipant?.setMicrophoneEnabled(true);
     } catch (error) {
       debugPrint('[VideoCall] Microphone publish failed: $error');
+      warnings.add('No pude activar el microfono. Revisa permisos de audio.');
     }
+    try {
+      await room.localParticipant?.setCameraEnabled(true);
+    } catch (error) {
+      debugPrint('[VideoCall] Camera publish failed: $error');
+      warnings.add('No pude activar la camara. Puedes continuar con audio o intentar activarla de nuevo.');
+    }
+    return warnings.isEmpty ? null : warnings.join(' ');
   }
 
   void _handleRoomUpdate() {
@@ -130,8 +134,11 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
   void _handleRoomDisconnected() {
     _handleRoomUpdate();
     if (!mounted || _ending) return;
-    setState(() => _ending = true);
-    context.go('/home');
+    setState(() {
+      _connecting = false;
+      _room = null;
+      _error = 'La videollamada se desconecto. Puedes volver e intentarlo otra vez.';
+    });
   }
 
   Future<void> _toggleMicrophone() async {
@@ -171,7 +178,12 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
     if (participant == null) return;
     final track = _localCameraTrack(participant);
     if (track == null) {
-      await participant.setCameraEnabled(true);
+      try {
+        await participant.setCameraEnabled(true);
+      } catch (error) {
+        if (!mounted) return;
+        setState(() => _error = 'No pude activar la camara: $error');
+      }
       return;
     }
     final nextPosition = _cameraPosition == CameraPosition.front
@@ -208,7 +220,8 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
   }
 
   Future<Map<String, dynamic>> _createVideoRoom(String sessionId) {
-    return _postGatewayJson('/video/rooms', {'sessionId': sessionId});
+    return _postGatewayJson(
+        '/video/rooms', {'sessionId': sessionId, 'participantRole': 'owner'});
   }
 
   Future<void> _endRoom(String roomName) async {

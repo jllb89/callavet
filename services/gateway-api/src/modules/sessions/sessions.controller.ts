@@ -50,10 +50,25 @@ export class SessionsController {
       }
       const rows = await this.db.runInTx(async (q) => {
         const { rows } = await q(
-          `select id, user_id, vet_id, pet_id, status, mode, started_at, ended_at
-             from chat_sessions
+          `select s.id,
+                  s.user_id,
+                  s.vet_id,
+                  s.pet_id,
+                  s.specialty_id,
+                  s.priority,
+                  s.status,
+                  s.mode,
+                  s.started_at,
+                  s.ended_at,
+                  p.name as pet_name,
+                  vu.full_name as vet_name,
+                  vs.name as specialty_name
+             from chat_sessions s
+        left join pets p on p.id = s.pet_id
+        left join users vu on vu.id = s.vet_id
+        left join vet_specialties vs on vs.id = s.specialty_id
             where user_id = auth.uid() or vet_id = auth.uid()
-            order by coalesce(started_at, created_at) desc nulls last
+            order by coalesce(s.started_at, s.created_at) desc nulls last
             limit $1 offset $2`,
           [limit, offset]
         );
@@ -71,10 +86,25 @@ export class SessionsController {
       if (this.db.isStub) return { id: sessionId, status: 'active' } as any;
       const row = await this.db.runInTx(async (q) => {
         const { rows } = await q(
-          `select id, user_id, vet_id, pet_id, status, mode, started_at, ended_at
-             from chat_sessions
-            where id = $1
-              and (user_id = auth.uid() or vet_id = auth.uid())
+          `select s.id,
+                  s.user_id,
+                  s.vet_id,
+                  s.pet_id,
+                  s.specialty_id,
+                  s.priority,
+                  s.status,
+                  s.mode,
+                  s.started_at,
+                  s.ended_at,
+                  p.name as pet_name,
+                  vu.full_name as vet_name,
+                  vs.name as specialty_name
+             from chat_sessions s
+        left join pets p on p.id = s.pet_id
+        left join users vu on vu.id = s.vet_id
+        left join vet_specialties vs on vs.id = s.specialty_id
+            where s.id = $1
+              and (s.user_id = auth.uid() or s.vet_id = auth.uid())
             limit 1`,
           [sessionId]
         );

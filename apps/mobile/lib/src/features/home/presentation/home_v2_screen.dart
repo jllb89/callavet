@@ -1,8 +1,13 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../../core/config/environment.dart';
 import '../../chat/presentation/chat_screen.dart';
 
 enum _HomeAiPhase { home, fadingOut, prompt, conversation }
@@ -21,6 +26,7 @@ class HomeV2Screen extends StatefulWidget {
 class _HomeV2ScreenState extends State<HomeV2Screen> {
   final _messageCtrl = TextEditingController();
   final _messageFocusNode = FocusNode();
+  final _activeConsults = <_ActiveConsult>[];
   String _firstName = '';
   String? _conversationInitialMessage;
   int _conversationKey = 0;
@@ -30,6 +36,7 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
   void initState() {
     super.initState();
     _loadFirstName();
+    unawaited(_loadActiveConsults());
   }
 
   @override
@@ -37,6 +44,40 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
     _messageCtrl.dispose();
     _messageFocusNode.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadActiveConsults() async {
+    final token = Supabase.instance.client.auth.currentSession?.accessToken;
+    if (token == null || token.isEmpty) return;
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    try {
+      final request = await client.getUrl(
+          Uri.parse('${Environment.apiBaseUrl}/sessions?limit=20'));
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+      final response = await request.close().timeout(const Duration(seconds: 20));
+      final rawBody = await utf8.decoder.bind(response).join();
+      if (response.statusCode < 200 || response.statusCode >= 300) return;
+      final decoded = rawBody.trim().isEmpty ? <String, dynamic>{} : jsonDecode(rawBody);
+      final rows = _asList(_asMap(decoded)?['data']) ?? const [];
+      final active = rows
+          .map(_asMap)
+          .whereType<Map<String, dynamic>>()
+          .map(_ActiveConsult.fromJson)
+          .where((consult) => consult.isActive)
+          .take(3)
+          .toList(growable: false);
+      if (!mounted) return;
+      setState(() {
+        _activeConsults
+          ..clear()
+          ..addAll(active);
+      });
+    } catch (_) {
+      // Home should keep rendering even if session activity cannot load.
+    } finally {
+      client.close(force: true);
+    }
   }
 
   Future<void> _loadFirstName() async {
@@ -138,6 +179,7 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
   Widget build(BuildContext context) {
     final bottomInset = MediaQuery.of(context).padding.bottom;
     final displayName = _firstName.isEmpty ? 'Jorge' : _firstName;
+    final hasActiveConsults = _activeConsults.isNotEmpty;
     final isPrompt = _aiPhase == _HomeAiPhase.prompt;
     final isConversation = _aiPhase == _HomeAiPhase.conversation;
     final isAiActive = isPrompt || isConversation;
@@ -179,11 +221,13 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
                     ),
                   ),
                   const SizedBox(height: 8),
-                  const SizedBox(
+                  SizedBox(
                     width: 340,
                     child: Text(
-                      '¿Cómo podemos asistirte hoy?',
-                      style: TextStyle(
+                      hasActiveConsults
+                          ? 'Esta es tu actividad:'
+                          : '¿Cómo podemos asistirte hoy?',
+                      style: const TextStyle(
                         color: Colors.white,
                         fontSize: 36,
                         fontFamily: 'ABCDiatype',
@@ -206,7 +250,16 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
                       : isPrompt
                           ? _AiSuggestionList(onSelected: _useSuggestion)
                           : _HomeDefaultSection(
-                              visible: _aiPhase == _HomeAiPhase.home),
+                              visible: _aiPhase == _HomeAiPhase.home,
+                              activeConsults: _activeConsults,
+                              onConsultSelected: (consult) {
+                                if (consult.mode == 'video') {
+                                  context.go('/video/${Uri.encodeComponent(consult.id)}');
+                                } else {
+                                  context.go('/chat/${Uri.encodeComponent(consult.id)}');
+                                }
+                              },
+                            ),
                 ),
                 if (!isConversation)
                   _MessageComposer(
@@ -223,6 +276,77 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
       ),
     );
   }
+}
+
+class _ActiveConsult {
+  const _ActiveConsult({
+    required this.id,
+    required this.mode,
+    required this.status,
+    required this.petName,
+    required this.priority,
+    required this.specialtyName,
+  });
+
+  factory _ActiveConsult.fromJson(Map<String, dynamic> json) {
+    return _ActiveConsult(
+      id: json['id']?.toString() ?? '',
+      mode: json['mode']?.toString().toLowerCase() ?? 'chat',
+      status: json['status']?.toString().toLowerCase() ?? '',
+      petName: _cleanLabel(json['pet_name']) ?? _cleanLabel(json['petName']) ?? 'Consulta',
+      priority: _cleanLabel(json['priority']) ?? 'rutina',
+      specialtyName: _cleanLabel(json['specialty_name']) ?? _cleanLabel(json['specialtyName']) ?? 'general',
+    );
+  }
+
+  final String id;
+  final String mode;
+  final String status;
+  final String petName;
+  final String priority;
+  final String specialtyName;
+
+  bool get isActive => id.isNotEmpty &&
+      (status == 'active' || status == 'scheduled') &&
+      (mode == 'chat' || mode == 'video');
+
+  String get priorityLabel {
+    if (priority == 'emergency') return 'urgente';
+    if (priority == 'urgent') return 'urgente';
+    if (priority == 'routine') return 'rutina';
+    return _shortLabel(priority, maxLength: 9);
+  }
+
+  String get specialtyLabel {
+    final normalized = specialtyName.toLowerCase();
+    if (normalized.contains('gastro')) return 'gastro';
+    if (normalized.contains('urgenc')) return 'crítico';
+    if (normalized.contains('general')) return 'general';
+    if (normalized.contains('deport')) return 'sport';
+    if (normalized.contains('cojera') || normalized.contains('ortop')) return 'cojera';
+    return _shortLabel(specialtyName, maxLength: 9).toLowerCase();
+  }
+}
+
+Map<String, dynamic>? _asMap(Object? value) {
+  return value is Map
+      ? value.map((key, val) => MapEntry(key.toString(), val))
+      : null;
+}
+
+List<Object?>? _asList(Object? value) => value is List ? value : null;
+
+String? _cleanLabel(Object? value) {
+  final text = value?.toString().trim();
+  return text == null || text.isEmpty ? null : text;
+}
+
+String _shortLabel(String value, {required int maxLength}) {
+  final normalized = value.trim().replaceAll(RegExp(r'\s+'), ' ');
+  if (normalized.length <= maxLength) return normalized;
+  final first = normalized.split(' ').first.trim();
+  if (first.isNotEmpty && first.length <= maxLength) return first;
+  return normalized.substring(0, maxLength).trim();
 }
 
 class _HomeTopBar extends StatelessWidget {
@@ -325,9 +449,15 @@ class _HomeTopBar extends StatelessWidget {
 }
 
 class _HomeDefaultSection extends StatelessWidget {
-  const _HomeDefaultSection({required this.visible});
+  const _HomeDefaultSection({
+    required this.visible,
+    required this.activeConsults,
+    required this.onConsultSelected,
+  });
 
   final bool visible;
+  final List<_ActiveConsult> activeConsults;
+  final ValueChanged<_ActiveConsult> onConsultSelected;
 
   @override
   Widget build(BuildContext context) {
@@ -335,11 +465,134 @@ class _HomeDefaultSection extends StatelessWidget {
       duration: const Duration(milliseconds: 220),
       curve: Curves.easeOut,
       opacity: visible ? 1 : 0,
-      child: const Column(
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _AiShortcut(),
+          const _AiShortcut(),
+          if (activeConsults.isNotEmpty) ...[
+            const SizedBox(height: 50),
+            const Text(
+              'consultas activas:',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 16,
+                fontFamily: 'ABCDiatype',
+                fontWeight: FontWeight.w400,
+              ),
+            ),
+            const SizedBox(height: 30),
+            _ActiveConsultStrip(
+              consults: activeConsults,
+              onSelected: onConsultSelected,
+            ),
+          ],
         ],
+      ),
+    );
+  }
+}
+
+class _ActiveConsultStrip extends StatelessWidget {
+  const _ActiveConsultStrip({required this.consults, required this.onSelected});
+
+  final List<_ActiveConsult> consults;
+  final ValueChanged<_ActiveConsult> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final consult = consults.first;
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      clipBehavior: Clip.none,
+      child: Row(
+        children: [
+          _ActivePetPill(consult: consult, onTap: () => onSelected(consult)),
+          const SizedBox(width: 14),
+          _ActiveMetaPill(label: consult.priorityLabel),
+          const SizedBox(width: 14),
+          _ActiveMetaPill(label: consult.specialtyLabel),
+        ],
+      ),
+    );
+  }
+}
+
+class _ActivePetPill extends StatelessWidget {
+  const _ActivePetPill({required this.consult, required this.onTap});
+
+  final _ActiveConsult consult;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        height: 51,
+        constraints: const BoxConstraints(minWidth: 111, maxWidth: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(40),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              consult.mode == 'video'
+                  ? Icons.videocam_rounded
+                  : Icons.chat_bubble_outline_rounded,
+              color: Colors.black,
+              size: 17,
+            ),
+            const SizedBox(width: 14),
+            Flexible(
+              child: Text(
+                consult.petName,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Colors.black,
+                  fontSize: 13,
+                  fontFamily: 'ABCDiatype',
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ActiveMetaPill extends StatelessWidget {
+  const _ActiveMetaPill({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 30,
+      constraints: const BoxConstraints(minWidth: 68, maxWidth: 116),
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: Colors.black,
+        borderRadius: BorderRadius.circular(40),
+      ),
+      child: Text(
+        label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 13,
+          fontFamily: 'ABCDiatype',
+          fontWeight: FontWeight.w500,
+        ),
       ),
     );
   }
