@@ -1141,6 +1141,12 @@ class _MessageBubble extends StatelessWidget {
     final fixedCap =
         isUser ? (embedded ? 300.0 : 350.0) : (embedded ? 330.0 : 380.0);
     final maxBubbleWidth = math.min(viewportWidth * widthFactor, fixedCap);
+    const messageTextStyle = TextStyle(
+      color: textColor,
+      fontSize: 15,
+      fontWeight: FontWeight.w400,
+      height: 1.34,
+    );
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 14),
@@ -1167,17 +1173,13 @@ class _MessageBubble extends StatelessWidget {
                 child: Padding(
                   padding:
                       const EdgeInsets.symmetric(horizontal: 18, vertical: 13),
-                  child: Text(
-                    isUser
-                        ? message.text
-                        : _readableAssistantText(message.text),
-                    style: const TextStyle(
-                      color: textColor,
-                      fontSize: 15,
-                      fontWeight: FontWeight.w400,
-                      height: 1.34,
-                    ),
-                  ),
+                  child: isUser
+                      ? Text(message.text, style: messageTextStyle)
+                      : _AssistantMessageContent(
+                          text: message.text,
+                          payload: message.result?.payload,
+                          style: messageTextStyle,
+                        ),
                 ),
               ),
               if (!isUser &&
@@ -1198,6 +1200,163 @@ class _MessageBubble extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _AssistantMessageContent extends StatelessWidget {
+  const _AssistantMessageContent({
+    required this.text,
+    required this.payload,
+    required this.style,
+  });
+
+  final String text;
+  final _AiChatPayload? payload;
+  final TextStyle style;
+
+  @override
+  Widget build(BuildContext context) {
+    final blocks = payload?.hasDisplayBlocks == true
+        ? payload!.displayBlocks
+        : const <_AiMessageBlock>[];
+    if (blocks.isEmpty) {
+      return Text(_readableAssistantText(text), style: style);
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (var index = 0; index < blocks.length; index++)
+          Padding(
+            padding: EdgeInsets.only(
+                bottom: index == blocks.length - 1 ? 0 : 8),
+            child: _AssistantMessageBlockView(
+              block: blocks[index],
+              style: style,
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _AssistantMessageBlockView extends StatelessWidget {
+  const _AssistantMessageBlockView({
+    required this.block,
+    required this.style,
+  });
+
+  final _AiMessageBlock block;
+  final TextStyle style;
+
+  @override
+  Widget build(BuildContext context) {
+    switch (block.type) {
+      case _AiMessageBlockType.paragraph:
+        return Text(block.text ?? '', style: style);
+      case _AiMessageBlockType.safetyNote:
+        return Text(
+          block.text ?? '',
+          style: style.copyWith(
+            color: style.color?.withValues(alpha: 0.92),
+            fontWeight: FontWeight.w500,
+          ),
+        );
+      case _AiMessageBlockType.numberedList:
+        return _AssistantMessageList(
+          items: block.items,
+          numbered: true,
+          style: style,
+        );
+      case _AiMessageBlockType.bulletList:
+        return _AssistantMessageList(
+          items: block.items,
+          numbered: false,
+          style: style,
+        );
+    }
+  }
+}
+
+class _AssistantMessageList extends StatelessWidget {
+  const _AssistantMessageList({
+    required this.items,
+    required this.numbered,
+    required this.style,
+  });
+
+  final List<String> items;
+  final bool numbered;
+  final TextStyle style;
+
+  @override
+  Widget build(BuildContext context) {
+    final markerStyle = style.copyWith(
+      color: style.color?.withValues(alpha: 0.68),
+      fontWeight: FontWeight.w500,
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (var index = 0; index < items.length; index++)
+          Padding(
+            padding: EdgeInsets.only(
+                bottom: index == items.length - 1 ? 0 : 6),
+            child: _AssistantMessageListRow(
+              marker: numbered ? '${index + 1}.' : null,
+              text: items[index],
+              style: style,
+              markerStyle: markerStyle,
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _AssistantMessageListRow extends StatelessWidget {
+  const _AssistantMessageListRow({
+    required this.marker,
+    required this.text,
+    required this.style,
+    required this.markerStyle,
+  });
+
+  final String? marker;
+  final String text;
+  final TextStyle style;
+  final TextStyle markerStyle;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 24,
+          child: marker == null
+              ? Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Align(
+                    alignment: Alignment.topRight,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: (style.color ?? Colors.white)
+                            .withValues(alpha: 0.68),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const SizedBox(width: 4, height: 4),
+                    ),
+                  ),
+                )
+              : Text(marker!, textAlign: TextAlign.right, style: markerStyle),
+        ),
+        const SizedBox(width: 8),
+        Expanded(child: Text(text, style: style)),
+      ],
     );
   }
 }
@@ -1818,9 +1977,51 @@ class _AiChatTurnResult {
   }
 }
 
+enum _AiMessageBlockType { paragraph, numberedList, bulletList, safetyNote }
+
+class _AiMessageBlock {
+  const _AiMessageBlock({
+    required this.type,
+    required this.text,
+    required this.items,
+  });
+
+  static _AiMessageBlock? fromJson(Map<String, dynamic> json) {
+    final type = switch (json['type']?.toString()) {
+      'paragraph' => _AiMessageBlockType.paragraph,
+      'numbered_list' => _AiMessageBlockType.numberedList,
+      'bullet_list' => _AiMessageBlockType.bulletList,
+      'safety_note' => _AiMessageBlockType.safetyNote,
+      _ => null,
+    };
+    if (type == null) return null;
+
+    final items = (_asList(json['items']) ?? const [])
+        .map((item) => item?.toString().trim() ?? '')
+        .where((item) => item.isNotEmpty)
+        .toList(growable: false);
+    if (type == _AiMessageBlockType.numberedList ||
+        type == _AiMessageBlockType.bulletList) {
+      if (items.isEmpty) return null;
+      return _AiMessageBlock(type: type, text: null, items: items);
+    }
+
+    final text = json['text']?.toString().trim();
+    if (text == null || text.isEmpty) return null;
+    return _AiMessageBlock(
+        type: type, text: text, items: const <String>[]);
+  }
+
+  final _AiMessageBlockType type;
+  final String? text;
+  final List<String> items;
+}
+
 class _AiChatPayload {
   const _AiChatPayload({
     required this.message,
+    required this.formatVersion,
+    required this.displayBlocks,
     required this.urgency,
     required this.recommendedService,
     required this.actionLabel,
@@ -1828,9 +2029,18 @@ class _AiChatPayload {
   });
 
   factory _AiChatPayload.fromJson(Map<String, dynamic> json) {
+    final formatVersion = _toInt(json['formatVersion']) ?? 0;
+    final displayBlocks = (_asList(json['displayBlocks']) ?? const [])
+        .map(_asMap)
+        .whereType<Map<String, dynamic>>()
+        .map(_AiMessageBlock.fromJson)
+        .whereType<_AiMessageBlock>()
+        .toList(growable: false);
     return _AiChatPayload(
       message: json['message']?.toString() ??
           'Te ayudo a encontrar el veterinario adecuado.',
+      formatVersion: formatVersion,
+      displayBlocks: displayBlocks,
       urgency: json['urgency']?.toString() ?? 'routine',
       recommendedService: json['recommendedService']?.toString(),
       actionLabel: json['actionLabel']?.toString(),
@@ -1839,10 +2049,14 @@ class _AiChatPayload {
   }
 
   final String message;
+  final int formatVersion;
+  final List<_AiMessageBlock> displayBlocks;
   final String urgency;
   final String? recommendedService;
   final String? actionLabel;
   final bool safetyEscalation;
+
+  bool get hasDisplayBlocks => formatVersion == 1 && displayBlocks.isNotEmpty;
 }
 
 class _SubscriptionUpgradeOption {

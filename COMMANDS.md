@@ -117,3 +117,5 @@ cd /Users/jorge/Desktop/call-a-vet/apps/mobile && flutter run -d 014D86FE-511C-4
 
 Run vet app on simulator B (terminal 2)
 cd /Users/jorge/Desktop/call-a-vet/apps/vet && flutter run -d D344C088-92BE-4393-B3A5-3E786FD17498 --dart-define=SUPABASE_URL=https://oajnhvizipicnypdxcrb.supabase.co --dart-define=SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9ham5odml6aXBpY255cGR4Y3JiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjE2MDc5MzcsImV4cCI6MjA3NzE4MzkzN30.aSAu4SZVrZjxIyik50rraOmm7Ni2Wk7tFdLXDE_Jelc --dart-define=API_BASE_URL=https://cav-gateway-staging-ugvx.onrender.com --dart-define=DEV_FORCE_SIGNOUT_ON_START=true --dart-define=BYPASS_OTP=false --dart-define=VET_AUTH_DEBUG=true
+
+pendientes: badges 

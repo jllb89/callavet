@@ -1,0 +1,433 @@
+{
+  "version": 1,
+  "createdFor": "AI_CHAT_RESPONSE_FORMATTING_ROADMAP Phase 0",
+  "fixtureLocationDecision": {
+    "chosenLocation": "docs/ai-chat-response-formatting-fixtures.json",
+    "reason": "Phase 0 is a documentation and baseline pass. Keeping fixtures in docs makes the expected contract reviewable before adding gateway tests or smoke scripts.",
+    "futureUse": [
+      "copy cases into a gateway formatter unit test once the normalizer exists",
+      "copy high-value cases into a jq-backed /ai/chat/turn smoke script",
+      "use expectedPayload.displayBlocks as the renderer contract for mobile widget tests"
+    ]
+  },
+  "dataSafety": {
+    "syntheticOnly": true,
+    "containsUserIds": false,
+    "containsEmails": false,
+    "containsPhoneNumbers": false,
+    "containsTokens": false,
+    "notes": "All horse names, symptoms, subscriptions, and vet-routing details are synthetic fixture data."
+  },
+  "knownFailureModes": [
+    {
+      "id": "collapsed_numbering",
+      "description": "The assistant places numbered questions in one paragraph instead of separate renderable rows.",
+      "coveredBy": [
+        "urgent_appetite_colic_collapsed_numbering",
+        "lameness_line_skip_markdown"
+      ]
+    },
+    {
+      "id": "extra_line_skipping",
+      "description": "The visible message includes excessive blank lines before, between, or after list items.",
+      "coveredBy": [
+        "lameness_line_skip_markdown",
+        "entitlement_exhausted_markdown_options"
+      ]
+    },
+    {
+      "id": "markdown_leakage",
+      "description": "Markdown markers such as bold text or bullets leak into the app bubble.",
+      "coveredBy": [
+        "lameness_line_skip_markdown",
+        "entitlement_exhausted_markdown_options"
+      ]
+    },
+    {
+      "id": "duplicate_urgent_questions",
+      "description": "Urgent intake questions appear both in the message body and the intakeQuestions array, or are asked again after the user already answered them.",
+      "coveredBy": [
+        "urgent_appetite_colic_duplicate_questions",
+        "post_intake_routing_reasks_questions"
+      ]
+    },
+    {
+      "id": "invented_symptom_formatting",
+      "description": "A generic vet request gets expanded into a formatted clinical symptom list the user did not provide.",
+      "coveredBy": [
+        "generic_vet_request_invented_symptoms"
+      ]
+    },
+    {
+      "id": "run_on_service_options",
+      "description": "Service or commerce options are returned as a long run-on sentence or Markdown list instead of structured bullet rows.",
+      "coveredBy": [
+        "entitlement_exhausted_markdown_options",
+        "post_intake_routing_reasks_questions"
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "id": "urgent_appetite_colic_collapsed_numbering",
+      "flow": "urgent appetite/colic-like intake",
+      "purpose": "Capture collapsed numbered urgent questions in a single message string.",
+      "input": {
+        "latestUserMessage": "Mi caballo Nube no quiere comer desde antier y se mira los flancos.",
+        "priorMessages": []
+      },
+      "badOutput": "Esto puede ser urgente. Para valorar la urgencia y dejarle buen contexto al veterinario, responde: 1. Tiene dolor abdominal, se mira los flancos, patea el suelo, se echa o rueda? 2. Ha tomado agua y ha hecho heces desde que dejo de comer? 3. Tiene fiebre, encias palidas, respiracion agitada o esta muy decaido?",
+      "failureModes": [
+        "collapsed_numbering"
+      ],
+      "expectedPayload": {
+        "message": "Esto puede requerir valoracion veterinaria hoy.\n1. Tiene dolor abdominal, se mira los flancos, patea el suelo, se echa o rueda?\n2. Ha tomado agua y ha hecho heces desde que dejo de comer?\n3. Tiene fiebre, encias palidas, respiracion agitada o esta muy decaido?",
+        "formatVersion": 1,
+        "displayBlocks": [
+          {
+            "type": "paragraph",
+            "text": "Esto puede requerir valoracion veterinaria hoy.",
+            "items": []
+          },
+          {
+            "type": "numbered_list",
+            "text": null,
+            "items": [
+              "Tiene dolor abdominal, se mira los flancos, patea el suelo, se echa o rueda?",
+              "Ha tomado agua y ha hecho heces desde que dejo de comer?",
+              "Tiene fiebre, encias palidas, respiracion agitada o esta muy decaido?"
+            ]
+          }
+        ],
+        "urgency": "urgent",
+        "recommendedService": null,
+        "actionLabel": "Responder preguntas de urgencia",
+        "safetyEscalation": true,
+        "intakeQuestions": [
+          "Tiene dolor abdominal, se mira los flancos, patea el suelo, se echa o rueda?",
+          "Ha tomado agua y ha hecho heces desde que dejo de comer?",
+          "Tiene fiebre, encias palidas, respiracion agitada o esta muy decaido?"
+        ],
+        "caseSummary": "Nube no quiere comer desde antier y se mira los flancos.",
+        "handoffSummary": "Caballo Nube con anorexia de varios dias y posible dolor abdominal; faltan datos de agua, heces, fiebre, mucosas y respiracion.",
+        "routingRationale": "Apetito ausente por mas de 24 horas con signos compatibles con dolor abdominal requiere descartar urgencia.",
+        "commerceRecommendation": "ask_more"
+      },
+      "legacyFallbackAssertions": {
+        "mustContain": [
+          "\n1. Tiene dolor abdominal",
+          "\n2. Ha tomado agua",
+          "\n3. Tiene fiebre"
+        ],
+        "mustNotContain": [
+          "**",
+          "\n\n\n",
+          " 1. Tiene dolor abdominal"
+        ]
+      }
+    },
+    {
+      "id": "urgent_appetite_colic_duplicate_questions",
+      "flow": "urgent appetite/colic-like intake",
+      "purpose": "Capture duplicate urgent questions across message text and intakeQuestions.",
+      "input": {
+        "latestUserMessage": "Mi yegua lleva dos dias sin comer y esta muy inquieta.",
+        "priorMessages": []
+      },
+      "badOutput": "Para valorar urgencia, responde estas preguntas:\n\n1. Ha hecho heces?\n2. Ha tomado agua?\n3. Tiene fiebre?\n\nTambien necesito saber: 1. Ha hecho heces? 2. Ha tomado agua? 3. Tiene fiebre?",
+      "failureModes": [
+        "duplicate_urgent_questions",
+        "extra_line_skipping"
+      ],
+      "expectedPayload": {
+        "message": "Esto puede requerir valoracion veterinaria hoy.\n1. Ha hecho heces desde que dejo de comer?\n2. Ha tomado agua con normalidad?\n3. Tiene fiebre, encias palidas, respiracion agitada o esta muy decaida?",
+        "formatVersion": 1,
+        "displayBlocks": [
+          {
+            "type": "paragraph",
+            "text": "Esto puede requerir valoracion veterinaria hoy.",
+            "items": []
+          },
+          {
+            "type": "numbered_list",
+            "text": null,
+            "items": [
+              "Ha hecho heces desde que dejo de comer?",
+              "Ha tomado agua con normalidad?",
+              "Tiene fiebre, encias palidas, respiracion agitada o esta muy decaida?"
+            ]
+          }
+        ],
+        "urgency": "urgent",
+        "recommendedService": null,
+        "actionLabel": "Responder preguntas de urgencia",
+        "safetyEscalation": true,
+        "intakeQuestions": [
+          "Ha hecho heces desde que dejo de comer?",
+          "Ha tomado agua con normalidad?",
+          "Tiene fiebre, encias palidas, respiracion agitada o esta muy decaida?"
+        ],
+        "caseSummary": "Yegua con dos dias sin comer e inquietud.",
+        "handoffSummary": "Yegua con anorexia de dos dias e inquietud; faltan datos de heces, agua, fiebre, mucosas y respiracion.",
+        "routingRationale": "La duracion del apetito ausente e inquietud justifican preguntas de urgencia antes de enrutar.",
+        "commerceRecommendation": "ask_more"
+      },
+      "legacyFallbackAssertions": {
+        "mustContain": [
+          "\n1. Ha hecho heces",
+          "\n2. Ha tomado agua",
+          "\n3. Tiene fiebre"
+        ],
+        "mustNotContain": [
+          "Tambien necesito saber",
+          "\n\n\n",
+          "1. Ha hecho heces? 2. Ha tomado agua?"
+        ]
+      }
+    },
+    {
+      "id": "lameness_line_skip_markdown",
+      "flow": "lameness intake",
+      "purpose": "Capture Markdown leakage, extra blank lines, and numbered lameness questions.",
+      "input": {
+        "latestUserMessage": "Mi caballo empezo a cojear de la mano derecha despues de entrenar.",
+        "priorMessages": []
+      },
+      "badOutput": "**Puede necesitar revision veterinaria.**\n\n\nPara orientar mejor:\n\n1) Desde cuando cojea y fue de golpe o poco a poco?\n\n2) Apoya la pata o casi no la usa?\n\n3) Ves hinchazon, calor, herida o problema en el casco?",
+      "failureModes": [
+        "markdown_leakage",
+        "extra_line_skipping",
+        "collapsed_numbering"
+      ],
+      "expectedPayload": {
+        "message": "Puede necesitar revision veterinaria.\n1. Desde cuando cojea y fue de golpe o poco a poco?\n2. Apoya la pata o casi no la usa?\n3. Ves hinchazon, calor, herida o problema en el casco?",
+        "formatVersion": 1,
+        "displayBlocks": [
+          {
+            "type": "paragraph",
+            "text": "Puede necesitar revision veterinaria.",
+            "items": []
+          },
+          {
+            "type": "numbered_list",
+            "text": null,
+            "items": [
+              "Desde cuando cojea y fue de golpe o poco a poco?",
+              "Apoya la pata o casi no la usa?",
+              "Ves hinchazon, calor, herida o problema en el casco?"
+            ]
+          }
+        ],
+        "urgency": "urgent",
+        "recommendedService": null,
+        "actionLabel": "Responder preguntas de urgencia",
+        "safetyEscalation": true,
+        "intakeQuestions": [
+          "Desde cuando cojea y fue de golpe o poco a poco?",
+          "Apoya la pata o casi no la usa?",
+          "Ves hinchazon, calor, herida o problema en el casco?"
+        ],
+        "caseSummary": "Caballo con cojera de mano derecha despues de entrenar.",
+        "handoffSummary": "Caballo con cojera de mano derecha posterior a entrenamiento; faltan datos de inicio, apoyo, hinchazon, calor, herida y casco.",
+        "routingRationale": "Cojera posterior a entrenamiento requiere descartar dolor severo, lesion o problema de casco antes de elegir servicio.",
+        "commerceRecommendation": "ask_more"
+      },
+      "legacyFallbackAssertions": {
+        "mustContain": [
+          "Puede necesitar revision veterinaria.",
+          "\n1. Desde cuando cojea",
+          "\n2. Apoya la pata",
+          "\n3. Ves hinchazon"
+        ],
+        "mustNotContain": [
+          "**",
+          "1)",
+          "\n\n\n"
+        ]
+      }
+    },
+    {
+      "id": "generic_vet_request_invented_symptoms",
+      "flow": "generic vet request",
+      "purpose": "Capture generic requests that should not become formatted clinical triage lists.",
+      "input": {
+        "latestUserMessage": "Quiero hablar con un veterinario.",
+        "priorMessages": []
+      },
+      "badOutput": "Para ayudarte con tu caballo, dime: 1. Desde cuando no come? 2. Tiene colico o fiebre? 3. Respira raro?",
+      "failureModes": [
+        "invented_symptom_formatting",
+        "collapsed_numbering"
+      ],
+      "expectedPayload": {
+        "message": "Claro, puedo ayudarte a contactar a un veterinario. Cuentame brevemente que necesitas hoy y si prefieres seguir por chat o videollamada.",
+        "formatVersion": 1,
+        "displayBlocks": [
+          {
+            "type": "paragraph",
+            "text": "Claro, puedo ayudarte a contactar a un veterinario. Cuentame brevemente que necesitas hoy y si prefieres seguir por chat o videollamada.",
+            "items": []
+          }
+        ],
+        "urgency": "routine",
+        "recommendedService": null,
+        "actionLabel": null,
+        "safetyEscalation": false,
+        "intakeQuestions": [],
+        "caseSummary": null,
+        "handoffSummary": null,
+        "routingRationale": null,
+        "commerceRecommendation": "ask_more"
+      },
+      "legacyFallbackAssertions": {
+        "mustContain": [
+          "Cuentame brevemente que necesitas hoy"
+        ],
+        "mustNotContain": [
+          "1.",
+          "colico",
+          "fiebre",
+          "no come"
+        ]
+      }
+    },
+    {
+      "id": "post_intake_routing_reasks_questions",
+      "flow": "post-intake routing",
+      "purpose": "Capture the model asking the same urgent questions again instead of routing after answers are provided.",
+      "input": {
+        "latestUserMessage": "Si toma agua, hizo pocas heces, no tiene fiebre, pero sigue mirando los flancos.",
+        "priorMessages": [
+          {
+            "role": "assistant",
+            "content": "Para valorar urgencia, responde: 1. Tiene dolor abdominal? 2. Ha tomado agua y hecho heces? 3. Tiene fiebre o respiracion agitada?"
+          }
+        ]
+      },
+      "badOutput": "Gracias. Para valorar urgencia necesito otra vez: 1. Tiene dolor abdominal? 2. Ha tomado agua? 3. Tiene fiebre? Luego puedo decirte si chat o video.",
+      "failureModes": [
+        "duplicate_urgent_questions",
+        "run_on_service_options"
+      ],
+      "expectedPayload": {
+        "message": "Gracias, con esas respuestas conviene que un veterinario lo revise pronto. Te recomiendo una videollamada para acelerar la valoracion.",
+        "formatVersion": 1,
+        "displayBlocks": [
+          {
+            "type": "paragraph",
+            "text": "Gracias, con esas respuestas conviene que un veterinario lo revise pronto.",
+            "items": []
+          },
+          {
+            "type": "safety_note",
+            "text": "Te recomiendo una videollamada para acelerar la valoracion.",
+            "items": []
+          }
+        ],
+        "urgency": "urgent",
+        "recommendedService": "video",
+        "actionLabel": "Iniciar video",
+        "safetyEscalation": true,
+        "intakeQuestions": [],
+        "caseSummary": "Toma agua, hizo pocas heces, no tiene fiebre, pero sigue mirando los flancos.",
+        "handoffSummary": "Caballo con signos persistentes de posible dolor abdominal; toma agua, pocas heces, sin fiebre reportada, sigue mirando los flancos.",
+        "routingRationale": "Ya respondio las preguntas iniciales y persisten signos que justifican revision pronta por video.",
+        "commerceRecommendation": "included"
+      },
+      "legacyFallbackAssertions": {
+        "mustContain": [
+          "conviene que un veterinario lo revise pronto",
+          "videollamada"
+        ],
+        "mustNotContain": [
+          "otra vez",
+          "\n1.",
+          "Ha tomado agua?"
+        ]
+      }
+    },
+    {
+      "id": "entitlement_exhausted_markdown_options",
+      "flow": "entitlement-exhausted routing",
+      "purpose": "Capture plan or one-off options leaking as Markdown bullets with excess spacing.",
+      "input": {
+        "latestUserMessage": "Necesito seguir por chat con el veterinario para revisar la cojera.",
+        "priorMessages": [
+          {
+            "role": "assistant",
+            "content": "Por la cojera, recomiendo chat con un veterinario de medicina deportiva."
+          }
+        ],
+        "toolContext": {
+          "recommendedService": "chat",
+          "checkServiceAccess": {
+            "serviceType": "chat",
+            "canUse": false,
+            "remaining": 0,
+            "reason": "no_chat_entitlement_left"
+          }
+        }
+      },
+      "badOutput": "**Tu plan ya no tiene chats incluidos.**\n\nPuedes:\n- comprar un chat unico\n\n- mejorar tu plan\n\n- intentar videollamada si tienes cupo",
+      "failureModes": [
+        "markdown_leakage",
+        "extra_line_skipping",
+        "run_on_service_options"
+      ],
+      "expectedPayload": {
+        "message": "Tu plan ya no tiene chats incluidos disponibles.\n- Comprar un chat unico para esta consulta.\n- Mejorar tu plan si necesitas mas atenciones incluidas.",
+        "formatVersion": 1,
+        "displayBlocks": [
+          {
+            "type": "paragraph",
+            "text": "Tu plan ya no tiene chats incluidos disponibles.",
+            "items": []
+          },
+          {
+            "type": "bullet_list",
+            "text": null,
+            "items": [
+              "Comprar un chat unico para esta consulta.",
+              "Mejorar tu plan si necesitas mas atenciones incluidas."
+            ]
+          }
+        ],
+        "urgency": "routine",
+        "recommendedService": "chat",
+        "actionLabel": "Comprar chat unico",
+        "safetyEscalation": false,
+        "intakeQuestions": [],
+        "caseSummary": "Usuario quiere seguir por chat para revisar cojera.",
+        "handoffSummary": "Consulta por cojera; usuario solicita chat con veterinario, pero no quedan chats incluidos en el plan.",
+        "routingRationale": "Chat es apropiado para revisar la informacion inicial, pero el acceso incluido esta agotado.",
+        "commerceRecommendation": "one_off"
+      },
+      "legacyFallbackAssertions": {
+        "mustContain": [
+          "Tu plan ya no tiene chats incluidos disponibles.",
+          "\n- Comprar un chat unico",
+          "\n- Mejorar tu plan"
+        ],
+        "mustNotContain": [
+          "**",
+          "\n\n\n",
+          "intentar videollamada si tienes cupo"
+        ]
+      }
+    }
+  ],
+  "phase0AcceptanceChecklist": {
+    "badOutputsCollected": 6,
+    "requiredFlowsCovered": [
+      "urgent appetite/colic-like intake",
+      "lameness intake",
+      "generic vet request",
+      "post-intake routing",
+      "entitlement-exhausted routing"
+    ],
+    "expectedStructuredBlocksIncluded": true,
+    "legacyFallbackAssertionsIncluded": true,
+    "fixtureLocationDecided": true,
+    "sensitiveDataReviewed": true
+  }
+}

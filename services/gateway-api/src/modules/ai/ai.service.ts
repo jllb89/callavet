@@ -64,6 +64,14 @@ type AiChatToolCall = {
   arguments: string;
 };
 
+type AiChatDisplayBlockType = 'paragraph' | 'numbered_list' | 'bullet_list' | 'safety_note';
+
+type AiChatDisplayBlock = {
+  type: AiChatDisplayBlockType;
+  text: string | null;
+  items: string[];
+};
+
 type AiChatTurnContext = {
   actorUserId: string;
   petId: string | null;
@@ -443,6 +451,8 @@ export class AiService {
         additionalProperties: false,
         required: [
           'message',
+          'formatVersion',
+          'displayBlocks',
           'urgency',
           'recommendedService',
           'actionLabel',
@@ -454,7 +464,30 @@ export class AiService {
           'commerceRecommendation',
         ],
         properties: {
-          message: { type: 'string' },
+          message: { type: 'string', description: 'Plain-text fallback for legacy clients, composed from the same content as displayBlocks.' },
+          formatVersion: { type: 'integer', enum: [1], description: 'Version of the structured chat display contract.' },
+          displayBlocks: {
+            type: 'array',
+            description: 'Structured user-visible response blocks. New clients render this instead of parsing message text.',
+            minItems: 1,
+            maxItems: 6,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['type', 'text', 'items'],
+              properties: {
+                type: { type: 'string', enum: ['paragraph', 'numbered_list', 'bullet_list', 'safety_note'] },
+                text: { type: ['string', 'null'], description: 'Block text for paragraph and safety_note blocks; null for list blocks.' },
+                items: {
+                  type: 'array',
+                  description: 'List items for numbered_list and bullet_list blocks; empty for paragraph and safety_note blocks.',
+                  minItems: 0,
+                  maxItems: 5,
+                  items: { type: 'string' },
+                },
+              },
+            },
+          },
           urgency: { type: 'string', enum: ['routine', 'urgent', 'emergency'] },
           recommendedService: { type: ['string', 'null'], enum: ['chat', 'video', 'scheduled_video', null] },
           actionLabel: { type: ['string', 'null'] },
@@ -725,6 +758,12 @@ export class AiService {
       'Do not invent specialty IDs, vet IDs, appointment slots, entitlements, prices, or session IDs.',
       'Before recommending chat or video activation, call check_service_access for the relevant service type.',
       'Keep final responses short, warm, and action-oriented. If context is insufficient, ask a targeted question instead of showing all service choices.',
+      'Return formatVersion as 1 and populate displayBlocks as the source of truth for chat UI rendering. Keep message as a plain-text fallback composed from the same displayBlocks content.',
+      'Use displayBlocks type paragraph for normal short copy, numbered_list for ordered questions, bullet_list for short option lists, and safety_note for concise emergency or urgent escalation copy.',
+      'For paragraph and safety_note blocks, set text to the visible sentence or short paragraph and items to an empty array. For numbered_list and bullet_list blocks, set text to null and put each visible row in items.',
+      'Never put manual list markers inside displayBlocks items: no "1.", "1)", hyphens, bullets, or Markdown markers. The client will render numbering and bullets.',
+      'Do not use Markdown headings, bold markers, or decorative formatting in message or displayBlocks.',
+      'When asking urgent triage questions, place the brief setup sentence in a paragraph or safety_note block and place the 2-3 triage questions in one numbered_list block.',
       `Server context: ${JSON.stringify(context)}`,
       `Conversation state: ${JSON.stringify(state)}`,
     ].join('\n');
@@ -950,6 +989,225 @@ export class AiService {
     return serviceType === 'video' ? 'Comprar video único' : 'Comprar chat único';
   }
 
+  private cleanChatDisplayText(value: unknown) {
+    return String(value ?? '')
+      .replace(/\r\n?/g, '\n')
+      .replace(/\*\*/g, '')
+      .replace(/__/g, '')
+      .replace(/`/g, '')
+      .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n[ \t]+/g, '\n')
+      .replace(/[ \t]{2,}/g, ' ')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  private cleanChatBlockText(value: unknown) {
+    return this.cleanChatDisplayText(value).replace(/\s+/g, ' ').trim();
+  }
+
+  private cleanChatListItem(value: unknown) {
+    return this.cleanChatBlockText(value)
+      .replace(/^(?:(?:\d{1,2}[.)])|[-*\u2022])\s+/, '')
+      .trim();
+  }
+
+  private isChatDisplayBlockType(value: string): value is AiChatDisplayBlockType {
+    return value === 'paragraph' || value === 'numbered_list' || value === 'bullet_list' || value === 'safety_note';
+  }
+
+  private uniqueChatListItems(items: string[]) {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const item of items) {
+      const cleaned = this.cleanChatListItem(item);
+      if (!cleaned) continue;
+      const key = this.normalizeCareText(cleaned).replace(/[^a-z0-9]+/g, '');
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(cleaned);
+    }
+    return out;
+  }
+
+  private chatIntroBeforeList(text: string) {
+    const cleaned = this.cleanChatDisplayText(text);
+    const markers = [
+      cleaned.search(/(^|\s)\d{1,2}[.)]\s+/),
+      cleaned.search(/(^|\n)\s*[-*\u2022]\s+/),
+    ].filter((index) => index >= 0);
+    if (!markers.length) return cleaned;
+    return cleaned.slice(0, Math.min(...markers)).replace(/[:：]\s*$/, '.').trim();
+  }
+
+  private extractNumberedItems(text: string) {
+    const cleaned = this.cleanChatDisplayText(text);
+    const marker = cleaned.search(/(^|\s)\d{1,2}[.)]\s+/);
+    if (marker < 0) return { intro: cleaned, items: [] as string[] };
+    const intro = cleaned.slice(0, marker).replace(/[:：]\s*$/, '.').trim();
+    const listText = cleaned.slice(marker).trim();
+    const items: string[] = [];
+    const itemPattern = /\d{1,2}[.)]\s+([\s\S]*?)(?=(?:\s+\d{1,2}[.)]\s+)|$)/g;
+    for (const match of listText.matchAll(itemPattern)) {
+      const item = this.cleanChatListItem(match[1]);
+      if (item) items.push(item);
+    }
+    return { intro, items: this.uniqueChatListItems(items) };
+  }
+
+  private extractBulletItems(text: string) {
+    const cleaned = this.cleanChatDisplayText(text);
+    const marker = cleaned.search(/(^|\n)\s*[-*\u2022]\s+/);
+    if (marker < 0) return { intro: cleaned, items: [] as string[] };
+    const intro = cleaned.slice(0, marker).replace(/[:：]\s*$/, '.').trim();
+    const listText = cleaned.slice(marker).trim();
+    const items = listText
+      .split(/\n+/)
+      .map((line) => /^\s*[-*\u2022]\s+(.+)$/.exec(line)?.[1] || '')
+      .map((item) => this.cleanChatListItem(item))
+      .filter(Boolean);
+    return { intro, items: this.uniqueChatListItems(items) };
+  }
+
+  private normalizeChatQuestions(value: unknown) {
+    return this.uniqueChatListItems(Array.isArray(value) ? value.map((item) => String(item || '')) : []).slice(0, 3);
+  }
+
+  private normalizeExistingDisplayBlocks(value: unknown, warnings: Set<string>) {
+    if (!Array.isArray(value)) {
+      warnings.add('display_blocks_missing');
+      return [] as AiChatDisplayBlock[];
+    }
+    const blocks: AiChatDisplayBlock[] = [];
+    if (value.length > 6) warnings.add('display_blocks_capped');
+    for (const rawBlock of value.slice(0, 6)) {
+      if (!rawBlock || typeof rawBlock !== 'object' || Array.isArray(rawBlock)) {
+        warnings.add('display_block_invalid');
+        continue;
+      }
+      const block = rawBlock as Record<string, any>;
+      const type = String(block.type || '').trim();
+      if (!this.isChatDisplayBlockType(type)) {
+        warnings.add('display_block_type_invalid');
+        continue;
+      }
+      if (type === 'numbered_list' || type === 'bullet_list') {
+        let items = this.uniqueChatListItems(Array.isArray(block.items) ? block.items.map((item) => String(item || '')) : []);
+        if (!items.length && block.text) {
+          const parsed = type === 'numbered_list' ? this.extractNumberedItems(String(block.text)) : this.extractBulletItems(String(block.text));
+          items = parsed.items;
+        }
+        if (!items.length) {
+          warnings.add('display_list_empty');
+          continue;
+        }
+        if (items.length > 5) warnings.add('display_list_items_capped');
+        blocks.push({ type, text: null, items: items.slice(0, 5) });
+        continue;
+      }
+      const text = this.cleanChatBlockText(block.text);
+      if (!text) {
+        warnings.add('display_text_empty');
+        continue;
+      }
+      blocks.push({ type, text, items: [] });
+    }
+    return blocks;
+  }
+
+  private deriveChatDisplayBlocks(message: unknown, questions: string[], warnings: Set<string>) {
+    const cleanedMessage = this.cleanChatDisplayText(message);
+    if (questions.length) {
+      const intro = this.cleanChatBlockText(this.chatIntroBeforeList(cleanedMessage)) || 'Para valorar urgencia y dejarle buen contexto al veterinario, respóndeme rápido:';
+      warnings.add('display_blocks_derived_from_intake_questions');
+      return [
+        { type: 'paragraph', text: intro, items: [] },
+        { type: 'numbered_list', text: null, items: questions },
+      ] as AiChatDisplayBlock[];
+    }
+
+    const numbered = this.extractNumberedItems(cleanedMessage);
+    if (numbered.items.length >= 2) {
+      warnings.add('display_blocks_derived_from_numbered_text');
+      return [
+        ...(numbered.intro ? [{ type: 'paragraph' as const, text: this.cleanChatBlockText(numbered.intro), items: [] as string[] }] : []),
+        { type: 'numbered_list' as const, text: null, items: numbered.items.slice(0, 5) },
+      ];
+    }
+
+    const bullets = this.extractBulletItems(cleanedMessage);
+    if (bullets.items.length >= 2) {
+      warnings.add('display_blocks_derived_from_bullet_text');
+      return [
+        ...(bullets.intro ? [{ type: 'paragraph' as const, text: this.cleanChatBlockText(bullets.intro), items: [] as string[] }] : []),
+        { type: 'bullet_list' as const, text: null, items: bullets.items.slice(0, 5) },
+      ];
+    }
+
+    const paragraphs = cleanedMessage
+      .split(/\n{2,}|\n/)
+      .map((paragraph) => this.cleanChatBlockText(paragraph))
+      .filter(Boolean)
+      .slice(0, 4);
+    if (paragraphs.length > 1) warnings.add('display_blocks_derived_from_paragraphs');
+    return (paragraphs.length ? paragraphs : ['Claro, puedo ayudarte.'])
+      .map((text) => ({ type: 'paragraph' as const, text, items: [] as string[] }));
+  }
+
+  private enforceUrgentQuestionBlock(blocks: AiChatDisplayBlock[], questions: string[], payload: any, warnings: Set<string>) {
+    if (!questions.length) return blocks;
+    const firstTextBlock = blocks.find((block) => (block.type === 'paragraph' || block.type === 'safety_note') && block.text)?.text;
+    const intro = this.cleanChatBlockText(this.chatIntroBeforeList(firstTextBlock || payload?.message || ''))
+      || 'Para valorar urgencia y dejarle buen contexto al veterinario, respóndeme rápido:';
+    warnings.add('urgent_questions_normalized');
+    return [
+      { type: 'paragraph', text: intro, items: [] },
+      { type: 'numbered_list', text: null, items: questions },
+    ] as AiChatDisplayBlock[];
+  }
+
+  private composeChatFallbackMessage(blocks: AiChatDisplayBlock[]) {
+    const lines: string[] = [];
+    for (const block of blocks) {
+      if (block.type === 'numbered_list') {
+        block.items.forEach((item, index) => lines.push(`${index + 1}. ${item}`));
+      } else if (block.type === 'bullet_list') {
+        block.items.forEach((item) => lines.push(`- ${item}`));
+      } else if (block.text) {
+        lines.push(block.text);
+      }
+    }
+    return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  private normalizeChatDisplayPayload(payload: any, urgentIntake: boolean) {
+    const warnings = new Set<string>();
+    const originalMessage = this.cleanChatDisplayText(payload?.message);
+    const questions = this.normalizeChatQuestions(payload?.intakeQuestions);
+    if (Array.isArray(payload?.intakeQuestions) && questions.length !== payload.intakeQuestions.length) {
+      warnings.add('intake_questions_normalized');
+    }
+    let blocks = this.normalizeExistingDisplayBlocks(payload?.displayBlocks, warnings);
+    if (!blocks.length) blocks = this.deriveChatDisplayBlocks(originalMessage, questions, warnings);
+    if (urgentIntake && questions.length) blocks = this.enforceUrgentQuestionBlock(blocks, questions, payload, warnings);
+    if (blocks.length > 6) {
+      warnings.add('display_blocks_capped');
+      blocks = blocks.slice(0, 6);
+    }
+    const message = this.composeChatFallbackMessage(blocks) || originalMessage || 'Claro, puedo ayudarte.';
+    const originalComparable = originalMessage.replace(/\s+/g, ' ').trim();
+    const messageComparable = message.replace(/\s+/g, ' ').trim();
+    if (originalComparable && originalComparable !== messageComparable) warnings.add('message_regenerated_from_display_blocks');
+    payload.formatVersion = 1;
+    payload.displayBlocks = blocks;
+    payload.message = message;
+    payload.intakeQuestions = questions;
+    payload.formattingRepaired = warnings.size > 0;
+    payload.formattingWarnings = Array.from(warnings).slice(0, 12);
+    return payload;
+  }
+
   private normalizeChatTurnPayload(payload: any, context: AiChatTurnContext, latestMessage: string, state: AiChatTurnState, toolResults: Array<{ name: string; output: any }> = []) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload;
     const normalized = { ...payload };
@@ -967,7 +1225,7 @@ export class AiService {
       if (!message || this.hasClinicalSignal(message)) {
         normalized.message = 'Claro, puedo ayudarte a contactar a un veterinario. Cuéntame brevemente qué necesitas hoy y si prefieres seguir por chat o videollamada.';
       }
-      return normalized;
+      return this.normalizeChatDisplayPayload(normalized, false);
     }
     const urgentIntake = this.shouldAskUrgentIntake(normalized, latestMessage, state);
     const existingQuestions = Array.isArray(normalized.intakeQuestions)
@@ -1016,7 +1274,7 @@ export class AiService {
     if (state.caseDetailSignal && !normalized.handoffSummary) {
       normalized.handoffSummary = latestMessage.slice(0, 360);
     }
-    return normalized;
+    return this.normalizeChatDisplayPayload(normalized, urgentIntake);
   }
 
   private async findVetsTool(args: Record<string, any>) {
@@ -1171,6 +1429,9 @@ export class AiService {
     const wantsVideo = /video|videollamada|llamada|urgente|urgent|emergency/i.test(message);
     const petNames = context.pets.map((pet) => pet?.name).filter(Boolean).slice(0, 3);
     const hasMultiplePets = context.pets.length > 1;
+    const assistantMessage = wantsVideo
+      ? `Puedo ayudarte a preparar esto para un veterinario. ${hasMultiplePets ? `¿Para cuál caballo es: ${petNames.join(', ')}? ` : ''}Por lo que describes, puede convenir una videollamada para valorar urgencia.`
+      : `Claro, te ayudo. ${hasMultiplePets ? `¿Para cuál caballo es: ${petNames.join(', ')}? ` : 'Cuéntame desde cuándo pasa y si ha cambiado su apetito, agua o energía. '}Con eso puedo orientar mejor si conviene chat, videollamada inmediata o agendar una videollamada.`;
     return {
       ok: true,
       dryRun: true,
@@ -1178,13 +1439,18 @@ export class AiService {
       model: this.providerConfig(undefined, true).model,
       responseId: null,
       payload: {
-        message: wantsVideo
-          ? `Puedo ayudarte a preparar esto para un veterinario. ${hasMultiplePets ? `¿Para cuál caballo es: ${petNames.join(', ')}? ` : ''}Por lo que describes, puede convenir una videollamada para valorar urgencia.`
-          : `Claro, te ayudo. ${hasMultiplePets ? `¿Para cuál caballo es: ${petNames.join(', ')}? ` : 'Cuéntame desde cuándo pasa y si ha cambiado su apetito, agua o energía. '}Con eso puedo orientar mejor si conviene chat, videollamada inmediata o agendar una videollamada.`,
+        message: assistantMessage,
+        formatVersion: 1,
+        displayBlocks: [{ type: wantsVideo ? 'safety_note' : 'paragraph', text: assistantMessage, items: [] }],
         urgency: wantsVideo ? 'urgent' : 'routine',
         recommendedService: wantsVideo ? 'video' : 'chat',
         actionLabel: wantsVideo ? 'buscar videollamada' : 'buscar veterinario',
         safetyEscalation: wantsVideo,
+        intakeQuestions: [],
+        caseSummary: message ? message.slice(0, 240) : null,
+        handoffSummary: message ? message.slice(0, 360) : null,
+        routingRationale: 'Respuesta determinística de dry-run para pruebas sin proveedor de IA.',
+        commerceRecommendation: 'ask_more',
       },
       toolResults: [],
       context,
@@ -1231,13 +1497,23 @@ export class AiService {
     const serviceAccess = this.latestServiceAccessToolResult(toolResults);
     const serviceType = String(serviceAccess?.serviceType || (shouldRoute ? 'video' : 'chat')).toLowerCase();
     const questions = shouldRoute ? this.fallbackIntakeQuestions(latestMessage, context) : [];
+    const fallbackIntro = shouldRoute
+      ? 'Lo siento, eso puede requerir revisión pronto. Para orientarte rápido con el veterinario adecuado, respóndeme por favor estas 3 cosas:'
+      : 'Claro, puedo ayudarte. Cuéntame brevemente qué necesitas y si prefieres seguir por chat o videollamada.';
     const payload = this.normalizeChatTurnPayload({
       message: shouldRoute
         ? [
-            'Lo siento, eso puede requerir revisión pronto. Para orientarte rápido con el veterinario adecuado, respóndeme por favor estas 3 cosas:',
+            fallbackIntro,
             ...questions.map((question, index) => `${index + 1}. ${question}`),
           ].join('\n')
-        : 'Claro, puedo ayudarte. Cuéntame brevemente qué necesitas y si prefieres seguir por chat o videollamada.',
+        : fallbackIntro,
+      formatVersion: 1,
+      displayBlocks: shouldRoute
+        ? [
+            { type: 'paragraph', text: fallbackIntro, items: [] },
+            { type: 'numbered_list', text: null, items: questions },
+          ]
+        : [{ type: 'paragraph', text: fallbackIntro, items: [] }],
       urgency: shouldRoute ? 'urgent' : 'routine',
       recommendedService: shouldRoute ? serviceType : null,
       actionLabel: shouldRoute ? this.fallbackActionLabel(serviceType, serviceAccess?.canUse === true) : null,
@@ -1268,6 +1544,31 @@ export class AiService {
       call_id: call.call_id,
       name: call.name,
       arguments: typeof call.arguments === 'string' ? call.arguments : JSON.stringify(call.arguments || {}),
+    };
+  }
+
+  private chatFormattingEventMetadata(payload: any) {
+    const blocks = Array.isArray(payload?.displayBlocks) ? payload.displayBlocks : [];
+    const blockTypes = blocks
+      .map((block: any) => String(block?.type || '').trim())
+      .filter(Boolean)
+      .slice(0, 12);
+    const listItemCount = blocks.reduce((count: number, block: any) => {
+      const items = Array.isArray(block?.items) ? block.items : [];
+      return count + items.length;
+    }, 0);
+    const warnings = Array.isArray(payload?.formattingWarnings)
+      ? payload.formattingWarnings.map((warning: any) => String(warning || '').trim()).filter(Boolean).slice(0, 12)
+      : [];
+    return {
+      formatVersion: Number(payload?.formatVersion || 0) || null,
+      hasDisplayBlocks: blocks.length > 0,
+      blockCount: blocks.length,
+      blockTypes,
+      listItemCount,
+      messageLength: String(payload?.message || '').length,
+      formattingRepaired: payload?.formattingRepaired === true,
+      formattingWarnings: warnings,
     };
   }
 
@@ -1360,7 +1661,12 @@ export class AiService {
       await this.completeEvent(eventId, 'succeeded', {
         provider: result.provider,
         model: result.model,
-        responsePayload: { payload: result.payload, toolResults: result.toolResults, responseId: result.responseId || null },
+        responsePayload: {
+          payload: result.payload,
+          toolResults: result.toolResults,
+          responseId: result.responseId || null,
+          formatting: this.chatFormattingEventMetadata(result.payload),
+        },
         latencyMs: Date.now() - startedAt,
       });
       return { ...result, eventId };
@@ -1375,6 +1681,7 @@ export class AiService {
               payload: fallback.payload,
               toolResults: fallback.toolResults,
               responseId: null,
+              formatting: this.chatFormattingEventMetadata(fallback.payload),
               fallback: true,
               fallbackReason: fallback.fallbackReason,
             },
