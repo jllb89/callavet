@@ -311,6 +311,12 @@ class _ChatBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final isVet = message.role == 'vet';
     final isAi = message.role == 'ai';
+    final messageStyle = TextStyle(
+      color: isVet ? Colors.black : Colors.white,
+      fontSize: 14,
+      fontFamily: 'ABC Diatype',
+      height: 1.28,
+    );
     return Align(
       alignment: isVet ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
@@ -329,15 +335,9 @@ class _ChatBubble extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              message.content,
-              style: TextStyle(
-                color: isVet ? Colors.black : Colors.white,
-                fontSize: 14,
-                fontFamily: 'ABC Diatype',
-                height: 1.28,
-              ),
-            ),
+            isAi
+                ? _AiMessageContent(content: message.content, style: messageStyle)
+                : Text(message.content, style: messageStyle),
             const SizedBox(height: 6),
             Text(
               message.label,
@@ -354,6 +354,242 @@ class _ChatBubble extends StatelessWidget {
       ),
     );
   }
+}
+
+enum _AiMessageBlockType { paragraph, numberedList, bulletList, safetyNote }
+
+class _AiMessageBlock {
+  const _AiMessageBlock({
+    required this.type,
+    required this.text,
+    required this.items,
+  });
+
+  static _AiMessageBlock? fromJson(Map<String, dynamic> json) {
+    final type = switch (json['type']?.toString()) {
+      'paragraph' => _AiMessageBlockType.paragraph,
+      'numbered_list' => _AiMessageBlockType.numberedList,
+      'bullet_list' => _AiMessageBlockType.bulletList,
+      'safety_note' => _AiMessageBlockType.safetyNote,
+      _ => null,
+    };
+    if (type == null) return null;
+    final items = (_asList(json['items']) ?? const [])
+        .map((item) => item?.toString().trim() ?? '')
+        .where((item) => item.isNotEmpty)
+        .toList(growable: false);
+    if (type == _AiMessageBlockType.numberedList ||
+        type == _AiMessageBlockType.bulletList) {
+      if (items.isEmpty) return null;
+      return _AiMessageBlock(type: type, text: null, items: items);
+    }
+    final text = json['text']?.toString().trim();
+    if (text == null || text.isEmpty) return null;
+    return _AiMessageBlock(
+        type: type, text: text, items: const <String>[]);
+  }
+
+  final _AiMessageBlockType type;
+  final String? text;
+  final List<String> items;
+}
+
+class _AiMessageContent extends StatelessWidget {
+  const _AiMessageContent({required this.content, required this.style});
+
+  final String content;
+  final TextStyle style;
+
+  @override
+  Widget build(BuildContext context) {
+    final payload = _AiMessagePayload.tryParse(content);
+    if (payload.blocks.isEmpty) {
+      return Text(_readableAiText(payload.message), style: style);
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (var index = 0; index < payload.blocks.length; index++)
+          Padding(
+            padding: EdgeInsets.only(
+                bottom: index == payload.blocks.length - 1 ? 0 : 8),
+            child: _AiMessageBlockView(
+              block: payload.blocks[index],
+              style: style,
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _AiMessagePayload {
+  const _AiMessagePayload({required this.message, required this.blocks});
+
+  static _AiMessagePayload tryParse(String content) {
+    final trimmed = content.trim();
+    if (trimmed.isEmpty) {
+      return const _AiMessagePayload(
+          message: '', blocks: <_AiMessageBlock>[]);
+    }
+    try {
+      final decoded = jsonDecode(trimmed);
+      final root = _asMap(decoded);
+      final payload = _asMap(root?['payload']) ?? root;
+      if (payload == null) {
+        return _AiMessagePayload(
+            message: trimmed, blocks: const <_AiMessageBlock>[]);
+      }
+      final formatVersion = _toInt(payload['formatVersion']) ?? 0;
+      final blocks = formatVersion == 1
+          ? (_asList(payload['displayBlocks']) ?? const [])
+              .map(_asMap)
+              .whereType<Map<String, dynamic>>()
+              .map(_AiMessageBlock.fromJson)
+              .whereType<_AiMessageBlock>()
+              .toList(growable: false)
+          : const <_AiMessageBlock>[];
+      return _AiMessagePayload(
+        message: payload['message']?.toString() ?? trimmed,
+        blocks: blocks,
+      );
+    } catch (_) {
+      return _AiMessagePayload(
+          message: trimmed, blocks: const <_AiMessageBlock>[]);
+    }
+  }
+
+  final String message;
+  final List<_AiMessageBlock> blocks;
+}
+
+class _AiMessageBlockView extends StatelessWidget {
+  const _AiMessageBlockView({required this.block, required this.style});
+
+  final _AiMessageBlock block;
+  final TextStyle style;
+
+  @override
+  Widget build(BuildContext context) {
+    switch (block.type) {
+      case _AiMessageBlockType.paragraph:
+        return Text(block.text ?? '', style: style);
+      case _AiMessageBlockType.safetyNote:
+        return Text(
+          block.text ?? '',
+          style: style.copyWith(
+            color: style.color?.withValues(alpha: 0.92),
+            fontWeight: FontWeight.w500,
+          ),
+        );
+      case _AiMessageBlockType.numberedList:
+        return _AiMessageList(items: block.items, numbered: true, style: style);
+      case _AiMessageBlockType.bulletList:
+        return _AiMessageList(items: block.items, numbered: false, style: style);
+    }
+  }
+}
+
+class _AiMessageList extends StatelessWidget {
+  const _AiMessageList({
+    required this.items,
+    required this.numbered,
+    required this.style,
+  });
+
+  final List<String> items;
+  final bool numbered;
+  final TextStyle style;
+
+  @override
+  Widget build(BuildContext context) {
+    final markerStyle = style.copyWith(
+      color: style.color?.withValues(alpha: 0.68),
+      fontWeight: FontWeight.w500,
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (var index = 0; index < items.length; index++)
+          Padding(
+            padding: EdgeInsets.only(
+                bottom: index == items.length - 1 ? 0 : 6),
+            child: _AiMessageListRow(
+              marker: numbered ? '${index + 1}.' : null,
+              text: items[index],
+              style: style,
+              markerStyle: markerStyle,
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _AiMessageListRow extends StatelessWidget {
+  const _AiMessageListRow({
+    required this.marker,
+    required this.text,
+    required this.style,
+    required this.markerStyle,
+  });
+
+  final String? marker;
+  final String text;
+  final TextStyle style;
+  final TextStyle markerStyle;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 24,
+          child: marker == null
+              ? Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Align(
+                    alignment: Alignment.topRight,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: (style.color ?? Colors.white)
+                            .withValues(alpha: 0.68),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const SizedBox(width: 4, height: 4),
+                    ),
+                  ),
+                )
+              : Text(marker!, textAlign: TextAlign.right, style: markerStyle),
+        ),
+        const SizedBox(width: 8),
+        Expanded(child: Text(text, style: style)),
+      ],
+    );
+  }
+}
+
+String _readableAiText(String text) {
+  var formatted = text.trim().replaceAll('**', '').replaceAll('__', '');
+  formatted = formatted.replaceAll(RegExp(r'[ \t]+\n'), '\n');
+  formatted = formatted.replaceAll(RegExp(r'\n[ \t]+'), '\n');
+  formatted = formatted.replaceAll(RegExp(r'\n{3,}'), '\n\n');
+  formatted = formatted.replaceAllMapped(
+    RegExp(r'(:)\s+(\d+[.)]\s)'),
+    (match) => '${match[1]}\n${match[2]}',
+  );
+  formatted = formatted.replaceAllMapped(
+    RegExp(r'([^\n])\n+(\d+[.)]\s)'),
+    (match) => '${match[1]}\n${match[2]}',
+  );
+  formatted = formatted.replaceAllMapped(
+    RegExp(r'\n{2,}(\d+[.)]\s)'),
+    (match) => '\n${match[1]}',
+  );
+  return formatted;
 }
 
 class _ChatComposer extends StatelessWidget {
@@ -508,6 +744,12 @@ Map<String, dynamic>? _asMap(Object? value) {
 }
 
 List<dynamic>? _asList(Object? value) => value is List ? value : null;
+
+int? _toInt(Object? value) {
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  return int.tryParse(value?.toString() ?? '');
+}
 
 DateTime? _parseDateTime(Object? value) {
   if (value == null) return null;

@@ -277,25 +277,27 @@ Validation:
 
 ### Phase 6: Vet App And Human Handoff Follow-Up
 
+Status: complete on 2026-06-30.
+
 Purpose: reuse the formatting foundation where AI or handoff content appears outside the owner concierge chat.
 
 Tasks:
 
-- Decide whether vet-facing AI summaries should use the same block contract.
-- If yes, extract the mobile renderer into a shared Flutter file or duplicate a minimal renderer in the vet app.
-- Keep human-authored vet chat messages as plain text unless a future feature explicitly supports rich formatting.
-- Ensure handoff summaries stay concise and non-diagnostic.
+- Completed: decided vet-facing AI/system messages should accept the same `formatVersion: 1` and `displayBlocks` contract when those messages arrive as JSON payloads.
+- Completed: duplicated a minimal AI-only renderer in `apps/vet/lib/src/features/chat/presentation/vet_chat_screen.dart` instead of creating a shared package during this narrow pass.
+- Completed: kept human-authored owner and vet chat messages as plain text; only `role == 'ai'` messages use the AI renderer/fallback cleanup.
+- Completed: preserved the backend prompt/normalizer requirement that handoff summaries stay concise, factual, and non-diagnostic.
 
 Acceptance criteria:
 
-- Owner AI concierge formatting remains the priority path.
-- Vet UI does not accidentally render arbitrary Markdown from users.
-- Shared formatting code does not disrupt realtime human chat work.
+- Completed: owner AI concierge formatting remains the priority path and was not changed in this phase.
+- Completed: vet UI does not render arbitrary Markdown from users because owner/vet-authored messages remain plain `Text`.
+- Completed: realtime human chat work is not disrupted because the change is isolated to `role == 'ai'` bubble rendering.
 
 Validation:
 
-- Run `flutter analyze` for any touched vet files.
-- Smoke a routed owner-to-vet consultation after renderer changes.
+- Completed: `flutter analyze lib/src/features/chat/presentation/vet_chat_screen.dart` passes from `apps/vet`.
+- Deferred to deployment smoke: run a routed owner-to-vet consultation after the vet app build with this renderer is installed.
 
 ## Fast Implementation Order
 
