@@ -23,6 +23,7 @@ dependencies:
   geocoding: ^3.0.0
   image_picker: ^1.1.2
   livekit_client: ^2.7.0
+  device_info_plus: ^12.4.0
 
 flutter:
   uses-material-design: true

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:livekit_client/livekit_client.dart';
@@ -101,6 +102,9 @@ class _VetVideoCallScreenState extends State<VetVideoCallScreen> {
   }
 
   Future<String?> _publishInitialTracks(Room room) async {
+    if (await _isIosSimulator()) {
+      return 'El simulador iOS no puede publicar camara o microfono de forma estable. La sala queda conectada para pruebas; usa dispositivos reales para audio/video.';
+    }
     final warnings = <String>[];
     try {
       await room.localParticipant?.setMicrophoneEnabled(true);
@@ -139,6 +143,10 @@ class _VetVideoCallScreenState extends State<VetVideoCallScreen> {
   }
 
   Future<void> _toggleMicrophone() async {
+    if (await _isIosSimulator()) {
+      setState(() => _error = 'El microfono no esta disponible en el simulador iOS. Prueba audio en un dispositivo real.');
+      return;
+    }
     final participant = _room?.localParticipant;
     if (participant == null) return;
     final nextValue = !_micEnabled;
@@ -155,6 +163,10 @@ class _VetVideoCallScreenState extends State<VetVideoCallScreen> {
   }
 
   Future<void> _toggleCamera() async {
+    if (await _isIosSimulator()) {
+      setState(() => _error = 'La camara no esta disponible en el simulador iOS. Prueba video en un dispositivo real.');
+      return;
+    }
     final participant = _room?.localParticipant;
     if (participant == null) return;
     final nextValue = !_cameraEnabled;
@@ -171,6 +183,10 @@ class _VetVideoCallScreenState extends State<VetVideoCallScreen> {
   }
 
   Future<void> _switchCamera() async {
+    if (await _isIosSimulator()) {
+      setState(() => _error = 'El cambio de camara no esta disponible en el simulador iOS.');
+      return;
+    }
     final participant = _room?.localParticipant;
     if (participant == null) return;
     final track = _localCameraTrack(participant);
@@ -693,6 +709,16 @@ bool _hasActiveAudio(Participant? participant) {
     if (publication.track != null && !publication.muted) return true;
   }
   return false;
+}
+
+Future<bool> _isIosSimulator() async {
+  if (!Platform.isIOS) return false;
+  try {
+    final info = await DeviceInfoPlugin().iosInfo;
+    return !info.isPhysicalDevice;
+  } catch (_) {
+    return false;
+  }
 }
 
 String _participantLabel(Participant participant) {

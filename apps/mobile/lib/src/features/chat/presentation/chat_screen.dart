@@ -174,7 +174,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<Map<String, dynamic>> _runAiTurn(
     String message,
-    List<Map<String, String>> history,
+    List<Map<String, dynamic>> history,
   ) async {
     final token = Supabase.instance.client.auth.currentSession?.accessToken;
     final userId = Supabase.instance.client.auth.currentUser?.id;
@@ -251,13 +251,15 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  List<Map<String, String>> _historyForApi() {
+  List<Map<String, dynamic>> _historyForApi() {
     final history = _messages
         .where((message) => message.includeInHistory)
         .map(
           (message) => {
             'role': message.isUser ? 'user' : 'assistant',
             'content': message.text,
+            if (!message.isUser && message.result != null)
+              'metadata': message.result!.payload.historyMetadata,
           },
         )
         .toList(growable: false);
@@ -1184,6 +1186,7 @@ class _MessageBubble extends StatelessWidget {
               ),
               if (!isUser &&
                   canShowActions &&
+                  message.result?.payload.canShowActions == true &&
                   (message.result?.payload.recommendedService != null ||
                       message.result?.upgradePlan != null)) ...[
                 const SizedBox(height: 8),
@@ -1384,6 +1387,7 @@ class _HandoffPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final payload = result.payload;
+    if (!payload.canShowActions) return const SizedBox.shrink();
     final upgradePlan = result.upgradePlan;
     if (upgradePlan != null) {
       return Wrap(
@@ -1416,24 +1420,21 @@ class _HandoffPanel extends StatelessWidget {
         children: [
           if (canAlsoUseRecommended)
             _ServiceButton(
-              label:
-                  _productActionLabel(payload.actionLabel, recommendedService),
+              label: _serviceLabel(recommendedService),
               selected: true,
               enabled: !sending,
               onTap: () => onServiceSelected(recommendedService, result),
             ),
           if (!result.noActiveSubscription)
             _ServiceButton(
-              label: service == 'video'
-                  ? 'comprar video único'
-                  : 'comprar chat único',
+              label: _commerceServiceLabel(service),
               selected: true,
               enabled: !sending,
               onTap: () => onOneOffPurchaseSelected(service, result),
             ),
           if (!result.upgradeUnavailable)
             _ServiceButton(
-              label: 'mejorar plan',
+              label: 'Mejorar mi plan',
               selected: false,
               enabled: !sending,
               onTap: () => onUpgradeSelected(result),
@@ -1449,9 +1450,7 @@ class _HandoffPanel extends StatelessWidget {
       children: services.map((service) {
         final selected = service == recommended;
         return _ServiceButton(
-          label: selected
-              ? _productActionLabel(payload.actionLabel, service)
-              : _serviceLabel(service),
+          label: _serviceLabel(service),
           selected: selected,
           enabled: !sending,
           onTap: () => onServiceSelected(service, result),
@@ -1462,31 +1461,16 @@ class _HandoffPanel extends StatelessWidget {
 
   String _serviceLabel(String service) {
     return switch (service) {
-      'video' => 'video ahora',
-      'scheduled_video' => 'agendar video',
-      _ => 'chat',
+      'video' => 'Iniciar videollamada con especialista',
+      'scheduled_video' => 'Agendar consulta por videollamada',
+      _ => 'Iniciar chat con veterinario',
     };
   }
 
-  String _productActionLabel(String? label, String service) {
-    final fallback = _serviceLabel(service);
-    final normalized = (label ?? '').trim();
-    if (normalized.isEmpty) return fallback;
-    final lower = normalized.toLowerCase();
-    if (lower.contains('responder') ||
-        lower.contains('pregunta') ||
-        lower.contains('triaje')) {
-      return fallback;
-    }
-    final mentionsProduct = lower.contains('chat') ||
-        lower.contains('video') ||
-        lower.contains('videollamada') ||
-        lower.contains('agendar');
-    final isAction = lower.contains('iniciar') ||
-        lower.contains('empezar') ||
-        lower.contains('continuar') ||
-        lower.contains('agendar');
-    return mentionsProduct && isAction ? normalized : fallback;
+  String _commerceServiceLabel(String service) {
+    return service == 'video'
+        ? 'Comprar consulta por videollamada'
+        : 'Comprar consulta por chat';
   }
 }
 
@@ -2021,7 +2005,9 @@ class _AiChatPayload {
   const _AiChatPayload({
     required this.message,
     required this.formatVersion,
+    required this.nextStep,
     required this.displayBlocks,
+    required this.intakeQuestions,
     required this.urgency,
     required this.recommendedService,
     required this.actionLabel,
@@ -2030,6 +2016,10 @@ class _AiChatPayload {
 
   factory _AiChatPayload.fromJson(Map<String, dynamic> json) {
     final formatVersion = _toInt(json['formatVersion']) ?? 0;
+    final intakeQuestions = (_asList(json['intakeQuestions']) ?? const [])
+        .map((question) => question?.toString().trim() ?? '')
+        .where((question) => question.isNotEmpty)
+        .toList(growable: false);
     final displayBlocks = (_asList(json['displayBlocks']) ?? const [])
         .map(_asMap)
         .whereType<Map<String, dynamic>>()
@@ -2040,7 +2030,9 @@ class _AiChatPayload {
       message: json['message']?.toString() ??
           'Te ayudo a encontrar el veterinario adecuado.',
       formatVersion: formatVersion,
+      nextStep: json['nextStep']?.toString().toLowerCase() ?? '',
       displayBlocks: displayBlocks,
+      intakeQuestions: intakeQuestions,
       urgency: json['urgency']?.toString() ?? 'routine',
       recommendedService: json['recommendedService']?.toString(),
       actionLabel: json['actionLabel']?.toString(),
@@ -2050,13 +2042,33 @@ class _AiChatPayload {
 
   final String message;
   final int formatVersion;
+  final String nextStep;
   final List<_AiMessageBlock> displayBlocks;
+  final List<String> intakeQuestions;
   final String urgency;
   final String? recommendedService;
   final String? actionLabel;
   final bool safetyEscalation;
 
   bool get hasDisplayBlocks => formatVersion == 1 && displayBlocks.isNotEmpty;
+
+  bool get isInterviewStep {
+    if (nextStep == 'interview') return true;
+    if (intakeQuestions.isNotEmpty) return true;
+    final label = (actionLabel ?? '').toLowerCase();
+    return label.contains('responder') ||
+        label.contains('pregunta') ||
+        label.contains('triaje');
+  }
+
+  bool get canShowActions => !isInterviewStep;
+
+  Map<String, dynamic> get historyMetadata => {
+        if (nextStep.isNotEmpty) 'nextStep': nextStep,
+        'urgency': urgency,
+        'intakeQuestions': intakeQuestions,
+        if (recommendedService != null) 'recommendedService': recommendedService,
+      };
 }
 
 class _SubscriptionUpgradeOption {

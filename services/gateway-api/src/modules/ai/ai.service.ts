@@ -9,6 +9,7 @@ type AiDraftType = 'triage' | 'referral' | 'note' | 'care_plan';
 type AiReviewStatus = 'reviewed' | 'accepted' | 'rejected' | 'superseded';
 type AiApiMode = 'responses' | 'chat_completions';
 type AiReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh';
+type AiChatNextStep = 'interview' | 'recommendation' | 'activation' | 'handoff' | 'payment';
 
 type AiProviderConfig = {
   provider: string;
@@ -44,6 +45,14 @@ type AiChatRole = 'user' | 'assistant' | 'ai';
 type AiChatMessageInput = {
   role?: AiChatRole;
   content?: string;
+  metadata?: {
+    nextStep?: string;
+    urgency?: string;
+    intakeQuestions?: string[];
+    recommendedService?: string | null;
+    caseSummary?: string | null;
+    handoffSummary?: string | null;
+  };
 };
 
 type AiChatTurnInput = {
@@ -86,6 +95,7 @@ type AiChatTurnContext = {
 type AiChatTurnState = {
   urgentIntakeAlreadyAsked: boolean;
   afterUrgentIntakeAnswer: boolean;
+  latestUserLikelyAnsweringIntake: boolean;
   clinicalSignal: boolean;
   caseDetailSignal: boolean;
   explicitCareRequest: boolean;
@@ -453,6 +463,7 @@ export class AiService {
           'message',
           'formatVersion',
           'displayBlocks',
+          'nextStep',
           'urgency',
           'recommendedService',
           'actionLabel',
@@ -466,6 +477,7 @@ export class AiService {
         properties: {
           message: { type: 'string', description: 'Plain-text fallback for legacy clients, composed from the same content as displayBlocks.' },
           formatVersion: { type: 'integer', enum: [1], description: 'Version of the structured chat display contract.' },
+          nextStep: { type: 'string', enum: ['interview', 'recommendation', 'activation', 'handoff', 'payment'], description: 'Current interaction state. interview means the user should answer the message; recommendation/payment means the client may show action chips.' },
           displayBlocks: {
             type: 'array',
             description: 'Structured user-visible response blocks. New clients render this instead of parsing message text.',
@@ -758,6 +770,11 @@ export class AiService {
       'Do not invent specialty IDs, vet IDs, appointment slots, entitlements, prices, or session IDs.',
       'Before recommending chat or video activation, call check_service_access for the relevant service type.',
       'Keep final responses short, warm, and action-oriented. If context is insufficient, ask a targeted question instead of showing all service choices.',
+      'Return nextStep as interview when the user should type an answer to intake, urgency, pet-selection, or handoff-context questions. During interview turns, do not offer service choices.',
+      'Return nextStep as recommendation only when you have enough context to present chat, immediate video, or scheduled video as user actions. Recommendation turns must not contain numbered intake questions.',
+      'Return nextStep as payment only when the best next action is buying a one-off service or upgrading a plan. Return activation or handoff only when the service has already been activated or handed off.',
+      'When nextStep is recommendation or payment, write an AI-generated transition message that complements the product actions shown by the app and explains the user can continue by choosing one of the available actions.',
+      'For recommendation or payment turns, do not include numbered_list blocks or intake-style questions. Use one short AI-generated transition paragraph and, if needed, one safety_note. The app will render the available product actions separately.',
       'Return formatVersion as 1 and populate displayBlocks as the source of truth for chat UI rendering. Keep message as a plain-text fallback composed from the same displayBlocks content.',
       'Use displayBlocks type paragraph for normal short copy, numbered_list for ordered questions, bullet_list for short option lists, and safety_note for concise emergency or urgent escalation copy.',
       'For paragraph and safety_note blocks, set text to the visible sentence or short paragraph and items to an empty array. For numbered_list and bullet_list blocks, set text to null and put each visible row in items.',
@@ -776,26 +793,43 @@ export class AiService {
         const content = String(message?.content || '').trim();
         if (!content) return null;
         const role = message?.role === 'assistant' || message?.role === 'ai' ? 'assistant' : 'user';
-        return { role, content };
+        const metadata = message?.metadata && typeof message.metadata === 'object' && !Array.isArray(message.metadata)
+          ? message.metadata
+          : undefined;
+        return { role, content, metadata };
       })
-      .filter(Boolean) as Array<{ role: 'user' | 'assistant'; content: string }>;
+      .filter(Boolean) as Array<{ role: 'user' | 'assistant'; content: string; metadata?: AiChatMessageInput['metadata'] }>;
     const currentMessage = String(input.message || '').trim();
     if (currentMessage) normalized.push({ role: 'user', content: currentMessage });
     return normalized.slice(-12);
   }
 
-  private chatTurnState(messages: Array<{ role: 'user' | 'assistant'; content: string }>): AiChatTurnState {
+  private chatTurnState(messages: Array<{ role: 'user' | 'assistant'; content: string; metadata?: AiChatMessageInput['metadata'] }>): AiChatTurnState {
     const priorMessages = messages.slice(0, -1);
     const latestMessage = messages[messages.length - 1]?.content || '';
-    const latestPriorAssistant = [...priorMessages].reverse().find((message) => message.role === 'assistant')?.content || '';
-    const urgentIntakeAlreadyAsked = /dolor abdominal|flancos|hecho heces|encías pálidas|respiración agitada|responder preguntas de urgencia|valorar urgencia/i.test(latestPriorAssistant)
+    const latestPriorAssistantMessage = [...priorMessages].reverse().find((message) => message.role === 'assistant');
+    const latestPriorAssistant = latestPriorAssistantMessage?.content || '';
+    const latestPriorMetadata = latestPriorAssistantMessage?.metadata || {};
+    const metadataQuestions = Array.isArray(latestPriorMetadata.intakeQuestions)
+      ? latestPriorMetadata.intakeQuestions.map((question) => String(question || '').trim()).filter(Boolean)
+      : [];
+    const metadataNextStep = this.normalizeChatNextStep(latestPriorMetadata.nextStep);
+    const metadataUrgentIntakeAsked = metadataNextStep === 'interview' && metadataQuestions.length > 0;
+    const urgentIntakeAlreadyAsked = metadataUrgentIntakeAsked
+      || /dolor abdominal|flancos|hecho heces|ha hecho heces|defecad|pop[oó]|encías pálidas|sangre en las encías|sangrado|respiración agitada|cólico|dificultad para tragar|responder preguntas de urgencia|valorar urgencia/i.test(latestPriorAssistant)
       || priorMessages.some((message) => message.role === 'assistant' && /dolor abdominal|hecho heces|encías pálidas|responder preguntas de urgencia/i.test(message.content));
     const afterUrgentIntakeAnswer = urgentIntakeAlreadyAsked && messages[messages.length - 1]?.role === 'user';
+    const latestUserLikelyAnsweringIntake = afterUrgentIntakeAnswer && (
+      /(^|\s)(1[.)]|2[.)]|3[.)])\s*/.test(latestMessage)
+      || metadataQuestions.length > 0
+      || /sí|si |no |poca|poco|normal|agua|heces|pop[oó]|dolor|sangre|fiebre|deca[ií]do|respira|come|comer/i.test(latestMessage)
+    );
     const clinicalSignal = this.hasClinicalSignal(latestMessage);
     const caseDetailSignal = clinicalSignal || this.hasCaseDetailSignal(latestMessage);
     return {
       urgentIntakeAlreadyAsked,
       afterUrgentIntakeAnswer,
+      latestUserLikelyAnsweringIntake,
       clinicalSignal,
       caseDetailSignal,
       explicitCareRequest: caseDetailSignal && this.wantsCareRequest(latestMessage),
@@ -987,6 +1021,51 @@ export class AiService {
   private fallbackActionLabel(serviceType: string, canUse: boolean | null | undefined) {
     if (canUse === true) return serviceType === 'video' ? 'Iniciar video' : 'Iniciar chat';
     return serviceType === 'video' ? 'Comprar video único' : 'Comprar chat único';
+  }
+
+  private normalizeChatNextStep(value: unknown): AiChatNextStep | null {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (normalized === 'interview' || normalized === 'recommendation' || normalized === 'activation' || normalized === 'handoff' || normalized === 'payment') {
+      return normalized;
+    }
+    return null;
+  }
+
+  private inferChatNextStep(payload: any, urgentIntake: boolean, questions: string[]): AiChatNextStep {
+    const explicit = this.normalizeChatNextStep(payload?.nextStep);
+    if (urgentIntake && questions.length) return 'interview';
+    const commerce = String(payload?.commerceRecommendation || '').toLowerCase();
+    if (commerce === 'one_off' || commerce === 'upgrade_plan') return 'payment';
+    if (payload?.recommendedService) return 'recommendation';
+    return explicit || 'interview';
+  }
+
+  private normalizeChatActionState(payload: any, urgentIntake: boolean, questions: string[]) {
+    const warnings = new Set<string>();
+    const nextStep = this.inferChatNextStep(payload, urgentIntake, questions);
+    payload.nextStep = nextStep;
+    if (nextStep === 'interview') {
+      if (payload.recommendedService) warnings.add('interview_recommended_service_removed');
+      payload.recommendedService = null;
+      if (!payload.actionLabel || /chat|video|agendar|iniciar|comprar|plan/i.test(String(payload.actionLabel))) {
+        warnings.add('interview_action_label_reset');
+        payload.actionLabel = questions.length ? 'Responder preguntas de urgencia' : 'Responder en el chat';
+      }
+      if (payload.commerceRecommendation !== 'none') {
+        if (payload.commerceRecommendation && payload.commerceRecommendation !== 'ask_more') warnings.add('interview_commerce_reset');
+        payload.commerceRecommendation = 'ask_more';
+      }
+    }
+    if ((nextStep === 'recommendation' || nextStep === 'payment') && questions.length) {
+      warnings.add('action_turn_intake_questions_removed');
+      payload.intakeQuestions = [];
+    }
+    const existingWarnings = Array.isArray(payload.actionUxWarnings)
+      ? payload.actionUxWarnings.map((warning: any) => String(warning || '').trim()).filter(Boolean)
+      : [];
+    payload.actionUxWarnings = Array.from(new Set([...existingWarnings, ...warnings])).slice(0, 12);
+    payload.actionUxRepaired = payload.actionUxWarnings.length > 0;
+    return payload;
   }
 
   private cleanChatDisplayText(value: unknown) {
@@ -1181,6 +1260,15 @@ export class AiService {
     return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
   }
 
+  private removeInterviewBlocksForActionTurn(blocks: AiChatDisplayBlock[], fallbackText: string, warnings: Set<string>) {
+    const filtered = blocks.filter((block) => block.type !== 'numbered_list');
+    if (filtered.length !== blocks.length) warnings.add('action_turn_removed_intake_list');
+    if (filtered.length) return filtered;
+    warnings.add('action_turn_fallback_paragraph');
+    const fallback = this.cleanChatBlockText(this.chatIntroBeforeList(fallbackText)) || this.cleanChatBlockText(fallbackText);
+    return fallback ? [{ type: 'paragraph', text: fallback, items: [] }] as AiChatDisplayBlock[] : [];
+  }
+
   private normalizeChatDisplayPayload(payload: any, urgentIntake: boolean) {
     const warnings = new Set<string>();
     const originalMessage = this.cleanChatDisplayText(payload?.message);
@@ -1191,6 +1279,11 @@ export class AiService {
     let blocks = this.normalizeExistingDisplayBlocks(payload?.displayBlocks, warnings);
     if (!blocks.length) blocks = this.deriveChatDisplayBlocks(originalMessage, questions, warnings);
     if (urgentIntake && questions.length) blocks = this.enforceUrgentQuestionBlock(blocks, questions, payload, warnings);
+    const nextStep = this.normalizeChatNextStep(payload?.nextStep);
+    if (nextStep === 'recommendation' || nextStep === 'payment') {
+      blocks = this.removeInterviewBlocksForActionTurn(blocks, originalMessage, warnings);
+      payload.intakeQuestions = [];
+    }
     if (blocks.length > 6) {
       warnings.add('display_blocks_capped');
       blocks = blocks.slice(0, 6);
@@ -1202,9 +1295,17 @@ export class AiService {
     payload.formatVersion = 1;
     payload.displayBlocks = blocks;
     payload.message = message;
-    payload.intakeQuestions = questions;
+    payload.intakeQuestions = (nextStep === 'recommendation' || nextStep === 'payment') ? [] : questions;
     payload.formattingRepaired = warnings.size > 0;
     payload.formattingWarnings = Array.from(warnings).slice(0, 12);
+    const actionWarnings = Array.isArray(payload.actionUxWarnings)
+      ? payload.actionUxWarnings.map((warning: any) => String(warning || '').trim()).filter(Boolean)
+      : [];
+    for (const warning of payload.formattingWarnings) {
+      if (String(warning).startsWith('action_turn_')) actionWarnings.push(String(warning));
+    }
+    payload.actionUxWarnings = Array.from(new Set(actionWarnings)).slice(0, 12);
+    payload.actionUxRepaired = payload.actionUxWarnings.length > 0;
     return payload;
   }
 
@@ -1212,6 +1313,7 @@ export class AiService {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload;
     const normalized = { ...payload };
     if (this.isGenericVetRequest(latestMessage)) {
+      normalized.nextStep = 'interview';
       normalized.urgency = 'routine';
       normalized.safetyEscalation = false;
       normalized.recommendedService = null;
@@ -1274,6 +1376,7 @@ export class AiService {
     if (state.caseDetailSignal && !normalized.handoffSummary) {
       normalized.handoffSummary = latestMessage.slice(0, 360);
     }
+    this.normalizeChatActionState(normalized, urgentIntake, questions);
     return this.normalizeChatDisplayPayload(normalized, urgentIntake);
   }
 
@@ -1441,9 +1544,10 @@ export class AiService {
       payload: {
         message: assistantMessage,
         formatVersion: 1,
+        nextStep: wantsVideo ? 'recommendation' : 'interview',
         displayBlocks: [{ type: wantsVideo ? 'safety_note' : 'paragraph', text: assistantMessage, items: [] }],
         urgency: wantsVideo ? 'urgent' : 'routine',
-        recommendedService: wantsVideo ? 'video' : 'chat',
+        recommendedService: wantsVideo ? 'video' : null,
         actionLabel: wantsVideo ? 'buscar videollamada' : 'buscar veterinario',
         safetyEscalation: wantsVideo,
         intakeQuestions: [],
@@ -1508,6 +1612,7 @@ export class AiService {
           ].join('\n')
         : fallbackIntro,
       formatVersion: 1,
+      nextStep: 'interview',
       displayBlocks: shouldRoute
         ? [
             { type: 'paragraph', text: fallbackIntro, items: [] },
@@ -1515,8 +1620,8 @@ export class AiService {
           ]
         : [{ type: 'paragraph', text: fallbackIntro, items: [] }],
       urgency: shouldRoute ? 'urgent' : 'routine',
-      recommendedService: shouldRoute ? serviceType : null,
-      actionLabel: shouldRoute ? this.fallbackActionLabel(serviceType, serviceAccess?.canUse === true) : null,
+      recommendedService: null,
+      actionLabel: shouldRoute ? 'Responder preguntas de urgencia' : null,
       safetyEscalation: shouldRoute,
       intakeQuestions: questions,
       caseSummary: shouldRoute ? latestMessage.slice(0, 240) : null,
@@ -1569,6 +1674,27 @@ export class AiService {
       messageLength: String(payload?.message || '').length,
       formattingRepaired: payload?.formattingRepaired === true,
       formattingWarnings: warnings,
+    };
+  }
+
+  private chatActionUxEventMetadata(payload: any) {
+    const nextStep = this.normalizeChatNextStep(payload?.nextStep);
+    const intakeQuestions = Array.isArray(payload?.intakeQuestions) ? payload.intakeQuestions : [];
+    const recommendedService = String(payload?.recommendedService || '').trim() || null;
+    const commerceRecommendation = String(payload?.commerceRecommendation || '').trim() || null;
+    const warnings = Array.isArray(payload?.actionUxWarnings)
+      ? payload.actionUxWarnings.map((warning: any) => String(warning || '').trim()).filter(Boolean).slice(0, 12)
+      : [];
+    const mixedQuestionActionState = intakeQuestions.length > 0 && !!recommendedService;
+    return {
+      nextStep: nextStep || null,
+      recommendedService,
+      commerceRecommendation,
+      intakeQuestionCount: intakeQuestions.length,
+      canShowActions: nextStep !== 'interview' && intakeQuestions.length === 0 && (!!recommendedService || commerceRecommendation === 'one_off' || commerceRecommendation === 'upgrade_plan'),
+      mixedQuestionActionState,
+      actionUxRepaired: payload?.actionUxRepaired === true || warnings.length > 0,
+      actionUxWarnings: warnings,
     };
   }
 
@@ -1666,6 +1792,7 @@ export class AiService {
           toolResults: result.toolResults,
           responseId: result.responseId || null,
           formatting: this.chatFormattingEventMetadata(result.payload),
+          actionUx: this.chatActionUxEventMetadata(result.payload),
         },
         latencyMs: Date.now() - startedAt,
       });
@@ -1682,6 +1809,7 @@ export class AiService {
               toolResults: fallback.toolResults,
               responseId: null,
               formatting: this.chatFormattingEventMetadata(fallback.payload),
+              actionUx: this.chatActionUxEventMetadata(fallback.payload),
               fallback: true,
               fallbackReason: fallback.fallbackReason,
             },
