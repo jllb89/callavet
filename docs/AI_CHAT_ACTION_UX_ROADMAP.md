@@ -26,6 +26,27 @@ There is also a backend state issue. The gateway infers whether urgent intake wa
 - Never show service activation chips while the user is expected to answer intake questions.
 - Never show a numbered intake list and service activation chips in the same assistant turn.
 
+## Intake Question Domains
+
+The assistant should choose 2-3 questions from the most relevant missing domains, rather than use symptom-specific scripts:
+
+1. Onset/progression.
+2. Intake/output: appetite, water, manure, urine.
+3. Local severity: bleeding, swelling, wound, lameness, discharge, and similar local findings.
+4. Systemic red flags: fever, depression, abnormal breathing, pale gums, collapse, severe pain.
+5. Context: affected horse, medications, relevant history, trauma, exposure.
+
+Quality criteria:
+
+- Ask 2-3 questions maximum.
+- Cover onset/progression when relevant.
+- Cover systemic red flags when urgent.
+- Do not diagnose.
+- Do not prescribe.
+- Do not ask duplicate questions after the user answers.
+- Do not show action chips during interview.
+- Move to recommendation after enough context.
+
 ## Phase 1: Explicit Interaction State
 
 Status: complete on 2026-07-02.
@@ -128,6 +149,7 @@ Purpose: prevent mixed-state regressions.
 Tasks:
 
 - Completed: add fixtures for urgent first turn, urgent answer turn, routine recommendation, generic vet request, and entitlement exhaustion in `docs/ai-chat-action-ux-fixtures.json`.
+- Completed: fixtures encode the general intake-domain quality criteria without introducing symptom-specific canned answers.
 - Completed: assert `nextStep == interview` never exposes service actions.
 - Completed: assert `nextStep == recommendation` and `nextStep == payment` have no `intakeQuestions` or numbered intake blocks.
 - Completed: add `actionUx` metadata to `ai_events.response_payload`, including `nextStep`, `intakeQuestionCount`, `canShowActions`, `mixedQuestionActionState`, and action repair warnings.
