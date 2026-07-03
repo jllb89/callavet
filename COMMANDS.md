@@ -46,6 +46,40 @@ cd /Users/jorge/Desktop/call-a-vet/apps/mobile && flutter run \
 #   [AIChat][Home]        home composer and inline chat state changes
 #   [PostLogin][Routing]  auth/profile routing into home
 #   [AIChat][Mobile]      auth snapshot, request, response, parsing, UI state
+# Video handoff roadmap log tags to watch:
+#   Backend JSON logs:      scope=video_handoff_roadmap component=sessions|ai|video|vets
+#   [VideoRoadmap][Owner]   owner video room/create/end/end-state/post-call/rejoin
+#   [VideoRoadmap][VetDashboard] vet pre-call AI handoff fetch and join path
+#   [VideoRoadmap][VetVideo] vet video room/create/end/end-state
+
+## Video handoff roadmap regression checks
+
+Local fixture/schema eval for AI handoff guardrails:
+
+```bash
+cd /Users/jorge/Desktop/call-a-vet && pnpm eval:video-handoff-fixtures
+```
+
+Direct SQL observability smoke after sourcing staging env:
+
+```bash
+cd /Users/jorge/Desktop/call-a-vet && env/scripts/smoke-video-observability.sh
+```
+
+Credentialed two-sided regression smoke after deploying gateway/mobile/vet changes. Requires real owner/vet JWTs and matching staging IDs:
+
+```bash
+cd /Users/jorge/Desktop/call-a-vet && \
+  GATEWAY_BASE=https://cav-gateway-staging-ugvx.onrender.com \
+  OWNER_TOKEN="$OWNER_TOKEN" \
+  VET_TOKEN="$VET_TOKEN" \
+  PET_ID="$PET_ID" \
+  VET_ID="$VET_ID" \
+  SPECIALTY_ID="$SPECIALTY_ID" \
+  env/scripts/smoke-video-roadmap-regressions.sh
+```
+
+This smoke checks vet busy lock race behavior, vet handoff endpoint visibility, vet-ended call reason mapping, owner rejoin eligibility, AI post-call message generation, and observability views.
 
 
 ## LiveKit webhook smoke

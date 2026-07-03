@@ -7,6 +7,15 @@ import { RateLimit } from '../rate-limit/rate-limit.decorator';
 import { ValidatorService } from '../config/validator.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { EntitlementService } from '../subscriptions/entitlement.service';
+import { AiService } from '../ai/ai.service';
+
+type AiSessionStartContext = {
+  source?: string;
+  aiEventId?: string;
+  assistantPayload?: Record<string, any>;
+  messages?: Array<Record<string, any>>;
+  routing?: Record<string, any>;
+};
 
 type SessionStartBody = {
   userId?: string;
@@ -22,9 +31,14 @@ type SessionStartBody = {
   specialty_id?: string;
   priority?: string;
   urgency?: string;
+  aiContext?: AiSessionStartContext;
 };
 
 const SESSION_PRIORITIES = new Set(['routine', 'urgent', 'emergency']);
+const VET_LOCK_TTL_BY_KIND: Record<'chat'|'video', string> = {
+  chat: '45 minutes',
+  video: '90 minutes',
+};
 
 @Controller('sessions')
 @UseGuards(AuthGuard)
@@ -35,7 +49,61 @@ export class SessionsController {
     private readonly validator: ValidatorService,
     private readonly notifications: NotificationsService,
     private readonly entitlements: EntitlementService,
+    private readonly ai: AiService,
   ) {}
+
+  private roadmapLog(event: string, metadata: Record<string, any> = {}) {
+    console.log(JSON.stringify({
+      scope: 'video_handoff_roadmap',
+      component: 'sessions',
+      event,
+      at: new Date().toISOString(),
+      ...metadata,
+    }));
+  }
+
+  private normalizeAiContext(value: AiSessionStartContext | undefined) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const source = String(value.source || '').trim();
+    const hasPayload = value.assistantPayload && typeof value.assistantPayload === 'object' && !Array.isArray(value.assistantPayload);
+    const hasMessages = Array.isArray(value.messages) && value.messages.length > 0;
+    const aiEventId = String(value.aiEventId || '').trim();
+    if (!source && !hasPayload && !hasMessages && !aiEventId) return null;
+    return value;
+  }
+
+  private async generateAiHandoff(sessionId: string, aiContext: AiSessionStartContext | null) {
+    if (!aiContext) return null;
+    this.roadmapLog('handoff.generate.requested', {
+      sessionId,
+      source: aiContext.source || null,
+      sourceAiEventId: aiContext.aiEventId || null,
+      messageCount: Array.isArray(aiContext.messages) ? aiContext.messages.length : 0,
+      hasAssistantPayload: !!aiContext.assistantPayload,
+    });
+    try {
+      const result = await this.ai.generateSessionHandoff({
+        sessionId,
+        sourceAiEventId: aiContext.aiEventId,
+        aiContext,
+      });
+      this.roadmapLog('handoff.generate.succeeded', {
+        sessionId,
+        eventId: result?.eventId || null,
+        handoffId: result?.handoff?.id || null,
+        provider: result?.provider || null,
+        model: result?.model || null,
+      });
+      return result;
+    } catch (error: any) {
+      this.roadmapLog('handoff.generate.failed', {
+        sessionId,
+        error: error?.message || String(error),
+      });
+      console.error('[sessions.start] ai handoff generation failed:', error?.message || error);
+      return null;
+    }
+  }
 
   @Get()
   async list(
@@ -118,6 +186,91 @@ export class SessionsController {
     }
   }
 
+  @Get(':sessionId/handoff')
+  async handoff(@Param('sessionId') sessionId: string) {
+    try {
+      this.validator.validateUUID(sessionId, 'sessionId');
+      if (this.db.isStub) return { ready: false, sessionId, handoff: null, mode: 'stub' } as any;
+      const row = await this.db.runInTx(async (q) => {
+        const { rows } = await q<any>(
+          `select s.id::text as session_id,
+                  s.user_id::text as user_id,
+                  s.vet_id::text as vet_id,
+                  s.pet_id::text as pet_id,
+                  s.specialty_id::text as specialty_id,
+                  s.priority,
+                  s.status,
+                  s.mode,
+                  s.started_at,
+                  p.name as pet_name,
+                  vu.full_name as vet_name,
+                  vs.name as specialty_name,
+                  h.id::text as handoff_id,
+                  h.ai_event_id::text as ai_event_id,
+                  h.source_ai_event_id::text as source_ai_event_id,
+                  h.urgency as handoff_urgency,
+                  h.summary_text,
+                  h.reported_signs,
+                  h.red_flags,
+                  h.questions_answered,
+                  h.questions_unanswered,
+                  h.recommended_first_checks,
+                  h.created_at as handoff_created_at
+             from chat_sessions s
+        left join pets p on p.id = s.pet_id
+        left join users vu on vu.id = s.vet_id
+        left join vet_specialties vs on vs.id = s.specialty_id
+        left join lateral (
+                  select *
+                    from ai_handoffs h
+                   where h.session_id = s.id
+                   order by h.created_at desc
+                   limit 1
+             ) h on true
+            where s.id = $1::uuid
+              and (s.user_id = auth.uid() or s.vet_id = auth.uid() or is_admin())
+            limit 1`,
+          [sessionId]
+        );
+        return rows[0];
+      });
+      if (!row) throw new HttpException('not_found', HttpStatus.NOT_FOUND);
+      return {
+        ready: !!row.handoff_id,
+        session: {
+          id: row.session_id,
+          userId: row.user_id,
+          vetId: row.vet_id,
+          petId: row.pet_id,
+          specialtyId: row.specialty_id,
+          priority: row.priority,
+          status: row.status,
+          mode: row.mode,
+          startedAt: row.started_at,
+          petName: row.pet_name,
+          vetName: row.vet_name,
+          specialtyName: row.specialty_name,
+        },
+        handoff: row.handoff_id ? {
+          id: row.handoff_id,
+          aiEventId: row.ai_event_id,
+          sourceAiEventId: row.source_ai_event_id,
+          urgency: row.handoff_urgency,
+          summaryText: row.summary_text,
+          reportedSigns: row.reported_signs || [],
+          redFlags: row.red_flags || [],
+          questionsAnswered: row.questions_answered || [],
+          questionsUnanswered: row.questions_unanswered || [],
+          recommendedFirstChecks: row.recommended_first_checks || [],
+          createdAt: row.handoff_created_at,
+        } : null,
+      };
+    } catch (e: any) {
+      if (e instanceof HttpException) throw e;
+      throw new HttpException(e?.message || 'handoff_failed', HttpStatus.BAD_REQUEST);
+    }
+  }
+
   @Patch(':sessionId')
   async patch(@Param('sessionId') sessionId: string, @Body() body: { status?: string }) {
     try {
@@ -151,6 +304,9 @@ export class SessionsController {
             returning id, user_id, vet_id, pet_id, status, mode, started_at, ended_at`,
           [sessionId, status, endNow]
         );
+        if (rows.length && endNow) {
+          await q('select fn_release_vet_consult_lock($1::uuid, $2)', [sessionId, `session_${status}`]);
+        }
         return rows[0];
       });
       if (!row) throw new HttpException('not_found', HttpStatus.NOT_FOUND);
@@ -204,6 +360,16 @@ export class SessionsController {
       const vetId = (body.vetId || body.vet_id || '').toString().trim() || null;
       const specialtyId = (body.specialtyId || body.specialty_id || '').toString().trim() || null;
       const priority = (body.priority || body.urgency || '').toString().trim().toLowerCase() || null;
+      const aiContext = this.normalizeAiContext(body.aiContext);
+      this.roadmapLog('session.start.received', {
+        kind,
+        petId,
+        vetId,
+        specialtyId,
+        priority,
+        hasAiContext: !!aiContext,
+        sourceAiEventId: aiContext?.aiEventId || null,
+      });
       if (petId) this.validator.validateUUID(petId, 'petId');
       if (vetId) this.validator.validateUUID(vetId, 'vetId');
       if (specialtyId) this.validator.validateUUID(specialtyId, 'specialtyId');
@@ -213,6 +379,7 @@ export class SessionsController {
         return { ok: true, mode: 'stub', sessionId, kind, petId, vetId, specialtyId, priority };
       }
       const result = await this.db.runInTx(async (q) => {
+        await q(`select fn_release_expired_vet_consult_locks()`);
         if (petId) {
           const { rows: petRows } = await q<{ id: string }>(
             `select id
@@ -247,6 +414,25 @@ export class SessionsController {
           if (!vet) throw new HttpException('vet_not_found', HttpStatus.BAD_REQUEST);
           if (!vet.is_approved) throw new HttpException('vet_not_approved', HttpStatus.BAD_REQUEST);
           if (!vet.specialty_ok) throw new HttpException('vet_missing_specialty', HttpStatus.BAD_REQUEST);
+          this.roadmapLog('vet_lock.check', { vetId, specialtyId, kind });
+          const { rows: lockRows } = await q<{ session_id: string; expires_at: string }>(
+            `select session_id, expires_at::text
+               from vet_consult_locks
+              where vet_id = $1::uuid
+                and released_at is null
+                and expires_at > now()
+              limit 1
+              for update`,
+            [vetId]
+          );
+          if (lockRows[0]) {
+            this.roadmapLog('vet_lock.busy', {
+              vetId,
+              blockingSessionId: lockRows[0].session_id,
+              expiresAt: lockRows[0].expires_at,
+            });
+            throw new HttpException('vet_busy', HttpStatus.CONFLICT);
+          }
         }
 
         // 1) Create session first (FK target) using auth.uid() for user_id
@@ -261,6 +447,51 @@ export class SessionsController {
         const routedVetId = r2?.[0]?.vet_id || null;
         const routedSpecialtyId = r2?.[0]?.specialty_id || null;
         const routedPriority = r2?.[0]?.priority || null;
+        if (routedVetId) {
+          const lockResult = await q<{ vet_id: string }>(
+            `insert into vet_consult_locks (vet_id, session_id, mode, expires_at, reason, created_at, updated_at)
+             values ($1::uuid, $2::uuid, $3, now() + $4::interval, 'session_start', now(), now())
+             on conflict (vet_id) do update
+               set session_id = case
+                     when vet_consult_locks.released_at is not null or vet_consult_locks.expires_at <= now() then excluded.session_id
+                     else vet_consult_locks.session_id
+                   end,
+                   mode = case
+                     when vet_consult_locks.released_at is not null or vet_consult_locks.expires_at <= now() then excluded.mode
+                     else vet_consult_locks.mode
+                   end,
+                   locked_at = case
+                     when vet_consult_locks.released_at is not null or vet_consult_locks.expires_at <= now() then now()
+                     else vet_consult_locks.locked_at
+                   end,
+                   expires_at = case
+                     when vet_consult_locks.released_at is not null or vet_consult_locks.expires_at <= now() then excluded.expires_at
+                     else vet_consult_locks.expires_at
+                   end,
+                   released_at = case
+                     when vet_consult_locks.released_at is not null or vet_consult_locks.expires_at <= now() then null
+                     else vet_consult_locks.released_at
+                   end,
+                   reason = case
+                     when vet_consult_locks.released_at is not null or vet_consult_locks.expires_at <= now() then excluded.reason
+                     else vet_consult_locks.reason
+                   end,
+                   updated_at = now()
+             where vet_consult_locks.released_at is not null or vet_consult_locks.expires_at <= now()
+             returning vet_id`,
+            [routedVetId, dbSessionId, kind, VET_LOCK_TTL_BY_KIND[kind]]
+          );
+          if (!lockResult.rows[0]) {
+            this.roadmapLog('vet_lock.conflict_on_acquire', { vetId: routedVetId, sessionId: dbSessionId, kind });
+            throw new HttpException('vet_busy', HttpStatus.CONFLICT);
+          }
+          this.roadmapLog('vet_lock.acquired', {
+            vetId: routedVetId,
+            sessionId: dbSessionId,
+            kind,
+            ttl: VET_LOCK_TTL_BY_KIND[kind],
+          });
+        }
         // 2) Reserve entitlement referencing the created session id
         const reserve = await this.entitlements.reserveForAuthUser(q, kind, dbSessionId);
         const ok = reserve?.ok === true;
@@ -360,6 +591,12 @@ export class SessionsController {
         return { dbSessionId, petId: routedPetId, vetId: routedVetId, specialtyId: routedSpecialtyId, priority: routedPriority, consumptionId, overage, msg, creditConsumptionId, creditUsedCode, creditRemaining, checkout };
       });
       if (result.overage) {
+        this.roadmapLog('session.start.pending_payment', {
+          sessionId: result.dbSessionId,
+          kind,
+          vetId: result.vetId,
+          reason: result.msg || 'no_entitlement',
+        });
         return {
           ok: true,
           sessionId: result.dbSessionId,
@@ -386,7 +623,19 @@ export class SessionsController {
           },
         };
       }
+      const handoff = await this.generateAiHandoff(result.dbSessionId, aiContext);
       const finalConsumption = result.consumptionId || result.creditConsumptionId || undefined;
+      this.roadmapLog('session.start.completed', {
+        sessionId: result.dbSessionId,
+        kind,
+        petId: result.petId,
+        vetId: result.vetId,
+        specialtyId: result.specialtyId,
+        priority: result.priority,
+        hasHandoff: !!handoff?.handoff,
+        handoffId: handoff?.handoff?.id || null,
+        consumptionId: finalConsumption || null,
+      });
       return {
         ok: true,
         sessionId: result.dbSessionId,
@@ -397,6 +646,7 @@ export class SessionsController {
         consumptionId: finalConsumption,
         kind,
         overage: false,
+        handoff: handoff ? { id: handoff.handoff?.id || null, ready: !!handoff.handoff } : undefined,
         credit: result.creditConsumptionId ? { used: true, code: result.creditUsedCode, remaining: result.creditRemaining } : undefined,
       };
     } catch (e: any) {
@@ -415,6 +665,9 @@ export class SessionsController {
         );
         if (rows.length && body.consumptionId) {
           await q('select fn_commit_consumption($1) as ok', [body.consumptionId]);
+        }
+        if (rows.length) {
+          await q('select fn_release_vet_consult_lock($1::uuid, $2)', [body.sessionId, 'session_end']);
         }
         return rows.length;
       });

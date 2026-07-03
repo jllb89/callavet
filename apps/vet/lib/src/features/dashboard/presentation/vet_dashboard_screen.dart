@@ -10,6 +10,10 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../core/config/environment.dart';
 
+void _vetDashboardRoadmapLog(String message) {
+  debugPrint('[VideoRoadmap][VetDashboard] $message');
+}
+
 class VetDashboardScreen extends StatefulWidget {
   const VetDashboardScreen({super.key});
 
@@ -276,6 +280,43 @@ class _VetDashboardScreenState extends State<VetDashboardScreen>
     context.push('/video/${Uri.encodeComponent(normalizedSessionId)}');
   }
 
+  void _openVideoHandoff(_VideoJoinTarget target) {
+    final sessionId = target.sessionId.trim();
+    if (sessionId.isEmpty) return;
+    _vetDashboardRoadmapLog('handoff.open sessionId=$sessionId name=${target.name}');
+    final handoffFuture = _getGatewayJson(
+      '/sessions/${Uri.encodeComponent(sessionId)}/handoff',
+    ).then((json) {
+      final bundle = _SessionHandoffBundle.fromJson(json);
+      _vetDashboardRoadmapLog(
+          'handoff.fetch.succeeded sessionId=$sessionId ready=${bundle.ready} hasHandoff=${bundle.handoff != null}');
+      return bundle;
+    }).catchError((error) {
+      _vetDashboardRoadmapLog('handoff.fetch.failed sessionId=$sessionId error=$error');
+      throw error;
+    });
+
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) {
+        return _PreCallHandoffSheet(
+          target: target,
+          handoffFuture: handoffFuture,
+          onJoin: () {
+            _vetDashboardRoadmapLog('handoff.join_video sessionId=$sessionId');
+            Navigator.of(sheetContext).pop();
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) _openVideoCall(sessionId);
+            });
+          },
+        );
+      },
+    );
+  }
+
   void _openChat(String sessionId) {
     final normalizedSessionId = sessionId.trim();
     if (normalizedSessionId.isEmpty) return;
@@ -354,7 +395,7 @@ class _VetDashboardScreenState extends State<VetDashboardScreen>
         : _DashboardPage(
             availableNow: _availableNow,
             profileBundleFuture: _profileBundleFuture,
-            onJoinVideo: _openVideoCall,
+          onJoinVideo: _openVideoHandoff,
             onOpenChat: _openChat,
             onEndConsult: _endActiveConsult,
             endingConsultIds: _endingConsultIds,
@@ -539,7 +580,7 @@ class _DashboardPage extends StatelessWidget {
 
   final bool availableNow;
   final Future<_VetProfileBundle> profileBundleFuture;
-  final ValueChanged<String> onJoinVideo;
+  final ValueChanged<_VideoJoinTarget> onJoinVideo;
   final ValueChanged<String> onOpenChat;
   final ValueChanged<_ActiveConsult> onEndConsult;
   final Set<String> endingConsultIds;
@@ -651,7 +692,7 @@ class _ActivitySections extends StatelessWidget {
 
   final bool availableNow;
   final Future<_VetProfileBundle> profileBundleFuture;
-  final ValueChanged<String> onJoinVideo;
+  final ValueChanged<_VideoJoinTarget> onJoinVideo;
   final ValueChanged<String> onOpenChat;
   final ValueChanged<_ActiveConsult> onEndConsult;
   final Set<String> endingConsultIds;
@@ -740,7 +781,7 @@ class _ActiveConsultEventList extends StatelessWidget {
   });
 
   final List<_ActiveConsult> consults;
-  final ValueChanged<String> onJoinVideo;
+  final ValueChanged<_VideoJoinTarget> onJoinVideo;
   final ValueChanged<String> onOpenChat;
   final ValueChanged<_ActiveConsult> onEndConsult;
   final Set<String> endingConsultIds;
@@ -756,7 +797,7 @@ class _ActiveConsultEventList extends StatelessWidget {
             consult: consult,
             isEnding: isEnding,
             onJoinVideo: consult.canJoinVideo
-                ? () => onJoinVideo(consult.sessionId)
+              ? () => onJoinVideo(consult.videoJoinTarget)
                 : null,
             onOpenChat: consult.canOpenChat
                 ? () => onOpenChat(consult.sessionId)
@@ -890,15 +931,12 @@ class _ActiveConsultEventRow extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 10),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: consult.tags
-                  .map((label) => _ConsultTag(label: label))
-                  .toList(),
-            ),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: consult.tags
+                .map((label) => _ConsultTag(label: label))
+                .toList(),
           ),
         ],
       ),
@@ -913,26 +951,25 @@ class _ConsultTag extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      constraints: const BoxConstraints(minHeight: 31),
-      padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 7),
-      alignment: Alignment.center,
+    return DecoratedBox(
       decoration: BoxDecoration(
         color: Colors.black.withValues(alpha: 0.45),
         borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
       ),
-      child: Text(
-        label,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        softWrap: false,
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 12,
-          fontFamily: 'ABC Diatype',
-          fontWeight: FontWeight.w500,
-          height: 1.0,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 8),
+        child: Text(
+          label,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          softWrap: false,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 12,
+            fontFamily: 'ABC Diatype',
+            fontWeight: FontWeight.w500,
+            height: 1.0,
+          ),
         ),
       ),
     );
@@ -1096,7 +1133,7 @@ class _UpcomingAppointmentsList extends StatelessWidget {
       {required this.appointments, required this.onJoinVideo});
 
   final List<_UpcomingAppointment> appointments;
-  final ValueChanged<String> onJoinVideo;
+  final ValueChanged<_VideoJoinTarget> onJoinVideo;
 
   @override
   Widget build(BuildContext context) {
@@ -1123,7 +1160,7 @@ class _UpcomingAppointmentsList extends StatelessWidget {
                 name: appointment.name,
                 time: appointment.formattedStart,
                 onJoin: appointment.canJoinVideo
-                    ? () => onJoinVideo(appointment.sessionId)
+                  ? () => onJoinVideo(appointment.videoJoinTarget)
                     : null,
               ),
             ),
@@ -1221,6 +1258,485 @@ class _LoadingTag extends StatelessWidget {
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.06),
         borderRadius: BorderRadius.circular(40),
+      ),
+    );
+  }
+}
+
+class _PreCallHandoffSheet extends StatelessWidget {
+  const _PreCallHandoffSheet({
+    required this.target,
+    required this.handoffFuture,
+    required this.onJoin,
+  });
+
+  final _VideoJoinTarget target;
+  final Future<_SessionHandoffBundle> handoffFuture;
+  final VoidCallback onJoin;
+
+  @override
+  Widget build(BuildContext context) {
+    return FractionallySizedBox(
+      heightFactor: 0.88,
+      child: DecoratedBox(
+        decoration: const BoxDecoration(
+          color: Color(0xFF111113),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(22, 18, 22, 18),
+          child: FutureBuilder<_SessionHandoffBundle>(
+            future: handoffFuture,
+            builder: (context, snapshot) {
+              final bundle = snapshot.data;
+              final session = bundle?.session;
+              final handoff = bundle?.handoff;
+              final petName = session?.petName.trim().isNotEmpty == true
+                  ? session!.petName
+                  : target.name;
+              final priority = handoff?.urgency ?? session?.priority ?? target.priority;
+              final specialty = session?.specialtyName ?? target.specialtyName;
+              final isLoading = snapshot.connectionState == ConnectionState.waiting;
+              final hasError = snapshot.hasError;
+
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Center(
+                    child: Container(
+                      width: 42,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.22),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 22),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              petName.trim().isEmpty ? 'Consulta' : petName,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 28,
+                                fontFamily: 'ABC Diatype',
+                                fontWeight: FontWeight.w400,
+                                height: 1.04,
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: [
+                                _HandoffBadge(label: _handoffPriorityLabel(priority)),
+                                if (specialty != null && specialty.trim().isNotEmpty)
+                                  _HandoffBadge(label: specialty.trim()),
+                                const _HandoffBadge(label: 'video'),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        onPressed: () => Navigator.of(context).pop(),
+                        icon: const Icon(Icons.close_rounded,
+                            color: Colors.white, size: 22),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 20),
+                  Expanded(
+                    child: SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (isLoading)
+                            const _HandoffLoadingState()
+                          else if (hasError)
+                            const _HandoffFallbackState()
+                          else if (handoff == null)
+                            const _HandoffMissingState()
+                          else
+                            _HandoffReadyState(handoff: handoff),
+                          const SizedBox(height: 20),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  _JoinVideoButton(onTap: onJoin),
+                ],
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _HandoffReadyState extends StatelessWidget {
+  const _HandoffReadyState({required this.handoff});
+
+  final _AiHandoff handoff;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _HandoffSection(
+          title: 'Resumen AI',
+          child: Text(
+            handoff.summaryText,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.86),
+              fontSize: 15,
+              fontFamily: 'ABC Diatype',
+              fontWeight: FontWeight.w400,
+              height: 1.28,
+            ),
+          ),
+        ),
+        if (handoff.redFlags.isNotEmpty)
+          _HandoffSection(
+            title: 'Red flags',
+            child: _HandoffBulletList(items: handoff.redFlags),
+          ),
+        if (handoff.reportedSigns.isNotEmpty)
+          _HandoffSection(
+            title: 'Signos reportados',
+            child: _HandoffBulletList(items: handoff.reportedSigns),
+          ),
+        if (handoff.questionsAnswered.isNotEmpty)
+          _HandoffSection(
+            title: 'Respuestas del propietario',
+            child: Column(
+              children: handoff.questionsAnswered
+                  .map((answer) => _HandoffAnswerRow(answer: answer))
+                  .toList(),
+            ),
+          ),
+        if (handoff.questionsUnanswered.isNotEmpty)
+          _HandoffSection(
+            title: 'Por confirmar',
+            child: _HandoffBulletList(items: handoff.questionsUnanswered),
+          ),
+        if (handoff.recommendedFirstChecks.isNotEmpty)
+          _HandoffSection(
+            title: 'Primeras revisiones sugeridas',
+            child: _HandoffBulletList(items: handoff.recommendedFirstChecks),
+          ),
+      ],
+    );
+  }
+}
+
+class _HandoffSection extends StatelessWidget {
+  const _HandoffSection({required this.title, required this.child});
+
+  final String title;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.48),
+              fontSize: 12,
+              fontFamily: 'ABC Diatype',
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: 9),
+          child,
+        ],
+      ),
+    );
+  }
+}
+
+class _HandoffBulletList extends StatelessWidget {
+  const _HandoffBulletList({required this.items});
+
+  final List<String> items;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: items
+          .map(
+            (item) => Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    width: 5,
+                    height: 5,
+                    margin: const EdgeInsets.only(top: 7),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.62),
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      item,
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.78),
+                        fontSize: 14,
+                        fontFamily: 'ABC Diatype',
+                        fontWeight: FontWeight.w400,
+                        height: 1.28,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          )
+          .toList(),
+    );
+  }
+}
+
+class _HandoffAnswerRow extends StatelessWidget {
+  const _HandoffAnswerRow({required this.answer});
+
+  final _HandoffQuestionAnswer answer;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(13),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            answer.question,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.52),
+              fontSize: 12,
+              fontFamily: 'ABC Diatype',
+              fontWeight: FontWeight.w400,
+              height: 1.24,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            answer.answer,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.86),
+              fontSize: 14,
+              fontFamily: 'ABC Diatype',
+              fontWeight: FontWeight.w400,
+              height: 1.25,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HandoffLoadingState extends StatelessWidget {
+  const _HandoffLoadingState();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 28),
+      child: Row(
+        children: [
+          const SizedBox(
+            width: 18,
+            height: 18,
+            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+          ),
+          const SizedBox(width: 12),
+          Text(
+            'Cargando handoff AI...',
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.66),
+              fontSize: 14,
+              fontFamily: 'ABC Diatype',
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HandoffFallbackState extends StatelessWidget {
+  const _HandoffFallbackState();
+
+  @override
+  Widget build(BuildContext context) {
+    return const _HandoffNotice(
+      icon: Icons.cloud_off_rounded,
+      title: 'Handoff no disponible',
+      message: 'Puedes entrar a la videollamada mientras se recupera el contexto.',
+    );
+  }
+}
+
+class _HandoffMissingState extends StatelessWidget {
+  const _HandoffMissingState();
+
+  @override
+  Widget build(BuildContext context) {
+    return const _HandoffNotice(
+      icon: Icons.notes_rounded,
+      title: 'Sin handoff AI todavía',
+      message: 'La sesión no tiene un handoff generado, pero puedes entrar a la videollamada.',
+    );
+  }
+}
+
+class _HandoffNotice extends StatelessWidget {
+  const _HandoffNotice({
+    required this.icon,
+    required this.title,
+    required this.message,
+  });
+
+  final IconData icon;
+  final String title;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: Colors.white.withValues(alpha: 0.76), size: 22),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 15,
+                    fontFamily: 'ABC Diatype',
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  message,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.68),
+                    fontSize: 13,
+                    fontFamily: 'ABC Diatype',
+                    fontWeight: FontWeight.w400,
+                    height: 1.28,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HandoffBadge extends StatelessWidget {
+  const _HandoffBadge({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        child: Text(
+          label,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 12,
+            fontFamily: 'ABC Diatype',
+            fontWeight: FontWeight.w500,
+            height: 1.0,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _JoinVideoButton extends StatelessWidget {
+  const _JoinVideoButton({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        width: double.infinity,
+        height: 52,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: const Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.videocam_rounded, color: Colors.black, size: 18),
+            SizedBox(width: 9),
+            Text(
+              'Entrar a videollamada',
+              style: TextStyle(
+                color: Colors.black,
+                fontSize: 14,
+                fontFamily: 'ABC Diatype',
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1913,6 +2429,13 @@ class _ActiveConsult {
     if (specialty != null && specialty.isNotEmpty) values.add(specialty);
     return values;
   }
+
+  _VideoJoinTarget get videoJoinTarget => _VideoJoinTarget(
+        sessionId: sessionId,
+        name: name,
+        priority: priority,
+        specialtyName: specialtyName,
+      );
 }
 
 class _UpcomingAppointment {
@@ -1940,6 +2463,117 @@ class _UpcomingAppointment {
       ? 'hora por confirmar'
       : _formatAppointmentDate(startsAt!);
   bool get canJoinVideo => mode == 'video' && sessionId.trim().isNotEmpty;
+  _VideoJoinTarget get videoJoinTarget => _VideoJoinTarget(
+        sessionId: sessionId,
+        name: name,
+      );
+}
+
+class _VideoJoinTarget {
+  const _VideoJoinTarget({
+    required this.sessionId,
+    required this.name,
+    this.priority,
+    this.specialtyName,
+  });
+
+  final String sessionId;
+  final String name;
+  final String? priority;
+  final String? specialtyName;
+}
+
+class _SessionHandoffBundle {
+  const _SessionHandoffBundle({required this.ready, this.session, this.handoff});
+
+  factory _SessionHandoffBundle.fromJson(Map<String, dynamic> json) {
+    final sessionMap = _asMap(json['session']);
+    final handoffMap = _asMap(json['handoff']);
+    return _SessionHandoffBundle(
+      ready: json['ready'] == true,
+      session: sessionMap == null ? null : _HandoffSession.fromJson(sessionMap),
+      handoff: handoffMap == null ? null : _AiHandoff.fromJson(handoffMap),
+    );
+  }
+
+  final bool ready;
+  final _HandoffSession? session;
+  final _AiHandoff? handoff;
+}
+
+class _HandoffSession {
+  const _HandoffSession({
+    required this.id,
+    required this.petName,
+    this.priority,
+    this.specialtyName,
+  });
+
+  factory _HandoffSession.fromJson(Map<String, dynamic> json) {
+    return _HandoffSession(
+      id: json['id']?.toString() ?? '',
+      petName: json['petName']?.toString() ?? '',
+      priority: json['priority']?.toString(),
+      specialtyName: json['specialtyName']?.toString(),
+    );
+  }
+
+  final String id;
+  final String petName;
+  final String? priority;
+  final String? specialtyName;
+}
+
+class _AiHandoff {
+  const _AiHandoff({
+    required this.urgency,
+    required this.summaryText,
+    required this.reportedSigns,
+    required this.redFlags,
+    required this.questionsAnswered,
+    required this.questionsUnanswered,
+    required this.recommendedFirstChecks,
+  });
+
+  factory _AiHandoff.fromJson(Map<String, dynamic> json) {
+    return _AiHandoff(
+      urgency: json['urgency']?.toString() ?? 'routine',
+      summaryText: json['summaryText']?.toString() ?? '',
+      reportedSigns: _stringList(json['reportedSigns']),
+      redFlags: _stringList(json['redFlags']),
+      questionsAnswered: _asList(json['questionsAnswered'])
+              ?.map(_asMap)
+              .whereType<Map<String, dynamic>>()
+              .map(_HandoffQuestionAnswer.fromJson)
+              .where((answer) => answer.question.isNotEmpty && answer.answer.isNotEmpty)
+              .toList() ??
+          const <_HandoffQuestionAnswer>[],
+      questionsUnanswered: _stringList(json['questionsUnanswered']),
+      recommendedFirstChecks: _stringList(json['recommendedFirstChecks']),
+    );
+  }
+
+  final String urgency;
+  final String summaryText;
+  final List<String> reportedSigns;
+  final List<String> redFlags;
+  final List<_HandoffQuestionAnswer> questionsAnswered;
+  final List<String> questionsUnanswered;
+  final List<String> recommendedFirstChecks;
+}
+
+class _HandoffQuestionAnswer {
+  const _HandoffQuestionAnswer({required this.question, required this.answer});
+
+  factory _HandoffQuestionAnswer.fromJson(Map<String, dynamic> json) {
+    return _HandoffQuestionAnswer(
+      question: json['question']?.toString().trim() ?? '',
+      answer: json['answer']?.toString().trim() ?? '',
+    );
+  }
+
+  final String question;
+  final String answer;
 }
 
 class _VetProfile {
@@ -2034,6 +2668,14 @@ Map<String, dynamic>? _asMap(Object? value) {
 
 List<dynamic>? _asList(Object? value) => value is List ? value : null;
 
+List<String> _stringList(Object? value) {
+  return _asList(value)
+          ?.map((item) => item?.toString().trim() ?? '')
+          .where((item) => item.isNotEmpty)
+          .toList() ??
+      const <String>[];
+}
+
 int? _toInt(Object? value) {
   if (value is int) return value;
   if (value is num) return value.toInt();
@@ -2065,6 +2707,13 @@ String _normalizeConsultMode(Object? value, {String fallback = 'chat'}) {
   if (normalized == 'video' || normalized == 'scheduled_video') return 'video';
   if (normalized == 'chat') return 'chat';
   return fallback;
+}
+
+String _handoffPriorityLabel(String? value) {
+  final normalized = value?.trim().toLowerCase();
+  if (normalized == 'emergency') return 'emergencia';
+  if (normalized == 'urgent') return 'urgente';
+  return 'rutina';
 }
 
 DateTime? _parseDateTime(Object? value) {

@@ -585,6 +585,15 @@ export class VetsController {
     if (actor.role !== 'vet' && actor.role !== 'admin') throw new ForbiddenException('vet_role_required');
     const normalizedSessionId = String(sessionId || '').trim();
     this.validator.validateUUID(normalizedSessionId, 'sessionId');
+    console.log(JSON.stringify({
+      scope: 'video_handoff_roadmap',
+      component: 'vets',
+      event: 'manual_consult_end.requested',
+      at: new Date().toISOString(),
+      sessionId: normalizedSessionId,
+      actorId: actor.id,
+      actorRole: actor.role,
+    }));
 
     if (this.db.isStub) return { ok: true, sessionId: normalizedSessionId, ended: true, mode: 'stub' };
 
@@ -638,8 +647,12 @@ export class VetsController {
              set room_name = coalesce(video_session_lifecycle.room_name, excluded.room_name),
                  forced_end_at = coalesce(video_session_lifecycle.forced_end_at, now()),
                  safety_reason = 'manual_vet_end',
+                 end_reason = case when $3 then 'admin_ended' else 'vet_ended' end,
+                 end_actor_role = case when $3 then 'admin' else 'vet' end,
+                 end_actor_user_id = $4::uuid,
+                 rejoin_eligible_until = coalesce(video_session_lifecycle.rejoin_eligible_until, now() + interval '10 minutes'),
                  updated_at = now()`,
-          [normalizedSessionId, resolvedRoomName]
+          [normalizedSessionId, resolvedRoomName, actor.role === 'admin', actor.id]
         );
 
         const { rows: stateRows } = await q<any>(
@@ -681,9 +694,13 @@ export class VetsController {
                   entitlement_finalized_at = case when $4 then coalesce(entitlement_finalized_at, now()) else entitlement_finalized_at end,
                   entitlement_released_at = case when $5 then coalesce(entitlement_released_at, now()) else entitlement_released_at end,
                   safety_reason = 'manual_vet_end',
+                  end_reason = case when $6 then 'admin_ended' else 'vet_ended' end,
+                  end_actor_role = case when $6 then 'admin' else 'vet' end,
+                  end_actor_user_id = $7::uuid,
+                  rejoin_eligible_until = coalesce(rejoin_eligible_until, now() + interval '10 minutes'),
                   updated_at = now()
             where session_id = $1::uuid`,
-          [normalizedSessionId, engaged ? 'ended' : 'forced_ended', consumptionId, entitlementAction === 'committed', entitlementAction === 'released']
+          [normalizedSessionId, engaged ? 'ended' : 'forced_ended', consumptionId, entitlementAction === 'committed', entitlementAction === 'released', actor.role === 'admin', actor.id]
         );
       }
 
@@ -696,6 +713,7 @@ export class VetsController {
           where id = $1::uuid`,
         [normalizedSessionId, finalSessionStatus]
       );
+        await q(`select fn_release_vet_consult_lock($1::uuid, $2)`, [normalizedSessionId, 'manual_vet_end']);
       await q(
         `update appointments
             set status = case when $2 then 'completed' else case when status = 'completed' then status else 'no_show' end end
@@ -722,6 +740,20 @@ export class VetsController {
     });
 
     if (!settlement) throw new HttpException('not_found', HttpStatus.NOT_FOUND);
+    console.log(JSON.stringify({
+      scope: 'video_handoff_roadmap',
+      component: 'vets',
+      event: 'manual_consult_end.completed',
+      at: new Date().toISOString(),
+      sessionId: normalizedSessionId,
+      actorId: actor.id,
+      actorRole: actor.role,
+      mode: settlement.mode,
+      status: settlement.status,
+      engaged: settlement.engaged,
+      entitlementAction: settlement.entitlementAction,
+      providerError,
+    }));
     return {
       ok: true,
       sessionId: normalizedSessionId,

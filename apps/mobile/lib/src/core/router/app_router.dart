@@ -98,13 +98,18 @@ class AppRouter {
         builder: (context, state) {
           final sessionId = state.pathParameters['sessionId'] ?? '';
           final initialMessage = state.uri.queryParameters['message'];
+          final assistantMessage = state.uri.queryParameters['assistantMessage'];
           postLoginRouteLog(
             'Router entered /chat/:sessionId uri=${state.uri} sessionId=$sessionId '
             'initialMessagePresent=${initialMessage?.trim().isNotEmpty == true} '
-            'initialMessageLength=${initialMessage?.trim().length ?? 0}',
+            'initialMessageLength=${initialMessage?.trim().length ?? 0} '
+            'assistantMessagePresent=${assistantMessage?.trim().isNotEmpty == true}',
           );
           return ChatScreen(
-              sessionId: sessionId, initialMessage: initialMessage);
+            sessionId: sessionId,
+            initialMessage: initialMessage,
+            initialAssistantMessage: assistantMessage,
+          );
         },
       ),
       GoRoute(

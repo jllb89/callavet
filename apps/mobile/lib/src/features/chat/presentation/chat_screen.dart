@@ -43,11 +43,13 @@ class ChatScreen extends StatefulWidget {
     super.key,
     required this.sessionId,
     this.initialMessage,
+    this.initialAssistantMessage,
     this.embedded = false,
   });
 
   final String sessionId;
   final String? initialMessage;
+  final String? initialAssistantMessage;
   final bool embedded;
 
   @override
@@ -79,8 +81,19 @@ class _ChatScreenState extends State<ChatScreen> {
     _aiChatLog(
       'init sessionId=${widget.sessionId} sessionIdLooksUuid=${_uuidOrNull(widget.sessionId) != null} '
       'conversationId=$_conversationId initialMessagePresent=${widget.initialMessage?.trim().isNotEmpty == true} '
-      'initialMessageLength=${widget.initialMessage?.trim().length ?? 0} apiBaseUrl=${Environment.apiBaseUrl} dryRun=$_aiChatDryRun',
+      'initialMessageLength=${widget.initialMessage?.trim().length ?? 0} '
+      'initialAssistantMessagePresent=${widget.initialAssistantMessage?.trim().isNotEmpty == true} '
+      'apiBaseUrl=${Environment.apiBaseUrl} dryRun=$_aiChatDryRun',
     );
+    final initialAssistantMessage = widget.initialAssistantMessage?.trim();
+    if (initialAssistantMessage != null && initialAssistantMessage.isNotEmpty) {
+      _aiChatLog(
+          'initial assistant post-call message inserted length=${initialAssistantMessage.length}');
+      _messages.add(_ChatMessage.assistant(
+        initialAssistantMessage,
+        includeInHistory: false,
+      ));
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final initialMessage = widget.initialMessage?.trim();
       if (initialMessage != null && initialMessage.isNotEmpty) {
@@ -709,12 +722,14 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<Map<String, dynamic>> _startSession(
       String kind, _AiChatTurnResult result) {
+    final history = _historyForApi();
     return _postGatewayJson('/sessions/start', {
       'kind': kind,
       if (result.petId != null) 'petId': result.petId,
       if (result.vetId != null) 'vetId': result.vetId,
       if (result.specialtyId != null) 'specialtyId': result.specialtyId,
       'priority': result.payload.urgency,
+      'aiContext': result.handoffContext(history),
     });
   }
 
@@ -1779,6 +1794,7 @@ class _ChatMessage {
 class _AiChatTurnResult {
   const _AiChatTurnResult({
     required this.payload,
+    this.aiEventId,
     this.petId,
     this.specialtyId,
     this.vetId,
@@ -1796,6 +1812,7 @@ class _AiChatTurnResult {
   factory _AiChatTurnResult.fromJson(Map<String, dynamic> json) {
     final payload =
         _AiChatPayload.fromJson(_asMap(json['payload']) ?? <String, dynamic>{});
+    final aiEventId = _uuidFrom(json['eventId']);
     String? petId;
     String? specialtyId;
     String? vetId;
@@ -1847,6 +1864,7 @@ class _AiChatTurnResult {
 
     return _AiChatTurnResult(
       payload: payload,
+      aiEventId: aiEventId,
       petId: petId,
       specialtyId: specialtyId,
       vetId: vetId,
@@ -1860,6 +1878,7 @@ class _AiChatTurnResult {
   }
 
   final _AiChatPayload payload;
+  final String? aiEventId;
   final String? petId;
   final String? specialtyId;
   final String? vetId;
@@ -1918,6 +1937,25 @@ class _AiChatTurnResult {
     return accessType == null || accessType == target;
   }
 
+  Map<String, dynamic> handoffContext(List<Map<String, dynamic>> messages) => {
+        'source': 'ai_chat',
+        if (aiEventId != null) 'aiEventId': aiEventId,
+        'assistantPayload': payload.handoffMetadata,
+        'messages': messages,
+        'routing': {
+          if (petId != null) 'petId': petId,
+          if (specialtyId != null) 'specialtyId': specialtyId,
+          if (vetId != null) 'vetId': vetId,
+          if (specialtyName != null) 'specialtyName': specialtyName,
+          if (vetName != null) 'vetName': vetName,
+          if (serviceAccessType != null) 'serviceAccessType': serviceAccessType,
+          if (serviceCanUse != null) 'serviceCanUse': serviceCanUse,
+          if (serviceAccessReason != null)
+            'serviceAccessReason': serviceAccessReason,
+          if (remaining != null) 'remaining': remaining,
+        },
+      };
+
   _AiChatTurnResult withEntitlement({
     required String serviceType,
     required bool canUse,
@@ -1927,6 +1965,7 @@ class _AiChatTurnResult {
   }) {
     return _AiChatTurnResult(
       payload: payload,
+      aiEventId: aiEventId,
       petId: petId,
       specialtyId: specialtyId,
       vetId: vetId,
@@ -1945,6 +1984,7 @@ class _AiChatTurnResult {
   _AiChatTurnResult withUpgradePlan(_ChatSubscriptionPlan plan) {
     return _AiChatTurnResult(
       payload: payload,
+      aiEventId: aiEventId,
       petId: petId,
       specialtyId: specialtyId,
       vetId: vetId,
@@ -1999,6 +2039,17 @@ class _AiMessageBlock {
   final _AiMessageBlockType type;
   final String? text;
   final List<String> items;
+
+  Map<String, dynamic> toJson() => {
+        'type': switch (type) {
+          _AiMessageBlockType.paragraph => 'paragraph',
+          _AiMessageBlockType.numberedList => 'numbered_list',
+          _AiMessageBlockType.bulletList => 'bullet_list',
+          _AiMessageBlockType.safetyNote => 'safety_note',
+        },
+        'text': text,
+        'items': items,
+      };
 }
 
 class _AiChatPayload {
@@ -2012,6 +2063,10 @@ class _AiChatPayload {
     required this.recommendedService,
     required this.actionLabel,
     required this.safetyEscalation,
+    required this.caseSummary,
+    required this.handoffSummary,
+    required this.routingRationale,
+    required this.commerceRecommendation,
   });
 
   factory _AiChatPayload.fromJson(Map<String, dynamic> json) {
@@ -2037,6 +2092,10 @@ class _AiChatPayload {
       recommendedService: json['recommendedService']?.toString(),
       actionLabel: json['actionLabel']?.toString(),
       safetyEscalation: json['safetyEscalation'] == true,
+      caseSummary: json['caseSummary']?.toString(),
+      handoffSummary: json['handoffSummary']?.toString(),
+      routingRationale: json['routingRationale']?.toString(),
+      commerceRecommendation: json['commerceRecommendation']?.toString(),
     );
   }
 
@@ -2049,6 +2108,10 @@ class _AiChatPayload {
   final String? recommendedService;
   final String? actionLabel;
   final bool safetyEscalation;
+  final String? caseSummary;
+  final String? handoffSummary;
+  final String? routingRationale;
+  final String? commerceRecommendation;
 
   bool get hasDisplayBlocks => formatVersion == 1 && displayBlocks.isNotEmpty;
 
@@ -2068,6 +2131,27 @@ class _AiChatPayload {
         'urgency': urgency,
         'intakeQuestions': intakeQuestions,
         if (recommendedService != null) 'recommendedService': recommendedService,
+        if (caseSummary != null) 'caseSummary': caseSummary,
+        if (handoffSummary != null) 'handoffSummary': handoffSummary,
+        if (routingRationale != null) 'routingRationale': routingRationale,
+      };
+
+  Map<String, dynamic> get handoffMetadata => {
+        'message': message,
+        'formatVersion': formatVersion,
+        'nextStep': nextStep,
+        'displayBlocks':
+            displayBlocks.map((block) => block.toJson()).toList(growable: false),
+        'intakeQuestions': intakeQuestions,
+        'urgency': urgency,
+        if (recommendedService != null) 'recommendedService': recommendedService,
+        if (actionLabel != null) 'actionLabel': actionLabel,
+        'safetyEscalation': safetyEscalation,
+        if (caseSummary != null) 'caseSummary': caseSummary,
+        if (handoffSummary != null) 'handoffSummary': handoffSummary,
+        if (routingRationale != null) 'routingRationale': routingRationale,
+        if (commerceRecommendation != null)
+          'commerceRecommendation': commerceRecommendation,
       };
 }
 

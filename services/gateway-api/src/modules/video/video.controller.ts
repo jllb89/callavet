@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, ForbiddenException, Headers, HttpException, HttpStatus, NotFoundException, Param, Post, Req, UnauthorizedException, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, ForbiddenException, Get, Headers, HttpException, HttpStatus, NotFoundException, Param, Post, Req, UnauthorizedException, UseGuards } from '@nestjs/common';
 import type { Request } from 'express';
 import { AuthGuard } from '../auth/auth.guard';
 import { EndpointRateLimitGuard } from '../rate-limit/endpoint-rate-limit.guard';
@@ -7,9 +7,17 @@ import { ValidatorService } from '../config/validator.service';
 import { DbService } from '../db/db.service';
 import { RequestContext } from '../auth/request-context.service';
 import { EntitlementService } from '../subscriptions/entitlement.service';
+import { AiService } from '../ai/ai.service';
 import { LiveKitParticipantRole, LiveKitService } from './livekit.service';
 
 type TxQuery = <R = any>(sql: string, args?: any[]) => Promise<{ rows: R[] }>;
+type VideoEndActorRole = LiveKitParticipantRole | 'system';
+type VideoEndReason = 'owner_ended' | 'vet_ended' | 'admin_ended' | 'network_disconnect' | 'timeout_no_show' | 'provider_room_finished' | 'room_end' | 'reconcile_timeout';
+type VideoEndContext = {
+  actorRole: VideoEndActorRole;
+  actorUserId?: string | null;
+  reason: VideoEndReason;
+};
 
 @Controller('video')
 export class VideoController {
@@ -19,7 +27,18 @@ export class VideoController {
     private readonly rc: RequestContext,
     private readonly livekit: LiveKitService,
     private readonly entitlements: EntitlementService,
+    private readonly ai: AiService,
   ) {}
+
+  private roadmapLog(event: string, metadata: Record<string, any> = {}) {
+    console.log(JSON.stringify({
+      scope: 'video_handoff_roadmap',
+      component: 'video',
+      event,
+      at: new Date().toISOString(),
+      ...metadata,
+    }));
+  }
 
   private async getAuthorizedVideoSession(sessionId: string) {
     if (this.db.isStub) {
@@ -111,20 +130,34 @@ export class VideoController {
         [sessionId, roomName, consumptionId || null]
       );
     });
+    this.roadmapLog('room.provisioned', { sessionId, roomName, hasConsumption: !!consumptionId });
   }
 
-  private async markVideoRoomEnded(sessionId: string, roomName: string) {
+  private async markVideoRoomEnded(sessionId: string, roomName: string, endContext: VideoEndContext) {
     if (this.db.isStub) return { action: 'stub', reason: 'stub' };
     return this.db.runInTx(async (q) => {
+      const rejoinEligible = ['owner_ended', 'vet_ended', 'admin_ended'].includes(endContext.reason);
       await q(
-        `insert into video_session_lifecycle (session_id, room_name, status, room_finished_at, safety_reason, created_at, updated_at)
-         values ($1::uuid, $2, 'ended', now(), 'room_end', now(), now())
+        `insert into video_session_lifecycle (
+           session_id, room_name, status, room_finished_at, safety_reason,
+           end_reason, end_actor_role, end_actor_user_id, rejoin_eligible_until,
+           created_at, updated_at
+         )
+         values (
+           $1::uuid, $2, 'ended', now(), $3,
+           $3, $4, $5::uuid, case when $6 then now() + interval '10 minutes' else null end,
+           now(), now()
+         )
          on conflict (session_id) do update
            set room_name = coalesce(excluded.room_name, video_session_lifecycle.room_name),
                room_finished_at = coalesce(video_session_lifecycle.room_finished_at, now()),
-               safety_reason = 'room_end',
+               safety_reason = $3,
+               end_reason = $3,
+               end_actor_role = $4,
+               end_actor_user_id = $5::uuid,
+               rejoin_eligible_until = case when $6 then coalesce(video_session_lifecycle.rejoin_eligible_until, now() + interval '10 minutes') else video_session_lifecycle.rejoin_eligible_until end,
                updated_at = now()`,
-        [sessionId, roomName]
+        [sessionId, roomName, endContext.reason, endContext.actorRole, endContext.actorUserId || null, rejoinEligible]
       );
       const { rows } = await q<{
         first_both_joined_at: string | null;
@@ -167,13 +200,103 @@ export class VideoController {
                 entitlement_consumption_id = coalesce(entitlement_consumption_id, $3::uuid),
                 entitlement_finalized_at = case when $4 then coalesce(entitlement_finalized_at, now()) else entitlement_finalized_at end,
                 entitlement_released_at = case when $5 then coalesce(entitlement_released_at, now()) else entitlement_released_at end,
-                safety_reason = 'room_end',
+                safety_reason = $6,
+                end_reason = $6,
+                end_actor_role = $7,
+                end_actor_user_id = $8::uuid,
+                rejoin_eligible_until = case when $9 then coalesce(rejoin_eligible_until, now() + interval '10 minutes') else rejoin_eligible_until end,
                 updated_at = now()
           where session_id = $1::uuid`,
-        [sessionId, engaged ? 'ended' : 'released', state?.consumption_id || null, entitlementAction === 'committed', entitlementAction === 'released']
+        [sessionId, engaged ? 'ended' : 'released', state?.consumption_id || null, entitlementAction === 'committed', entitlementAction === 'released', endContext.reason, endContext.actorRole, endContext.actorUserId || null, rejoinEligible]
       );
-      return { action: entitlementAction, reason: 'room_end', settled: true };
+      await q(`select fn_release_vet_consult_lock($1::uuid, $2)`, [sessionId, endContext.reason]);
+      const settlement = { action: entitlementAction, reason: endContext.reason, endedByRole: endContext.actorRole, settled: true };
+      this.roadmapLog('room.ended.settled', {
+        sessionId,
+        roomName,
+        reason: endContext.reason,
+        actorRole: endContext.actorRole,
+        engaged,
+        entitlementAction,
+        rejoinEligible,
+      });
+      return settlement;
     });
+  }
+
+  private normalizeVideoEndReason(value: unknown, actorRole: VideoEndActorRole): VideoEndReason {
+    const reason = String(value || '').trim().toLowerCase();
+    const allowed = new Set<VideoEndReason>([
+      'owner_ended',
+      'vet_ended',
+      'admin_ended',
+      'network_disconnect',
+      'timeout_no_show',
+      'provider_room_finished',
+      'room_end',
+      'reconcile_timeout',
+    ]);
+    if (allowed.has(reason as VideoEndReason)) return reason as VideoEndReason;
+    if (actorRole === 'owner') return 'owner_ended';
+    if (actorRole === 'vet') return 'vet_ended';
+    if (actorRole === 'admin') return 'admin_ended';
+    return 'room_end';
+  }
+
+  private async getVideoEndState(sessionId: string) {
+    if (this.db.isStub) {
+      return {
+        sessionId,
+        sessionStatus: 'active',
+        lifecycleStatus: 'ended',
+        endedByRole: null,
+        endReason: null,
+        roomFinishedAt: null,
+        rejoinEligible: false,
+        rejoinUntil: null,
+        recommendedAction: 'chat',
+      };
+    }
+    const { rows } = await this.db.runInTx(async (q) => q<any>(
+      `select s.id::text as session_id,
+              s.status as session_status,
+              s.mode,
+              s.user_id::text as user_id,
+              s.vet_id::text as vet_id,
+              v.status as lifecycle_status,
+              v.end_actor_role,
+              v.end_actor_user_id::text as end_actor_user_id,
+              coalesce(v.end_reason, v.safety_reason) as end_reason,
+              v.room_finished_at,
+              v.rejoin_eligible_until,
+              (v.rejoin_eligible_until is not null and v.rejoin_eligible_until > now()) as within_rejoin_window
+         from chat_sessions s
+    left join video_session_lifecycle v on v.session_id = s.id
+        where s.id = $1::uuid
+          and s.mode = 'video'
+          and (s.user_id = auth.uid() or s.vet_id = auth.uid() or is_admin())
+        limit 1`,
+      [sessionId]
+    ));
+    const row = rows[0];
+    if (!row) throw new NotFoundException('video_session_not_found');
+    const sessionStatus = String(row.session_status || '').toLowerCase();
+    const endReason = row.end_reason || null;
+    const rejoinEligible = sessionStatus === 'active'
+      && row.within_rejoin_window === true
+      && ['owner_ended', 'vet_ended', 'admin_ended'].includes(String(endReason || ''));
+    return {
+      sessionId: row.session_id,
+      sessionStatus: row.session_status,
+      lifecycleStatus: row.lifecycle_status || null,
+      endedByRole: row.end_actor_role || null,
+      endActorUserId: row.end_actor_user_id || null,
+      endReason,
+      roomFinishedAt: row.room_finished_at || null,
+      rejoinEligible,
+      rejoinUntil: row.rejoin_eligible_until || null,
+      recommendedAction: rejoinEligible ? 'rejoin' : 'chat',
+    };
   }
 
   private normalizeRequestedParticipantRole(value: unknown): LiveKitParticipantRole | null {
@@ -346,7 +469,7 @@ export class VideoController {
     return action;
   }
 
-  private async settleFinishedLifecycle(q: TxQuery, sessionId: string, reason: string) {
+  private async settleFinishedLifecycle(q: TxQuery, sessionId: string, reason: VideoEndReason, endContext: Partial<VideoEndContext> = {}) {
     const state = await this.findConsumptionState(q, sessionId);
     const engaged = !!state?.first_both_joined_at || (!!state?.owner_joined_at && !!state?.host_joined_at) || state?.consumption_finalized === true;
     let entitlementAction = 'none';
@@ -359,15 +482,18 @@ export class VideoController {
     }
     await q(
       `update video_session_lifecycle
-          set status = case when $2 then 'ended' else case when $6 = 'reconcile_timeout' then 'timed_out' else 'released' end end,
+          set status = case when $2 then 'ended' else case when $6 in ('reconcile_timeout', 'timeout_no_show') then 'timed_out' else 'released' end end,
               room_finished_at = coalesce(room_finished_at, now()),
               entitlement_consumption_id = coalesce(entitlement_consumption_id, $3::uuid),
               entitlement_finalized_at = case when $4 then coalesce(entitlement_finalized_at, now()) else entitlement_finalized_at end,
               entitlement_released_at = case when $5 then coalesce(entitlement_released_at, now()) else entitlement_released_at end,
               safety_reason = case when $2 then safety_reason else $6 end,
+              end_reason = coalesce(end_reason, $6),
+              end_actor_role = coalesce(end_actor_role, $7),
+              end_actor_user_id = coalesce(end_actor_user_id, $8::uuid),
               updated_at = now()
         where session_id = $1::uuid`,
-      [sessionId, engaged, state?.consumption_id || null, entitlementAction === 'committed' || (engaged && !!state?.consumption_id), entitlementAction === 'released', reason]
+      [sessionId, engaged, state?.consumption_id || null, entitlementAction === 'committed' || (engaged && !!state?.consumption_id), entitlementAction === 'released', reason, endContext.actorRole || 'system', endContext.actorUserId || null]
     );
     await q(
       `update chat_sessions
@@ -449,7 +575,7 @@ export class VideoController {
           );
           action = eventType;
         } else if (eventType === 'room_finished') {
-          action = await this.settleFinishedLifecycle(q, sessionId, 'room_finished');
+          action = await this.settleFinishedLifecycle(q, sessionId, 'provider_room_finished', { actorRole: 'system', reason: 'provider_room_finished' });
         } else if (eventType === 'egress_started' || eventType === 'egress_updated' || eventType === 'egress_ended') {
           await q(
             `update video_session_lifecycle
@@ -472,6 +598,14 @@ export class VideoController {
           [eventId]
         );
       }
+      this.roadmapLog('livekit.webhook.processed', {
+        eventId,
+        eventType,
+        sessionId,
+        roomName,
+        participantRole: role,
+        action,
+      });
       return { eventId, eventType, sessionId, roomName, action };
     });
   }
@@ -502,6 +636,14 @@ export class VideoController {
       metadata,
     });
 
+    this.roadmapLog('room.create.succeeded', {
+      sessionId,
+      roomName,
+      role,
+      userId,
+      consumptionId,
+    });
+
     return {
       provider: 'livekit',
       roomId: roomName,
@@ -521,15 +663,71 @@ export class VideoController {
 
   @Post('rooms/:roomId/end')
   @UseGuards(AuthGuard)
-  async endRoom(@Param('roomId') roomId: string) {
+  async endRoom(@Param('roomId') roomId: string, @Body() body: { participantRole?: string; role?: string; reason?: string } = {}) {
     const normalizedRoomId = String(roomId || '').trim();
     if (!normalizedRoomId) throw new BadRequestException('roomId is required');
     const sessionId = this.livekit.sessionIdFromRoomName(normalizedRoomId);
     this.validator.validateUUID(sessionId, 'sessionId');
-    await this.getAuthorizedVideoSession(sessionId);
+    const session = await this.getAuthorizedVideoSession(sessionId);
+    const actorRole = this.resolveParticipantRole(session, body?.participantRole || body?.role);
+    const actorUserId = this.rc.requireUuidUserId();
+    const reason = this.normalizeVideoEndReason(body?.reason, actorRole);
+    this.roadmapLog('room.end.requested', { sessionId, roomName: normalizedRoomId, actorRole, reason });
     const result = await this.livekit.endRoom(normalizedRoomId);
-    const settlement = await this.markVideoRoomEnded(sessionId, normalizedRoomId);
-    return { ok: true, provider: 'livekit', roomId: normalizedRoomId, ...result, settlement };
+    const settlement = await this.markVideoRoomEnded(sessionId, normalizedRoomId, { actorRole, actorUserId, reason });
+    const endState = await this.getVideoEndState(sessionId);
+    this.roadmapLog('room.end.completed', {
+      sessionId,
+      roomName: normalizedRoomId,
+      actorRole,
+      reason,
+      settlementAction: settlement.action,
+      endStateReason: endState.endReason,
+      rejoinEligible: endState.rejoinEligible,
+    });
+    return { ok: true, provider: 'livekit', roomId: normalizedRoomId, ...result, settlement, endState };
+  }
+
+  @Get('sessions/:sessionId/end-state')
+  @UseGuards(AuthGuard)
+  async endState(@Param('sessionId') sessionId: string) {
+    const normalizedSessionId = String(sessionId || '').trim();
+    if (!normalizedSessionId) throw new BadRequestException('sessionId is required');
+    this.validator.validateUUID(normalizedSessionId, 'sessionId');
+    const state = await this.getVideoEndState(normalizedSessionId);
+    this.roadmapLog('end_state.read', {
+      sessionId: normalizedSessionId,
+      lifecycleStatus: state.lifecycleStatus,
+      endReason: state.endReason,
+      endedByRole: state.endedByRole,
+      rejoinEligible: state.rejoinEligible,
+      recommendedAction: state.recommendedAction,
+    });
+    return { ok: true, ...state };
+  }
+
+  @Post('sessions/:sessionId/post-call-message')
+  @UseGuards(AuthGuard, EndpointRateLimitGuard)
+  @RateLimit({ key: 'video.post_call_message', limit: 6, windowMs: 60_000 })
+  async postCallMessage(@Param('sessionId') sessionId: string, @Body() body: { endState?: Record<string, any> } = {}) {
+    const normalizedSessionId = String(sessionId || '').trim();
+    if (!normalizedSessionId) throw new BadRequestException('sessionId is required');
+    this.validator.validateUUID(normalizedSessionId, 'sessionId');
+    const endState = body?.endState && typeof body.endState === 'object' ? body.endState : await this.getVideoEndState(normalizedSessionId);
+    this.roadmapLog('post_call_message.requested', {
+      sessionId: normalizedSessionId,
+      endReason: endState?.endReason || null,
+      rejoinEligible: endState?.rejoinEligible === true,
+    });
+    const result = await this.ai.generateVideoPostCallMessage({ sessionId: normalizedSessionId, endState });
+    this.roadmapLog('post_call_message.completed', {
+      sessionId: normalizedSessionId,
+      eventId: result.eventId,
+      provider: result.provider,
+      suggestedAction: result.payload?.suggestedAction || null,
+      rejoinRecommended: result.payload?.rejoinRecommended === true,
+    });
+    return { ok: true, ...result };
   }
 
   private async processLiveKitWebhook(req: Request, body: unknown, authorization?: string, authorize?: string) {
@@ -589,7 +787,7 @@ export class VideoController {
       if (row.room_name) {
         try { await this.livekit.endRoom(row.room_name); } catch {}
       }
-      const result = await this.db.runInTx(async (q) => this.settleFinishedLifecycle(q, row.session_id, 'reconcile_timeout'));
+      const result = await this.db.runInTx(async (q) => this.settleFinishedLifecycle(q, row.session_id, 'timeout_no_show', { actorRole: 'system', reason: 'timeout_no_show' }));
       settled.push({ sessionId: row.session_id, roomName: row.room_name, ...result });
     }
     return { ok: true, provider: 'livekit', reconciled: settled.length, rows: settled };

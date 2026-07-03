@@ -64,6 +64,34 @@ type AiChatTurnInput = {
   dryRun?: boolean;
 };
 
+type AiSessionHandoffInput = {
+  sessionId?: string;
+  sourceAiEventId?: string;
+  aiContext?: Record<string, any> | null;
+  dryRun?: boolean;
+};
+
+type AiVideoPostCallInput = {
+  sessionId?: string;
+  endState?: Record<string, any> | null;
+  dryRun?: boolean;
+};
+
+type AiSessionHandoffContext = {
+  actorUserId: string;
+  session: Record<string, any>;
+  aiContext: Record<string, any> | null;
+  sourceAiEvents: Array<Record<string, any>>;
+};
+
+type AiVideoPostCallContext = {
+  actorUserId: string;
+  session: Record<string, any>;
+  lifecycle: Record<string, any> | null;
+  handoff: Record<string, any> | null;
+  endState: Record<string, any> | null;
+};
+
 type AiChatToolName = 'recommend_specialty' | 'find_vets' | 'check_service_access' | 'get_available_slots';
 
 type AiChatToolCall = {
@@ -138,6 +166,16 @@ export class AiService {
     private readonly vectorTargets: VectorTargetService,
     private readonly entitlements: EntitlementService,
   ) {}
+
+  private roadmapLog(event: string, metadata: Record<string, any> = {}) {
+    console.log(JSON.stringify({
+      scope: 'video_handoff_roadmap',
+      component: 'ai',
+      event,
+      at: new Date().toISOString(),
+      ...metadata,
+    }));
+  }
 
   private providerConfig(prompt?: PromptVersion, dryRun = false): AiProviderConfig {
     const provider = dryRun ? 'dry_run' : (process.env.AI_PROVIDER || 'openai');
@@ -512,6 +550,417 @@ export class AiService {
         },
       },
     };
+  }
+
+  private sessionHandoffResponseFormat() {
+    return {
+      type: 'json_schema',
+      name: 'ai_session_handoff',
+      strict: true,
+      schema: this.strictOutputSchema({
+        type: 'object',
+        additionalProperties: false,
+        required: [
+          'urgency',
+          'summaryText',
+          'reportedSigns',
+          'redFlags',
+          'questionsAnswered',
+          'questionsUnanswered',
+          'recommendedFirstChecks',
+        ],
+        properties: {
+          urgency: { type: 'string', enum: ['routine', 'urgent', 'emergency'] },
+          summaryText: { type: 'string', description: 'Concise factual handoff for a veterinarian. Not a diagnosis.' },
+          reportedSigns: { type: 'array', minItems: 0, maxItems: 12, items: { type: 'string' } },
+          redFlags: { type: 'array', minItems: 0, maxItems: 8, items: { type: 'string' } },
+          questionsAnswered: {
+            type: 'array',
+            minItems: 0,
+            maxItems: 12,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['question', 'answer'],
+              properties: {
+                question: { type: 'string' },
+                answer: { type: 'string' },
+              },
+            },
+          },
+          questionsUnanswered: { type: 'array', minItems: 0, maxItems: 10, items: { type: 'string' } },
+          recommendedFirstChecks: { type: 'array', minItems: 0, maxItems: 8, items: { type: 'string' } },
+        },
+      }),
+    };
+  }
+
+  private sessionHandoffInstructions() {
+    return [
+      'You create a veterinarian-facing handoff for an equine consult from owner AI chat context.',
+      'Return Spanish unless the owner conversation is clearly in another language.',
+      'Use only facts present in the provided context. Do not invent symptoms, timing, medications, vitals, exam findings, diagnoses, or treatments.',
+      'Never diagnose, prescribe, recommend medication doses, or imply the AI has examined the animal.',
+      'Write for the human veterinarian, not the owner. recommendedFirstChecks must be clinician-facing checks to confirm, not instructions for owner treatment.',
+      'If information is missing, put it in questionsUnanswered instead of filling it in.',
+      'Keep summaryText concise, factual, non-diagnostic, and useful before a chat or video consult.',
+    ].join('\n');
+  }
+
+  private videoPostCallResponseFormat() {
+    return {
+      type: 'json_schema',
+      name: 'ai_video_post_call_message',
+      strict: true,
+      schema: this.strictOutputSchema({
+        type: 'object',
+        additionalProperties: false,
+        required: ['message', 'suggestedAction', 'rejoinRecommended'],
+        properties: {
+          message: { type: 'string', description: 'Short owner-facing post-call message.' },
+          suggestedAction: { type: 'string', enum: ['return_to_chat', 'rejoin_call', 'wait_for_vet', 'done'] },
+          rejoinRecommended: { type: 'boolean' },
+        },
+      }),
+    };
+  }
+
+  private videoPostCallInstructions() {
+    return [
+      'You write a short owner-facing post-video-call message for Call a Vet.',
+      'Reply in Spanish unless the owner context is clearly in another language.',
+      'Use only the provided session, handoff, and call-end state. Do not invent what the veterinarian said or did.',
+      'Never diagnose, prescribe medication, recommend medication doses, or create clinical findings.',
+      'If rejoinEligible is true, explain that the owner can rejoin or continue in chat. If not, guide them back to chat for follow-up.',
+      'Keep message concise, calm, and practical. Do not use headings, markdown, or lists.',
+    ].join('\n');
+  }
+
+  private normalizeVideoPostCallPayload(payload: any, context: AiVideoPostCallContext) {
+    const message = String(payload?.message || '').trim().slice(0, 700);
+    if (!message) throw new BadGatewayException('ai_video_post_call_message_required');
+    const action = String(payload?.suggestedAction || '').trim();
+    const suggestedAction = ['return_to_chat', 'rejoin_call', 'wait_for_vet', 'done'].includes(action)
+      ? action
+      : context.endState?.rejoinEligible === true ? 'rejoin_call' : 'return_to_chat';
+    return {
+      message,
+      suggestedAction,
+      rejoinRecommended: payload?.rejoinRecommended === true || suggestedAction === 'rejoin_call',
+    };
+  }
+
+  private async buildVideoPostCallContext(actorUserId: string, sessionId: string, endState: Record<string, any> | null): Promise<AiVideoPostCallContext> {
+    return this.db.runInTx(async (q) => {
+      const { rows: sessionRows } = await q<any>(
+        `select s.id::text as session_id,
+                s.user_id::text,
+                s.vet_id::text,
+                s.pet_id::text,
+                s.specialty_id::text,
+                s.priority,
+                s.status,
+                s.mode,
+                s.started_at,
+                s.ended_at,
+                p.name as pet_name,
+                vu.full_name as vet_name,
+                vs.name as specialty_name
+           from chat_sessions s
+      left join pets p on p.id = s.pet_id
+      left join users vu on vu.id = s.vet_id
+      left join vet_specialties vs on vs.id = s.specialty_id
+          where s.id = $1::uuid
+            and s.mode = 'video'
+            and (s.user_id = auth.uid() or s.vet_id = auth.uid() or is_admin())
+          limit 1`,
+        [sessionId]
+      );
+      const session = sessionRows[0];
+      if (!session) throw new BadRequestException('video_session_not_found_for_post_call');
+      const { rows: lifecycleRows } = await q<any>(
+        `select status,
+                room_name,
+                room_finished_at,
+                first_both_joined_at,
+                end_actor_role,
+                end_actor_user_id::text,
+                coalesce(end_reason, safety_reason) as end_reason,
+                rejoin_eligible_until
+           from video_session_lifecycle
+          where session_id = $1::uuid
+          limit 1`,
+        [sessionId]
+      );
+      const { rows: handoffRows } = await q<any>(
+        `select urgency,
+                summary_text,
+                reported_signs,
+                red_flags,
+                questions_answered,
+                questions_unanswered,
+                recommended_first_checks
+           from ai_handoffs
+          where session_id = $1::uuid
+          order by created_at desc
+          limit 1`,
+        [sessionId]
+      );
+      return {
+        actorUserId,
+        session,
+        lifecycle: lifecycleRows[0] || null,
+        handoff: handoffRows[0] || null,
+        endState: endState || null,
+      };
+    });
+  }
+
+  private async callVideoPostCallProvider(context: AiVideoPostCallContext, dryRun = false) {
+    const cfg = this.providerConfig(undefined, dryRun);
+    if (dryRun) {
+      return {
+        provider: cfg.provider,
+        model: cfg.model,
+        responseId: null,
+        payload: {
+          message: 'Mensaje AI de prueba para continuar el seguimiento de la videollamada.',
+          suggestedAction: context.endState?.rejoinEligible === true ? 'rejoin_call' : 'return_to_chat',
+          rejoinRecommended: context.endState?.rejoinEligible === true,
+        },
+      };
+    }
+    if (!cfg.apiKey) throw new ServiceUnavailableException('ai_provider_not_configured');
+    if (cfg.apiMode !== 'responses') throw new ServiceUnavailableException('ai_video_post_call_requires_responses_api');
+    const body: Record<string, any> = {
+      model: cfg.model,
+      store: false,
+      instructions: this.videoPostCallInstructions(),
+      input: [{ role: 'user', content: JSON.stringify(context) }],
+      text: { format: this.videoPostCallResponseFormat() },
+    };
+    if (cfg.reasoningEffort) body.reasoning = { effort: cfg.reasoningEffort };
+    const data = await this.postProviderJson(cfg, '/responses', body, 'ai_video_post_call_provider_http');
+    return {
+      provider: cfg.provider,
+      model: cfg.model,
+      responseId: data?.id || null,
+      payload: this.parseProviderPayload(this.extractResponsesText(data)),
+    };
+  }
+
+  private normalizeHandoffStringArray(value: any, maxItems: number, maxLength = 240) {
+    if (!Array.isArray(value)) return [];
+    return value
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
+      .map((item) => item.slice(0, maxLength))
+      .slice(0, maxItems);
+  }
+
+  private normalizeQuestionsAnswered(value: any) {
+    if (!Array.isArray(value)) return [];
+    return value
+      .map((item) => {
+        const question = String(item?.question || '').trim();
+        const answer = String(item?.answer || '').trim();
+        if (!question || !answer) return null;
+        return { question: question.slice(0, 280), answer: answer.slice(0, 600) };
+      })
+      .filter(Boolean)
+      .slice(0, 12);
+  }
+
+  private normalizeSessionHandoffPayload(payload: any, context: AiSessionHandoffContext) {
+    const summaryText = String(payload?.summaryText || '').trim().slice(0, 2000);
+    if (!summaryText) throw new BadGatewayException('ai_handoff_summary_required');
+    const rawUrgency = String(payload?.urgency || context.session?.priority || '').trim().toLowerCase();
+    const urgency = ['routine', 'urgent', 'emergency'].includes(rawUrgency) ? rawUrgency : 'routine';
+    return {
+      urgency,
+      summaryText,
+      reportedSigns: this.normalizeHandoffStringArray(payload?.reportedSigns, 12),
+      redFlags: this.normalizeHandoffStringArray(payload?.redFlags, 8),
+      questionsAnswered: this.normalizeQuestionsAnswered(payload?.questionsAnswered),
+      questionsUnanswered: this.normalizeHandoffStringArray(payload?.questionsUnanswered, 10),
+      recommendedFirstChecks: this.normalizeHandoffStringArray(payload?.recommendedFirstChecks, 8),
+    };
+  }
+
+  private normalizeHandoffAiContext(value: Record<string, any> | null | undefined) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const messages = Array.isArray(value.messages)
+      ? value.messages.map((message) => ({
+          role: String(message?.role || '').slice(0, 24),
+          content: String(message?.content || '').slice(0, 1200),
+          metadata: message?.metadata && typeof message.metadata === 'object' && !Array.isArray(message.metadata) ? message.metadata : undefined,
+        })).filter((message) => message.content.trim()).slice(-12)
+      : [];
+    return {
+      source: String(value.source || '').slice(0, 80),
+      aiEventId: String(value.aiEventId || '').slice(0, 80),
+      assistantPayload: value.assistantPayload && typeof value.assistantPayload === 'object' && !Array.isArray(value.assistantPayload)
+        ? value.assistantPayload
+        : null,
+      routing: value.routing && typeof value.routing === 'object' && !Array.isArray(value.routing) ? value.routing : null,
+      messages,
+    };
+  }
+
+  private async buildSessionHandoffContext(actorUserId: string, sessionId: string, sourceAiEventId: string | null, aiContext: Record<string, any> | null): Promise<AiSessionHandoffContext> {
+    const normalizedAiContext = this.normalizeHandoffAiContext(aiContext);
+    return this.db.runInTx(async (q) => {
+      const { rows: sessionRows } = await q<any>(
+        `select s.id::text as session_id,
+                s.user_id::text,
+                s.vet_id::text,
+                s.pet_id::text,
+                s.specialty_id::text,
+                s.priority,
+                s.status,
+                s.mode,
+                s.started_at,
+                p.name as pet_name,
+                to_jsonb(p) - 'embedding' as pet,
+                to_jsonb(h) - 'embedding' as health_profile,
+                vu.full_name as vet_name,
+                vs.name as specialty_name
+           from chat_sessions s
+      left join pets p on p.id = s.pet_id
+      left join pet_health_profiles h on h.pet_id = p.id
+      left join users vu on vu.id = s.vet_id
+      left join vet_specialties vs on vs.id = s.specialty_id
+          where s.id = $1::uuid
+            and (s.user_id = auth.uid() or s.vet_id = auth.uid() or is_admin())
+          limit 1`,
+        [sessionId]
+      );
+      const session = sessionRows[0];
+      if (!session) throw new BadRequestException('session_not_found_for_handoff');
+
+      const eventQuery = sourceAiEventId
+        ? q<any>(
+            `select id::text, event_type, status, response_payload, created_at
+               from ai_events
+              where id = $1::uuid
+                and (actor_user_id = auth.uid() or session_id = $2::uuid or pet_id = $3::uuid or is_admin())
+              limit 1`,
+            [sourceAiEventId, sessionId, session.pet_id]
+          )
+        : q<any>(
+            `select id::text, event_type, status, response_payload, created_at
+               from ai_events
+              where actor_user_id = auth.uid()
+                and event_type = 'ai.chat_turn.run'
+                and ($1::uuid is null or pet_id = $1::uuid or session_id = $2::uuid)
+              order by created_at desc
+              limit 3`,
+            [session.pet_id, sessionId]
+          );
+      const { rows: eventRows } = await eventQuery;
+      const sourceAiEvents = eventRows.map((row) => ({
+        id: row.id,
+        eventType: row.event_type,
+        status: row.status,
+        createdAt: row.created_at,
+        payload: row.response_payload?.payload || null,
+        toolResults: Array.isArray(row.response_payload?.toolResults) ? row.response_payload.toolResults : [],
+      }));
+      return { actorUserId, session, aiContext: normalizedAiContext, sourceAiEvents };
+    });
+  }
+
+  private async callSessionHandoffProvider(context: AiSessionHandoffContext, dryRun = false) {
+    const cfg = this.providerConfig(undefined, dryRun);
+    if (dryRun) {
+      const assistantPayload = context.aiContext?.assistantPayload || {};
+      return {
+        provider: cfg.provider,
+        model: cfg.model,
+        responseId: null,
+        payload: {
+          urgency: String(assistantPayload.urgency || context.session.priority || 'routine'),
+          summaryText: String(assistantPayload.handoffSummary || assistantPayload.caseSummary || '').slice(0, 2000),
+          reportedSigns: [],
+          redFlags: [],
+          questionsAnswered: [],
+          questionsUnanswered: [],
+          recommendedFirstChecks: [],
+        },
+      };
+    }
+    if (!cfg.apiKey) throw new ServiceUnavailableException('ai_provider_not_configured');
+    if (cfg.apiMode !== 'responses') throw new ServiceUnavailableException('ai_handoff_requires_responses_api');
+    const body: Record<string, any> = {
+      model: cfg.model,
+      store: false,
+      instructions: this.sessionHandoffInstructions(),
+      input: [{ role: 'user', content: JSON.stringify(context) }],
+      text: { format: this.sessionHandoffResponseFormat() },
+    };
+    if (cfg.reasoningEffort) body.reasoning = { effort: cfg.reasoningEffort };
+    const data = await this.postProviderJson(cfg, '/responses', body, 'ai_handoff_provider_http');
+    return {
+      provider: cfg.provider,
+      model: cfg.model,
+      responseId: data?.id || null,
+      payload: this.parseProviderPayload(this.extractResponsesText(data)),
+    };
+  }
+
+  private async upsertSessionHandoff(args: {
+    context: AiSessionHandoffContext;
+    eventId: string;
+    sourceAiEventId: string | null;
+    payload: ReturnType<AiService['normalizeSessionHandoffPayload']>;
+  }) {
+    const { rows } = await this.db.runInTx(async (q) => q<any>(
+      `insert into ai_handoffs (
+         id, session_id, ai_event_id, source_ai_event_id, actor_user_id, pet_id, vet_id, specialty_id,
+         urgency, summary_text, reported_signs, red_flags, questions_answered, questions_unanswered,
+         recommended_first_checks, source_payload, created_at, updated_at
+       ) values (
+         gen_random_uuid(), $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::uuid, $7::uuid,
+         $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb, now(), now()
+       )
+       on conflict (session_id) do update
+          set ai_event_id = excluded.ai_event_id,
+              source_ai_event_id = excluded.source_ai_event_id,
+              actor_user_id = excluded.actor_user_id,
+              pet_id = excluded.pet_id,
+              vet_id = excluded.vet_id,
+              specialty_id = excluded.specialty_id,
+              urgency = excluded.urgency,
+              summary_text = excluded.summary_text,
+              reported_signs = excluded.reported_signs,
+              red_flags = excluded.red_flags,
+              questions_answered = excluded.questions_answered,
+              questions_unanswered = excluded.questions_unanswered,
+              recommended_first_checks = excluded.recommended_first_checks,
+              source_payload = excluded.source_payload,
+              updated_at = now()
+       returning id, session_id, ai_event_id, source_ai_event_id, actor_user_id, pet_id, vet_id, specialty_id,
+                 urgency, summary_text, reported_signs, red_flags, questions_answered, questions_unanswered,
+                 recommended_first_checks, created_at, updated_at`,
+      [
+        args.context.session.session_id,
+        args.eventId,
+        args.sourceAiEventId,
+        args.context.actorUserId,
+        args.context.session.pet_id || null,
+        args.context.session.vet_id || null,
+        args.context.session.specialty_id || null,
+        args.payload.urgency,
+        args.payload.summaryText,
+        JSON.stringify(args.payload.reportedSigns),
+        JSON.stringify(args.payload.redFlags),
+        JSON.stringify(args.payload.questionsAnswered),
+        JSON.stringify(args.payload.questionsUnanswered),
+        JSON.stringify(args.payload.recommendedFirstChecks),
+        JSON.stringify({ aiContext: args.context.aiContext, sourceAiEvents: args.context.sourceAiEvents }),
+      ]
+    ));
+    return rows[0] || null;
   }
 
   private chatTurnTools() {
@@ -1442,6 +1891,13 @@ export class AiService {
                  and not exists (select 1 from booked b where tstzrange(s.slot_start, s.slot_end) && b.appt_range)
             ) av on true
         where v.is_approved = true
+          and not exists (
+            select 1
+              from vet_consult_locks vcl
+             where vcl.vet_id = v.id
+               and vcl.released_at is null
+               and vcl.expires_at > now()
+          )
           and ($1::uuid is null or (
             array_position(v.specialties, $1::uuid) is not null
             and exists (select 1 from vet_specialties vs where vs.id = $1::uuid and coalesce(vs.is_active, true))
@@ -1777,6 +2233,8 @@ export class AiService {
     };
     const eventId = await this.insertRawEvent({
       actorUserId,
+      petId,
+      sessionId,
       eventType: 'ai.chat_turn.run',
       featureKey: 'ai.chat_turn',
       requestPayload,
@@ -1828,6 +2286,150 @@ export class AiService {
         latencyMs: Date.now() - startedAt,
       }).catch(() => undefined);
       throw e;
+    }
+  }
+
+  async generateSessionHandoff(input: AiSessionHandoffInput) {
+    const actorUserId = this.rc.requireUuidUserId();
+    const sessionId = this.normalizeOptionalUuid(input.sessionId, 'sessionId');
+    if (!sessionId) throw new BadRequestException('sessionId_required');
+    const sourceAiEventId = this.normalizeOptionalUuid(input.sourceAiEventId, 'sourceAiEventId');
+    const context = await this.buildSessionHandoffContext(actorUserId, sessionId, sourceAiEventId, input.aiContext || null);
+    const requestPayload = {
+      sessionId,
+      sourceAiEventId,
+      dryRun: !!input.dryRun,
+      hasAiContext: !!context.aiContext,
+      sourceAiEventCount: context.sourceAiEvents.length,
+    };
+    const eventId = await this.insertRawEvent({
+      actorUserId,
+      petId: context.session.pet_id || null,
+      sessionId,
+      eventType: 'ai.handoff.generate',
+      featureKey: 'ai.handoff',
+      requestPayload,
+    });
+    if (!eventId) throw new ServiceUnavailableException('ai_event_insert_failed');
+    this.roadmapLog('handoff.generate.started', {
+      sessionId,
+      eventId,
+      sourceAiEventId,
+      hasAiContext: !!context.aiContext,
+      sourceAiEventCount: context.sourceAiEvents.length,
+    });
+
+    const startedAt = Date.now();
+    try {
+      const result = await this.callSessionHandoffProvider(context, !!input.dryRun);
+      const payload = this.normalizeSessionHandoffPayload(result.payload, context);
+      const handoff = await this.upsertSessionHandoff({ context, eventId, sourceAiEventId, payload });
+      const latencyMs = Date.now() - startedAt;
+      await this.completeEvent(eventId, 'succeeded', {
+        provider: result.provider,
+        model: result.model,
+        responsePayload: { payload, responseId: result.responseId || null, handoffId: handoff?.id || null },
+        latencyMs,
+      });
+      this.roadmapLog('handoff.generate.succeeded', {
+        sessionId,
+        eventId,
+        handoffId: handoff?.id || null,
+        provider: result.provider,
+        model: result.model,
+        urgency: payload.urgency,
+        reportedSignCount: payload.reportedSigns.length,
+        redFlagCount: payload.redFlags.length,
+        answeredCount: payload.questionsAnswered.length,
+        unansweredCount: payload.questionsUnanswered.length,
+        firstCheckCount: payload.recommendedFirstChecks.length,
+        latencyMs,
+      });
+      return { ok: true, provider: result.provider, model: result.model, eventId, payload, handoff };
+    } catch (error: any) {
+      const latencyMs = Date.now() - startedAt;
+      await this.completeEvent(eventId, 'failed', {
+        errorText: (error?.message || 'ai_handoff_failed').slice(0, 1000),
+        latencyMs,
+      }).catch(() => undefined);
+      this.roadmapLog('handoff.generate.failed', {
+        sessionId,
+        eventId,
+        error: error?.message || String(error),
+        latencyMs,
+      });
+      throw error;
+    }
+  }
+
+  async generateVideoPostCallMessage(input: AiVideoPostCallInput) {
+    const actorUserId = this.rc.requireUuidUserId();
+    const sessionId = this.normalizeOptionalUuid(input.sessionId, 'sessionId');
+    if (!sessionId) throw new BadRequestException('sessionId_required');
+    const context = await this.buildVideoPostCallContext(actorUserId, sessionId, input.endState || null);
+    const eventId = await this.insertRawEvent({
+      actorUserId,
+      petId: context.session.pet_id || null,
+      sessionId,
+      eventType: 'ai.video_post_call_message.generate',
+      featureKey: 'ai.video_post_call_message',
+      requestPayload: {
+        sessionId,
+        dryRun: !!input.dryRun,
+        hasHandoff: !!context.handoff,
+        endReason: context.endState?.endReason || context.lifecycle?.end_reason || null,
+      },
+    });
+    if (!eventId) throw new ServiceUnavailableException('ai_event_insert_failed');
+    this.roadmapLog('video_post_call.generate.started', {
+      sessionId,
+      eventId,
+      hasHandoff: !!context.handoff,
+      endReason: context.endState?.endReason || context.lifecycle?.end_reason || null,
+      rejoinEligible: context.endState?.rejoinEligible === true,
+    });
+    const startedAt = Date.now();
+    try {
+      const result = await this.callVideoPostCallProvider(context, !!input.dryRun);
+      const payload = this.normalizeVideoPostCallPayload(result.payload, context);
+      await this.db.runInTx(async (q) => q(
+        `update video_session_lifecycle
+            set post_call_message_payload = $2::jsonb,
+                updated_at = now()
+          where session_id = $1::uuid`,
+        [sessionId, JSON.stringify({ aiEventId: eventId, payload })]
+      ));
+      const latencyMs = Date.now() - startedAt;
+      await this.completeEvent(eventId, 'succeeded', {
+        provider: result.provider,
+        model: result.model,
+        responsePayload: { payload, responseId: result.responseId || null },
+        latencyMs,
+      });
+      this.roadmapLog('video_post_call.generate.succeeded', {
+        sessionId,
+        eventId,
+        provider: result.provider,
+        model: result.model,
+        suggestedAction: payload.suggestedAction,
+        rejoinRecommended: payload.rejoinRecommended,
+        messageLength: payload.message.length,
+        latencyMs,
+      });
+      return { provider: result.provider, model: result.model, eventId, payload };
+    } catch (error: any) {
+      const latencyMs = Date.now() - startedAt;
+      await this.completeEvent(eventId, 'failed', {
+        errorText: (error?.message || 'ai_video_post_call_failed').slice(0, 1000),
+        latencyMs,
+      }).catch(() => undefined);
+      this.roadmapLog('video_post_call.generate.failed', {
+        sessionId,
+        eventId,
+        error: error?.message || String(error),
+        latencyMs,
+      });
+      throw error;
     }
   }
 
@@ -1961,17 +2563,20 @@ export class AiService {
 
   private async insertRawEvent(args: {
     actorUserId: string;
+    petId?: string | null;
+    encounterId?: string | null;
+    sessionId?: string | null;
     eventType: string;
     featureKey: string;
     requestPayload: Record<string, any>;
   }) {
     const { rows } = await this.db.runInTx(async (q) => q<{ id: string }>(
       `insert into ai_events (
-         id, actor_user_id, event_type, feature_key, status, request_payload, created_at, updated_at
+         id, actor_user_id, pet_id, encounter_id, session_id, event_type, feature_key, status, request_payload, created_at, updated_at
        ) values (
-         gen_random_uuid(), $1::uuid, $2, $3, 'running', coalesce($4::jsonb, '{}'::jsonb), now(), now()
+         gen_random_uuid(), $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, 'running', coalesce($7::jsonb, '{}'::jsonb), now(), now()
        ) returning id`,
-      [args.actorUserId, args.eventType, args.featureKey, JSON.stringify(args.requestPayload)]
+      [args.actorUserId, args.petId || null, args.encounterId || null, args.sessionId || null, args.eventType, args.featureKey, JSON.stringify(args.requestPayload)]
     ));
     return rows[0]?.id;
   }

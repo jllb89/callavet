@@ -10,6 +10,10 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../core/config/environment.dart';
 
+void _vetVideoLog(String message) {
+  debugPrint('[VideoRoadmap][VetVideo] $message');
+}
+
 class VetVideoCallScreen extends StatefulWidget {
   const VetVideoCallScreen({super.key, required this.sessionId});
 
@@ -29,10 +33,12 @@ class _VetVideoCallScreenState extends State<VetVideoCallScreen> {
   bool _micEnabled = true;
   bool _cameraEnabled = true;
   CameraPosition _cameraPosition = CameraPosition.front;
+  _VetVideoEndState? _endState;
 
   @override
   void initState() {
     super.initState();
+    _vetVideoLog('init sessionId=${widget.sessionId}');
     unawaited(_connect());
   }
 
@@ -51,6 +57,7 @@ class _VetVideoCallScreenState extends State<VetVideoCallScreen> {
 
   Future<void> _connect() async {
     try {
+      _vetVideoLog('connect.start sessionId=${widget.sessionId}');
       final credentials = await _createVideoRoom(widget.sessionId);
       final url = credentials['url']?.toString() ?? '';
       final token = credentials['token']?.toString() ?? '';
@@ -58,6 +65,7 @@ class _VetVideoCallScreenState extends State<VetVideoCallScreen> {
       if (url.isEmpty || token.isEmpty || roomName.isEmpty) {
         throw const _VetVideoException('No pude obtener credenciales de video.');
       }
+      _vetVideoLog('connect.credentials sessionId=${widget.sessionId} roomName=$roomName');
 
       final room = Room(
         roomOptions: const RoomOptions(adaptiveStream: true, dynacast: true),
@@ -68,7 +76,7 @@ class _VetVideoCallScreenState extends State<VetVideoCallScreen> {
         ..on<LocalTrackUnpublishedEvent>((_) => _handleRoomUpdate())
         ..on<TrackSubscribedEvent>((_) => _handleRoomUpdate())
         ..on<TrackUnsubscribedEvent>((_) => _handleRoomUpdate())
-        ..on<RoomDisconnectedEvent>((_) => _handleRoomDisconnected());
+        ..on<RoomDisconnectedEvent>((_) => unawaited(_handleRoomDisconnected()));
       room.addListener(_handleRoomUpdate);
 
       if (!mounted) {
@@ -86,6 +94,7 @@ class _VetVideoCallScreenState extends State<VetVideoCallScreen> {
       await room.connect(url, token);
       final mediaWarning = await _publishInitialTracks(room);
       if (!mounted) return;
+      _vetVideoLog('connect.succeeded sessionId=${widget.sessionId} roomName=$roomName mediaWarning=${mediaWarning != null}');
       setState(() {
         _connecting = false;
         _error = mediaWarning;
@@ -94,6 +103,7 @@ class _VetVideoCallScreenState extends State<VetVideoCallScreen> {
       });
     } catch (error) {
       if (!mounted) return;
+      _vetVideoLog('connect.failed sessionId=${widget.sessionId} error=$error');
       setState(() {
         _connecting = false;
         _error = error.toString();
@@ -132,13 +142,19 @@ class _VetVideoCallScreenState extends State<VetVideoCallScreen> {
     });
   }
 
-  void _handleRoomDisconnected() {
+  Future<void> _handleRoomDisconnected() async {
     _handleRoomUpdate();
     if (!mounted || _ending) return;
+    _vetVideoLog('disconnect.remote sessionId=${widget.sessionId} roomName=$_roomName');
+    final endState = await _fetchEndState().catchError((_) => null);
+    if (!mounted || _ending) return;
+    _vetVideoLog('disconnect.resolved sessionId=${widget.sessionId} endReason=${endState?.endReason} endedBy=${endState?.endedByRole}');
     setState(() {
       _connecting = false;
       _room = null;
-      _error = 'La videollamada se desconecto. Puedes volver e intentarlo otra vez.';
+      _endState = endState;
+      _error = endState?.message ??
+          'La videollamada se desconecto. Puedes volver e intentarlo otra vez.';
     });
   }
 
@@ -212,6 +228,7 @@ class _VetVideoCallScreenState extends State<VetVideoCallScreen> {
 
   Future<void> _leaveCall() async {
     if (_ending) return;
+    _vetVideoLog('leave.requested sessionId=${widget.sessionId} roomName=$_roomName');
     setState(() => _ending = true);
     try {
       final roomName = _roomName;
@@ -219,6 +236,7 @@ class _VetVideoCallScreenState extends State<VetVideoCallScreen> {
         await _endRoom(roomName);
       }
     } catch (error) {
+      _vetVideoLog('leave.end_room_failed sessionId=${widget.sessionId} error=$error');
       debugPrint('[VetVideo] Room end failed: $error');
     }
     try {
@@ -235,12 +253,51 @@ class _VetVideoCallScreenState extends State<VetVideoCallScreen> {
   }
 
   Future<Map<String, dynamic>> _createVideoRoom(String sessionId) {
+    _vetVideoLog('room.create.request sessionId=$sessionId');
     return _postGatewayJson(
         '/video/rooms', {'sessionId': sessionId, 'participantRole': 'vet'});
   }
 
   Future<void> _endRoom(String roomName) async {
-    await _postGatewayJson('/video/rooms/${Uri.encodeComponent(roomName)}/end', const {});
+    _vetVideoLog('room.end.request sessionId=${widget.sessionId} roomName=$roomName');
+    await _postGatewayJson('/video/rooms/${Uri.encodeComponent(roomName)}/end', {
+      'participantRole': 'vet',
+      'reason': 'vet_ended',
+    });
+  }
+
+  Future<_VetVideoEndState?> _fetchEndState() async {
+    _vetVideoLog('end_state.fetch sessionId=${widget.sessionId}');
+    final data = await _getGatewayJson(
+      '/video/sessions/${Uri.encodeComponent(widget.sessionId)}/end-state',
+    );
+    final endState = _VetVideoEndState.fromJson(data);
+    _vetVideoLog('end_state.result sessionId=${widget.sessionId} endReason=${endState.endReason} endedBy=${endState.endedByRole} lifecycle=${endState.lifecycleStatus}');
+    return endState;
+  }
+
+  Future<Map<String, dynamic>> _getGatewayJson(String path) async {
+    final token = Supabase.instance.client.auth.currentSession?.accessToken;
+    if (token == null || token.isEmpty) {
+      throw const _VetVideoException('Tu sesion expiro. Vuelve a iniciar sesion.');
+    }
+
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    try {
+      final request = await client.getUrl(Uri.parse('${Environment.apiBaseUrl}$path'));
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+      final response = await request.close().timeout(const Duration(seconds: 30));
+      final rawBody = await utf8.decoder.bind(response).join();
+      final decoded = rawBody.trim().isEmpty ? <String, dynamic>{} : jsonDecode(rawBody);
+      final data = _asMap(decoded) ?? <String, dynamic>{};
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw _VetVideoException(_errorMessage(data, response.statusCode));
+      }
+      return data;
+    } finally {
+      client.close(force: true);
+    }
   }
 
   Future<Map<String, dynamic>> _postGatewayJson(String path, Map<String, dynamic> body) async {
@@ -272,6 +329,7 @@ class _VetVideoCallScreenState extends State<VetVideoCallScreen> {
   @override
   Widget build(BuildContext context) {
     final room = _room;
+    final endState = _endState;
     return Scaffold(
       backgroundColor: Colors.black,
       body: DecoratedBox(
@@ -286,7 +344,7 @@ class _VetVideoCallScreenState extends State<VetVideoCallScreen> {
           child: _error != null && room == null
               ? _VideoStatusView(
                   icon: Icons.videocam_off_rounded,
-                  title: 'No pude conectar la videollamada',
+                title: endState?.title ?? 'No pude conectar la videollamada',
                   message: _error!,
                   actionLabel: 'volver',
                   onAction: () => context.canPop() ? context.pop() : context.go('/dashboard'),
@@ -312,6 +370,43 @@ class _VetVideoCallScreenState extends State<VetVideoCallScreen> {
         ),
       ),
     );
+  }
+}
+
+class _VetVideoEndState {
+  const _VetVideoEndState({
+    this.endedByRole,
+    this.endReason,
+    this.lifecycleStatus,
+  });
+
+  factory _VetVideoEndState.fromJson(Map<String, dynamic> json) {
+    return _VetVideoEndState(
+      endedByRole: json['endedByRole']?.toString(),
+      endReason: json['endReason']?.toString(),
+      lifecycleStatus: json['lifecycleStatus']?.toString(),
+    );
+  }
+
+  final String? endedByRole;
+  final String? endReason;
+  final String? lifecycleStatus;
+
+  String get title {
+    if (endedByRole == 'owner' || endReason == 'owner_ended') {
+      return 'El propietario terminó la videollamada';
+    }
+    if (endReason == 'timeout_no_show' || lifecycleStatus == 'timed_out') {
+      return 'La videollamada expiró';
+    }
+    return 'La videollamada terminó';
+  }
+
+  String get message {
+    if (endedByRole == 'owner' || endReason == 'owner_ended') {
+      return 'La consulta queda disponible en el panel para seguimiento según el estado de la sesión.';
+    }
+    return 'Puedes volver al panel de consultas.';
   }
 }
 
