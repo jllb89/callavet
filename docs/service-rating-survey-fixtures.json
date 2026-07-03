@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "scoreOptions": [
+    { "label": "Excelente", "score": 5 },
+    { "label": "Buena", "score": 4 },
+    { "label": "Regular", "score": 3 },
+    { "label": "Mala", "score": 2 },
+    { "label": "Pésima", "score": 1 }
+  ],
+  "states": [
+    {
+      "name": "prompt_later_path",
+      "initialStatus": "pending",
+      "action": "later",
+      "expectedStatus": "deferred",
+      "expectedNextPromptHours": 24
+    },
+    {
+      "name": "prompt_dismiss_path",
+      "initialStatus": "pending",
+      "action": "dismiss",
+      "expectedStatus": "dismissed",
+      "permanentForSession": true
+    },
+    {
+      "name": "complete_yes_path",
+      "initialStatus": "accepted",
+      "answers": {
+        "vetAssistanceScore": 5,
+        "appServiceScore": 4,
+        "openFeedback": "Muy buena atención y la app funcionó bien."
+      },
+      "expectedStatus": "completed",
+      "expectedRatingScore": 5,
+      "appScoreMustNotAffectVetRating": true
+    },
+    {
+      "name": "skip_open_feedback_path",
+      "initialStatus": "accepted",
+      "answers": {
+        "vetAssistanceScore": 4,
+        "appServiceScore": 4,
+        "openFeedback": null
+      },
+      "expectedStatus": "completed",
+      "expectedRatingScore": 4
+    }
+  ]
+}

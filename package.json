@@ -15,6 +15,7 @@
     "typecheck": "turbo run typecheck",
     "eval:video-handoff-fixtures": "node scripts/eval-video-handoff-fixtures.js",
     "openapi:lint": "spectral lint --fail-severity=error -r docs/openapi/.spectral.yaml docs/openapi/*.yaml",
+    "eval:service-rating-survey-fixtures": "node scripts/eval-service-rating-survey-fixtures.js",
     "openapi:codegen": "pnpm --filter @cav/sdk run codegen",
     "tree": "bash -lc 'tree -L ${DEPTH:-2} -I \"node_modules|.git|.pnpm-store|dist|build|.next\"'"
   },

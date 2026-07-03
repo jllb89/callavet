@@ -33,6 +33,10 @@ void _aiChatLog(String message) {
   debugPrint('[AIChat][Mobile] $message');
 }
 
+void _surveyChatLog(String message) {
+  debugPrint('[ConsultSurvey][Chat] $message');
+}
+
 String _preview(String? value, {int max = 180}) {
   final normalized = (value ?? '').replaceAll(RegExp(r'\s+'), ' ').trim();
   if (normalized.length <= max) return normalized;
@@ -46,6 +50,7 @@ class ChatScreen extends StatefulWidget {
     this.initialMessage,
     this.initialAssistantMessage,
     this.initialRejoinVideo = false,
+    this.initialSurvey = false,
     this.embedded = false,
   });
 
@@ -53,6 +58,7 @@ class ChatScreen extends StatefulWidget {
   final String? initialMessage;
   final String? initialAssistantMessage;
   final bool initialRejoinVideo;
+  final bool initialSurvey;
   final bool embedded;
 
   @override
@@ -67,6 +73,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   late final String _conversationId;
   bool _isSending = false;
+  bool _surveyLoading = false;
+  _ActiveSurveyFeedback? _activeSurveyFeedback;
 
   static final _uuidPattern = RegExp(
     r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
@@ -82,6 +90,7 @@ class _ChatScreenState extends State<ChatScreen> {
       'initialMessageLength=${widget.initialMessage?.trim().length ?? 0} '
       'initialAssistantMessagePresent=${widget.initialAssistantMessage?.trim().isNotEmpty == true} '
       'initialRejoinVideo=${widget.initialRejoinVideo} '
+      'initialSurvey=${widget.initialSurvey} '
       'apiBaseUrl=${Environment.apiBaseUrl} dryRun=$_aiChatDryRun',
     );
     final cachedSessionId = _uuidOrNull(widget.sessionId);
@@ -114,6 +123,9 @@ class _ChatScreenState extends State<ChatScreen> {
         _aiChatLog(
             'postFrame auto-sending initial message preview="${_preview(initialMessage)}"');
         _sendUserMessage(initialMessage);
+      } else if (widget.initialSurvey) {
+        _surveyChatLog('postFrame starting consult survey prompt');
+        unawaited(_startSurveyPrompt());
       } else {
         _aiChatLog('postFrame no initial message; focusing composer');
         _focusNode.requestFocus();
@@ -146,7 +158,253 @@ class _ChatScreenState extends State<ChatScreen> {
     _aiChatLog(
         'composer send accepted length=${text.length} preview="${_preview(text)}"');
     _inputCtrl.clear();
+    final activeSurveyFeedback = _activeSurveyFeedback;
+    if (activeSurveyFeedback != null) {
+      _submitSurveyFeedback(activeSurveyFeedback, text);
+      return;
+    }
     _sendUserMessage(text);
+  }
+
+  Future<void> _startSurveyPrompt() async {
+    final sessionId = _uuidOrNull(widget.sessionId);
+    if (sessionId == null || _surveyLoading) return;
+    if (_messages.any((message) => message.surveyAction != null)) {
+      _surveyChatLog('prompt skipped: survey action already visible');
+      return;
+    }
+    setState(() => _surveyLoading = true);
+    try {
+      final response = await _getGatewayJson('/sessions/${Uri.encodeComponent(sessionId)}/survey');
+      final surveyResponse = _SurveyResponse.fromJson(response);
+      _surveyChatLog(
+        'get response eligible=${surveyResponse.eligible} status=${surveyResponse.survey?.status} reason=${surveyResponse.reason}',
+      );
+      if (!mounted || !surveyResponse.eligible || surveyResponse.survey == null) return;
+      _continueSurvey(surveyResponse.survey!);
+    } catch (error) {
+      _surveyChatLog('get failed: ${error.runtimeType} $error');
+    } finally {
+      if (mounted) setState(() => _surveyLoading = false);
+    }
+  }
+
+  void _continueSurvey(_ConsultSurvey survey) {
+    if (!mounted) return;
+    if (survey.status == 'completed' || survey.status == 'dismissed') return;
+    final hasPrompt = _messages.any((message) =>
+        message.surveyAction?.surveyId == survey.id &&
+        message.surveyAction?.step == _SurveyStep.prompt);
+    if ((survey.status == 'pending' || survey.status == 'deferred') && !hasPrompt) {
+      setState(() {
+        _messages.add(_ChatMessage.assistant(
+          '¿Quieres calificar esta consulta ahora?',
+          includeInHistory: false,
+          surveyAction: _SurveyAction.prompt(survey),
+        ));
+      });
+      _scrollToBottom();
+      return;
+    }
+    if (survey.vetAssistanceScore == null) {
+      _showSurveyVetScore(survey);
+      return;
+    }
+    if (survey.appServiceScore == null) {
+      _showSurveyAppScore(survey);
+      return;
+    }
+    if (survey.status != 'completed') {
+      _showSurveyFeedback(survey);
+    }
+  }
+
+  Future<void> _handleSurveyAction(_SurveyActionChoice choice) async {
+    switch (choice.type) {
+      case _SurveyActionType.startNow:
+      case _SurveyActionType.later:
+      case _SurveyActionType.dismiss:
+        await _answerSurveyPrompt(choice);
+        break;
+      case _SurveyActionType.vetScore:
+        await _saveSurveyScore(choice, vetScore: choice.score);
+        break;
+      case _SurveyActionType.appScore:
+        await _saveSurveyScore(choice, appScore: choice.score);
+        break;
+      case _SurveyActionType.skipFeedback:
+        final active = _activeSurveyFeedback;
+        if (active != null) await _submitSurveyFeedback(active, null);
+        break;
+    }
+  }
+
+  Future<void> _answerSurveyPrompt(_SurveyActionChoice choice) async {
+    final answer = switch (choice.type) {
+      _SurveyActionType.startNow => 'now',
+      _SurveyActionType.later => 'later',
+      _ => 'dismiss',
+    };
+    _surveyChatLog('prompt answer surveyId=${choice.survey.id} answer=$answer');
+    setState(() => _isSending = true);
+    try {
+      final response = await _postGatewayJson(
+        '/sessions/${Uri.encodeComponent(choice.survey.sessionId)}/survey/prompt-response',
+        {'answer': answer},
+      );
+      final survey = _SurveyResponse.fromJson(response).survey;
+      if (!mounted || survey == null) return;
+      if (answer == 'now') {
+        _showSurveyVetScore(survey);
+      } else {
+        setState(() {
+          _messages.add(_ChatMessage.assistant(
+            answer == 'later'
+                ? 'Claro, te lo preguntaremos más tarde.'
+                : 'Listo, no volveremos a pedir esta encuesta para esta consulta.',
+            includeInHistory: false,
+          ));
+        });
+      }
+    } catch (error) {
+      _surveyChatLog('prompt answer failed: ${error.runtimeType} $error');
+      if (!mounted) return;
+      setState(() => _messages.add(_ChatMessage.assistant(_friendlyError(error), includeInHistory: false)));
+    } finally {
+      if (mounted) {
+        setState(() => _isSending = false);
+        _scrollToBottom();
+      }
+    }
+  }
+
+  Future<void> _saveSurveyScore(
+    _SurveyActionChoice choice, {
+    int? vetScore,
+    int? appScore,
+  }) async {
+    final label = choice.label;
+    _surveyChatLog(
+      'score selected surveyId=${choice.survey.id} step=${choice.type} score=${choice.score}',
+    );
+    setState(() {
+      _messages.add(_ChatMessage.user(label, includeInHistory: false));
+      _isSending = true;
+    });
+    try {
+      final response = await _patchGatewayJson(
+        '/sessions/${Uri.encodeComponent(choice.survey.sessionId)}/survey',
+        {
+          if (vetScore != null) 'vetAssistanceScore': vetScore,
+          if (appScore != null) 'appServiceScore': appScore,
+        },
+      );
+      final survey = _SurveyResponse.fromJson(response).survey;
+      if (!mounted || survey == null) return;
+      if (appScore != null) {
+        _showSurveyFeedback(survey);
+      } else {
+        _showSurveyAppScore(survey);
+      }
+    } catch (error) {
+      _surveyChatLog('score save failed: ${error.runtimeType} $error');
+      if (!mounted) return;
+      setState(() => _messages.add(_ChatMessage.assistant(_friendlyError(error), includeInHistory: false)));
+    } finally {
+      if (mounted) {
+        setState(() => _isSending = false);
+        _scrollToBottom();
+      }
+    }
+  }
+
+  void _showSurveyVetScore(_ConsultSurvey survey) {
+    if (_messages.any((message) =>
+        message.surveyAction?.surveyId == survey.id &&
+        message.surveyAction?.step == _SurveyStep.vetScore)) {
+      return;
+    }
+    setState(() {
+      _messages.add(_ChatMessage.assistant(
+        '¿Cómo calificas la asistencia proporcionada por parte del veterinario?',
+        includeInHistory: false,
+        surveyAction: _SurveyAction.score(survey, _SurveyStep.vetScore),
+      ));
+    });
+    _scrollToBottom();
+  }
+
+  void _showSurveyAppScore(_ConsultSurvey survey) {
+    if (_messages.any((message) =>
+        message.surveyAction?.surveyId == survey.id &&
+        message.surveyAction?.step == _SurveyStep.appScore)) {
+      return;
+    }
+    setState(() {
+      _messages.add(_ChatMessage.assistant(
+        '¿Cómo calificas el funcionamiento general de la aplicación?',
+        includeInHistory: false,
+        surveyAction: _SurveyAction.score(survey, _SurveyStep.appScore),
+      ));
+    });
+    _scrollToBottom();
+  }
+
+  void _showSurveyFeedback(_ConsultSurvey survey) {
+    if (_messages.any((message) =>
+        message.surveyAction?.surveyId == survey.id &&
+        message.surveyAction?.step == _SurveyStep.feedback)) {
+      return;
+    }
+    setState(() {
+      _activeSurveyFeedback = _ActiveSurveyFeedback(survey: survey);
+      _messages.add(_ChatMessage.assistant(
+        '¿Hay algo más que quieras contarnos?',
+        includeInHistory: false,
+        surveyAction: _SurveyAction.feedback(survey),
+      ));
+    });
+    _focusNode.requestFocus();
+    _scrollToBottom();
+  }
+
+  Future<void> _submitSurveyFeedback(
+      _ActiveSurveyFeedback active, String? feedback) async {
+    final trimmed = feedback?.trim();
+    _surveyChatLog(
+      'feedback submit surveyId=${active.survey.id} hasFeedback=${trimmed?.isNotEmpty == true}');
+    setState(() {
+      if (trimmed != null && trimmed.isNotEmpty) {
+        _messages.add(_ChatMessage.user(trimmed, includeInHistory: false));
+      }
+      _isSending = true;
+    });
+    try {
+      await _patchGatewayJson(
+        '/sessions/${Uri.encodeComponent(active.survey.sessionId)}/survey',
+        {
+          'status': 'completed',
+          if (trimmed != null && trimmed.isNotEmpty) 'openFeedback': trimmed,
+        },
+      );
+      if (!mounted) return;
+      setState(() {
+        _activeSurveyFeedback = null;
+        _messages.add(_ChatMessage.assistant(
+          'Gracias por ayudarnos a mejorar Call a Vet.',
+          includeInHistory: false,
+        ));
+      });
+    } catch (error) {
+      _surveyChatLog('feedback submit failed: ${error.runtimeType} $error');
+      if (!mounted) return;
+      setState(() => _messages.add(_ChatMessage.assistant(_friendlyError(error), includeInHistory: false)));
+    } finally {
+      if (mounted) {
+        setState(() => _isSending = false);
+        _scrollToBottom();
+      }
+    }
   }
 
   Future<void> _sendUserMessage(String text) async {
@@ -804,6 +1062,54 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  Future<Map<String, dynamic>> _patchGatewayJson(
+      String path, Map<String, dynamic> body) async {
+    final token = Supabase.instance.client.auth.currentSession?.accessToken;
+    if (token == null || token.isEmpty) {
+      throw const _ChatApiException(
+          'Tu sesión expiró. Vuelve a iniciar sesión.');
+    }
+
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    final startedAt = DateTime.now();
+    try {
+      final uri = Uri.parse('${Environment.apiBaseUrl}$path');
+      _aiChatLog('gateway PATCH $uri bodyKeys=${body.keys.join(',')}');
+      final request =
+          await client.patchUrl(uri).timeout(const Duration(seconds: 10));
+      request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+      request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      request.add(utf8.encode(jsonEncode(body)));
+
+      final response =
+          await request.close().timeout(const Duration(seconds: 30));
+      final rawBody = await utf8.decoder.bind(response).join();
+      _aiChatLog(
+        'gateway PATCH $path status=${response.statusCode} elapsedMs=${DateTime.now().difference(startedAt).inMilliseconds} '
+        'bodyPreview="${_preview(rawBody, max: 420)}"',
+      );
+      final decoded =
+          rawBody.trim().isEmpty ? <String, dynamic>{} : jsonDecode(rawBody);
+      final data = _asMap(decoded) ?? <String, dynamic>{};
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw _ChatApiException(_errorMessage(data, response.statusCode));
+      }
+      return data;
+    } on TimeoutException {
+      throw const _ChatApiException(
+          'La conexión tardó demasiado. Inténtalo otra vez.');
+    } on FormatException {
+      throw const _ChatApiException(
+          'El servidor respondió con datos inválidos.');
+    } on SocketException {
+      throw const _ChatApiException(
+          'No hay conexión con Call a Vet en este momento.');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   Future<Map<String, dynamic>> _getGatewayJson(String path) async {
     final token = Supabase.instance.client.auth.currentSession?.accessToken;
     if (token == null || token.isEmpty) {
@@ -969,6 +1275,7 @@ class _ChatScreenState extends State<ChatScreen> {
             onUpgradeSelected: _openSubscriptionUpgrade,
             onPlanUpgradeConfirmed: _confirmSubscriptionUpgrade,
             onRejoinVideo: _openVideoFromChat,
+            onSurveyAction: _handleSurveyAction,
           ),
         );
       },
@@ -1166,6 +1473,7 @@ class _MessageBubble extends StatelessWidget {
     required this.onUpgradeSelected,
     required this.onPlanUpgradeConfirmed,
     required this.onRejoinVideo,
+    required this.onSurveyAction,
   });
 
   final _ChatMessage message;
@@ -1180,6 +1488,7 @@ class _MessageBubble extends StatelessWidget {
   final void Function(_ChatSubscriptionPlan plan, _AiChatTurnResult result)
       onPlanUpgradeConfirmed;
   final ValueChanged<String> onRejoinVideo;
+  final ValueChanged<_SurveyActionChoice> onSurveyAction;
 
   @override
   Widget build(BuildContext context) {
@@ -1255,6 +1564,14 @@ class _MessageBubble extends StatelessWidget {
                   selected: true,
                   enabled: !sending,
                   onTap: () => onRejoinVideo(message.rejoinSessionId!),
+                ),
+              ],
+              if (!isUser && message.surveyAction != null) ...[
+                const SizedBox(height: 8),
+                _SurveyActionPanel(
+                  action: message.surveyAction!,
+                  sending: sending,
+                  onSelected: onSurveyAction,
                 ),
               ],
             ],
@@ -1575,6 +1892,34 @@ class _ServiceButton extends StatelessWidget {
   }
 }
 
+class _SurveyActionPanel extends StatelessWidget {
+  const _SurveyActionPanel({
+    required this.action,
+    required this.sending,
+    required this.onSelected,
+  });
+
+  final _SurveyAction action;
+  final bool sending;
+  final ValueChanged<_SurveyActionChoice> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: action.choices.map((choice) {
+        return _ServiceButton(
+          label: choice.label,
+          selected: choice.selected,
+          enabled: !sending,
+          onTap: () => onSelected(choice),
+        );
+      }).toList(growable: false),
+    );
+  }
+}
+
 class _ChatComposer extends StatelessWidget {
   const _ChatComposer({
     required this.controller,
@@ -1804,12 +2149,17 @@ class _ChatMessage {
     required this.text,
     this.result,
     this.rejoinSessionId,
+    this.surveyAction,
     this.includeInHistory = true,
   });
 
-  factory _ChatMessage.user(String text) {
+  factory _ChatMessage.user(String text, {bool includeInHistory = true}) {
     return _ChatMessage(
-        id: _nextChatMessageId(), role: _ChatRole.user, text: text);
+      id: _nextChatMessageId(),
+      role: _ChatRole.user,
+      text: text,
+      includeInHistory: includeInHistory,
+    );
   }
 
   factory _ChatMessage.assistant(
@@ -1817,6 +2167,7 @@ class _ChatMessage {
     _AiChatTurnResult? result,
     bool includeInHistory = true,
     String? rejoinSessionId,
+    _SurveyAction? surveyAction,
   }) {
     return _ChatMessage(
       id: _nextChatMessageId(),
@@ -1824,6 +2175,7 @@ class _ChatMessage {
       text: text,
       result: result,
       rejoinSessionId: rejoinSessionId,
+      surveyAction: surveyAction,
       includeInHistory: includeInHistory,
     );
   }
@@ -1833,9 +2185,177 @@ class _ChatMessage {
   final String text;
   final _AiChatTurnResult? result;
   final String? rejoinSessionId;
+  final _SurveyAction? surveyAction;
   final bool includeInHistory;
 
   bool get isUser => role == _ChatRole.user;
+}
+
+enum _SurveyStep { prompt, vetScore, appScore, feedback }
+
+enum _SurveyActionType {
+  startNow,
+  later,
+  dismiss,
+  vetScore,
+  appScore,
+  skipFeedback,
+}
+
+class _SurveyAction {
+  const _SurveyAction({
+    required this.survey,
+    required this.step,
+    required this.choices,
+  });
+
+  factory _SurveyAction.prompt(_ConsultSurvey survey) {
+    return _SurveyAction(
+      survey: survey,
+      step: _SurveyStep.prompt,
+      choices: [
+        _SurveyActionChoice(
+          survey: survey,
+          type: _SurveyActionType.startNow,
+          label: 'Sí, calificar ahora',
+          selected: true,
+        ),
+        _SurveyActionChoice(
+          survey: survey,
+          type: _SurveyActionType.later,
+          label: 'Más tarde',
+        ),
+        _SurveyActionChoice(
+          survey: survey,
+          type: _SurveyActionType.dismiss,
+          label: 'Descartar',
+        ),
+      ],
+    );
+  }
+
+  factory _SurveyAction.score(_ConsultSurvey survey, _SurveyStep step) {
+    final type = step == _SurveyStep.vetScore
+        ? _SurveyActionType.vetScore
+        : _SurveyActionType.appScore;
+    return _SurveyAction(
+      survey: survey,
+      step: step,
+      choices: _surveyScoreOptions
+          .map((option) => _SurveyActionChoice(
+                survey: survey,
+                type: type,
+                label: option.label,
+                score: option.score,
+                selected: option.score == 5,
+              ))
+          .toList(growable: false),
+    );
+  }
+
+  factory _SurveyAction.feedback(_ConsultSurvey survey) {
+    return _SurveyAction(
+      survey: survey,
+      step: _SurveyStep.feedback,
+      choices: [
+        _SurveyActionChoice(
+          survey: survey,
+          type: _SurveyActionType.skipFeedback,
+          label: 'Omitir',
+        ),
+      ],
+    );
+  }
+
+  final _ConsultSurvey survey;
+  final _SurveyStep step;
+  final List<_SurveyActionChoice> choices;
+
+  String get surveyId => survey.id;
+}
+
+class _SurveyActionChoice {
+  const _SurveyActionChoice({
+    required this.survey,
+    required this.type,
+    required this.label,
+    this.score,
+    this.selected = false,
+  });
+
+  final _ConsultSurvey survey;
+  final _SurveyActionType type;
+  final String label;
+  final int? score;
+  final bool selected;
+}
+
+class _SurveyScoreOption {
+  const _SurveyScoreOption(this.label, this.score);
+
+  final String label;
+  final int score;
+}
+
+const _surveyScoreOptions = [
+  _SurveyScoreOption('Excelente', 5),
+  _SurveyScoreOption('Buena', 4),
+  _SurveyScoreOption('Regular', 3),
+  _SurveyScoreOption('Mala', 2),
+  _SurveyScoreOption('Pésima', 1),
+];
+
+class _ActiveSurveyFeedback {
+  const _ActiveSurveyFeedback({required this.survey});
+
+  final _ConsultSurvey survey;
+}
+
+class _SurveyResponse {
+  const _SurveyResponse({
+    required this.eligible,
+    required this.reason,
+    required this.survey,
+  });
+
+  factory _SurveyResponse.fromJson(Map<String, dynamic> json) {
+    final surveyMap = _asMap(json['survey']);
+    return _SurveyResponse(
+      eligible: json['eligible'] == true,
+      reason: json['reason']?.toString(),
+      survey: surveyMap == null ? null : _ConsultSurvey.fromJson(surveyMap),
+    );
+  }
+
+  final bool eligible;
+  final String? reason;
+  final _ConsultSurvey? survey;
+}
+
+class _ConsultSurvey {
+  _ConsultSurvey({
+    required this.id,
+    required this.sessionId,
+    required this.status,
+    required this.vetAssistanceScore,
+    required this.appServiceScore,
+  });
+
+  factory _ConsultSurvey.fromJson(Map<String, dynamic> json) {
+    return _ConsultSurvey(
+      id: json['id']?.toString() ?? '',
+      sessionId: json['sessionId']?.toString() ?? '',
+      status: json['status']?.toString() ?? 'pending',
+      vetAssistanceScore: _toInt(json['vetAssistanceScore']),
+      appServiceScore: _toInt(json['appServiceScore']),
+    );
+  }
+
+  final String id;
+  final String sessionId;
+  final String status;
+  final int? vetAssistanceScore;
+  final int? appServiceScore;
 }
 
 class _AiChatTurnResult {

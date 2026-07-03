@@ -187,7 +187,7 @@ Eligibility rules:
 
 ### Phase 3: Mobile Chat Survey State Machine
 
-Add local chat message types separate from AI assistant messages:
+- Completed: added local chat survey action state separate from AI assistant responses:
 
 - `surveyPrompt`
 - `surveyVetScore`
@@ -197,66 +197,90 @@ Add local chat message types separate from AI assistant messages:
 
 In chat after post-call return:
 
-1. Render AI-generated post-call message.
-2. Render a survey prompt card/action tags:
+1. Completed: render AI-generated post-call message.
+2. Completed: render a survey prompt card/action tags:
    - `Sí, calificar ahora`
    - `Más tarde`
-3. If yes:
-   - Ask vet assistance question with score tags.
-   - Ask app/service question with score tags.
-   - Ask open feedback question with composer enabled and `Omitir` tag.
-   - Submit completed survey.
-4. If later:
-   - Call defer endpoint.
-   - Continue normal chat.
+  - `Descartar`
+3. Completed: if yes:
+  - ask vet assistance question with score tags.
+  - ask app/service question with score tags.
+  - ask open feedback question with composer enabled and `Omitir` tag.
+  - submit completed survey.
+4. Completed: if later:
+  - call defer endpoint.
+  - continue normal chat.
 
 Important UI rule:
 
 - Survey action tags should reuse the visual language of existing chat service action tags, not require typing for score questions.
 - The open question can use the composer, but score questions should not.
 
+Validation:
+
+- Completed: `flutter analyze lib/src/features/chat/presentation/chat_screen.dart lib/src/features/home/presentation/home_v2_screen.dart lib/src/core/router/app_router.dart lib/src/features/video/presentation/video_call_screen.dart` passes.
+
 ### Phase 4: App-Launch Pending Survey Card
 
-- On app startup/home load, call `GET /me/surveys/pending`.
-- If one exists, show a compact pending survey card using the same visual pattern as the vet pre-call handoff/prediagnosis card:
+- Completed: on app startup/home load, call `GET /me/surveys/pending`.
+- Completed: if one exists, show a compact pending survey card using the same visual pattern as the vet pre-call handoff/prediagnosis card:
   - session/pet/vet summary
   - `Calificar ahora`
   - `Más tarde`
   - `Descartar`
-- `Calificar ahora` navigates to `/chat/:sessionId?survey=true` and starts the in-chat survey.
-- `Más tarde` defers `next_prompt_at`.
-- `Descartar` marks dismissed.
+- Completed: `Calificar ahora` navigates to `/chat/:sessionId?survey=true` and starts the in-chat survey.
+- Completed: `Más tarde` defers `next_prompt_at`.
+- Completed: `Descartar` marks dismissed.
+
+Validation:
+
+- Completed: Flutter analyze passes for the touched mobile files.
 
 ### Phase 5: Observability And Logging
 
-- Add views:
+- Completed: added views in `0067_consult_survey_observability.sql`:
   - `consult_survey_pending_observability`
   - `consult_survey_completion_health_24h`
   - `consult_survey_scores_rolling_30d`
-- Add backend logs with `scope=consult_survey`:
+- Completed: backend logs with `scope=consult_survey` already cover:
   - prompt created
   - accepted/deferred/dismissed
   - answer saved
   - survey completed
   - rating upserted
-- Add mobile logs:
+- Completed: added mobile logs:
   - `[ConsultSurvey][Chat]`
   - `[ConsultSurvey][HomeCard]`
 
+Validation:
+
+- Completed: dry-run migration showed only `0067_consult_survey_observability.sql`.
+- Completed: pushed migration `0067_consult_survey_observability.sql` to staging.
+- Completed: staging verification confirms `consult_survey_pending_observability`, `consult_survey_completion_health_24h`, and `consult_survey_scores_rolling_30d` exist and are queryable.
+
 ### Phase 6: Regression Tests And Smokes
 
-- Add fixture tests for score mapping and survey state transitions.
-- Add API smoke:
+- Completed: added fixture tests for score mapping and survey state transitions:
+  - `docs/service-rating-survey-fixtures.json`
+  - `scripts/eval-service-rating-survey-fixtures.js`
+  - `pnpm eval:service-rating-survey-fixtures`
+- Completed: added API smoke `env/scripts/smoke-consult-surveys.sh` covering:
   - create/get survey
   - defer survey
   - complete vet score/app score/open feedback
   - verify `ratings` upsert with vet score only
   - verify pending survey appears on `/me/surveys/pending`
-- Add mobile manual smoke checklist:
+- Pending manual smoke checklist execution:
   - post-call prompt yes path
   - post-call prompt later path
   - app relaunch pending card path
   - skip open feedback path
+
+Validation:
+
+- Completed: `pnpm eval:service-rating-survey-fixtures` passes with `PASS=33 FAIL=0`.
+- Completed: `zsh -n env/scripts/smoke-consult-surveys.sh` passes.
+- Pending after deploy: run `env/scripts/smoke-consult-surveys.sh` against an eligible staging session.
 
 ## Resolved Product Decisions
 

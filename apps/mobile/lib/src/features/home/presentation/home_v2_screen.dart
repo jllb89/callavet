@@ -16,6 +16,10 @@ void _homeAiLog(String message) {
   debugPrint('[AIChat][Home] $message');
 }
 
+void _surveyHomeLog(String message) {
+  debugPrint('[ConsultSurvey][HomeCard] $message');
+}
+
 class HomeV2Screen extends StatefulWidget {
   const HomeV2Screen({super.key});
 
@@ -27,6 +31,7 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
   final _messageCtrl = TextEditingController();
   final _messageFocusNode = FocusNode();
   final _activeConsults = <_ActiveConsult>[];
+  _PendingSurvey? _pendingSurvey;
   String _firstName = '';
   String? _conversationInitialMessage;
   int _conversationKey = 0;
@@ -37,6 +42,7 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
     super.initState();
     _loadFirstName();
     unawaited(_loadActiveConsults());
+    unawaited(_loadPendingSurveys());
   }
 
   @override
@@ -75,6 +81,67 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
       });
     } catch (_) {
       // Home should keep rendering even if session activity cannot load.
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Future<void> _loadPendingSurveys() async {
+    final token = Supabase.instance.client.auth.currentSession?.accessToken;
+    if (token == null || token.isEmpty) return;
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    try {
+      final request = await client.getUrl(
+          Uri.parse('${Environment.apiBaseUrl}/me/surveys/pending'));
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+      final response = await request.close().timeout(const Duration(seconds: 20));
+      final rawBody = await utf8.decoder.bind(response).join();
+      if (response.statusCode < 200 || response.statusCode >= 300) return;
+      final decoded = rawBody.trim().isEmpty ? <String, dynamic>{} : jsonDecode(rawBody);
+      final rows = _asList(_asMap(decoded)?['data']) ?? const [];
+      _PendingSurvey? pending;
+      for (final row in rows) {
+        final map = _asMap(row);
+        if (map == null) continue;
+        final survey = _PendingSurvey.fromJson(map);
+        if (survey.sessionId.isNotEmpty) {
+          pending = survey;
+          break;
+        }
+      }
+      _surveyHomeLog('pending load found=${pending != null}');
+      if (!mounted) return;
+      setState(() => _pendingSurvey = pending);
+    } catch (error) {
+      _surveyHomeLog('pending load failed: $error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Future<void> _answerPendingSurvey(_PendingSurvey survey, String answer) async {
+    final token = Supabase.instance.client.auth.currentSession?.accessToken;
+    if (token == null || token.isEmpty) return;
+    _surveyHomeLog('pending answer sessionId=${survey.sessionId} answer=$answer');
+    if (answer == 'now') {
+      context.go('/chat/${Uri.encodeComponent(survey.sessionId)}?survey=true');
+      return;
+    }
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    try {
+      final request = await client.postUrl(Uri.parse(
+          '${Environment.apiBaseUrl}/sessions/${Uri.encodeComponent(survey.sessionId)}/survey/prompt-response'));
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+      request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+      request.add(utf8.encode(jsonEncode({'answer': answer})));
+      final response = await request.close().timeout(const Duration(seconds: 20));
+      if (response.statusCode >= 200 && response.statusCode < 300 && mounted) {
+        setState(() => _pendingSurvey = null);
+      }
+    } catch (error) {
+      _surveyHomeLog('pending answer failed: $error');
     } finally {
       client.close(force: true);
     }
@@ -251,7 +318,11 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
                           ? _AiSuggestionList(onSelected: _useSuggestion)
                           : _HomeDefaultSection(
                               visible: _aiPhase == _HomeAiPhase.home,
+                              pendingSurvey: _pendingSurvey,
                               activeConsults: _activeConsults,
+                              onSurveyNow: (survey) => _answerPendingSurvey(survey, 'now'),
+                              onSurveyLater: (survey) => _answerPendingSurvey(survey, 'later'),
+                              onSurveyDismiss: (survey) => _answerPendingSurvey(survey, 'dismiss'),
                               onConsultSelected: (consult) {
                                 if (consult.mode == 'video') {
                                   context.go('/video/${Uri.encodeComponent(consult.id)}');
@@ -326,6 +397,32 @@ class _ActiveConsult {
     if (normalized.contains('cojera') || normalized.contains('ortop')) return 'cojera';
     return _shortLabel(specialtyName, maxLength: 9).toLowerCase();
   }
+}
+
+class _PendingSurvey {
+  const _PendingSurvey({
+    required this.id,
+    required this.sessionId,
+    required this.petName,
+    required this.vetName,
+  });
+
+  factory _PendingSurvey.fromJson(Map<String, dynamic> json) {
+    final session = _asMap(json['session']) ?? const <String, dynamic>{};
+    return _PendingSurvey(
+      id: json['id']?.toString() ?? '',
+      sessionId: json['sessionId']?.toString() ?? '',
+      petName: _cleanLabel(session['petName']) ?? 'tu caballo',
+      vetName: _cleanLabel(session['vetName']) ?? 'tu veterinario',
+    );
+  }
+
+  final String id;
+  final String sessionId;
+  final String petName;
+  final String vetName;
+
+  String get subtitle => 'Cuéntanos cómo fue la atención de $vetName para $petName.';
 }
 
 Map<String, dynamic>? _asMap(Object? value) {
@@ -451,12 +548,20 @@ class _HomeTopBar extends StatelessWidget {
 class _HomeDefaultSection extends StatelessWidget {
   const _HomeDefaultSection({
     required this.visible,
+    required this.pendingSurvey,
     required this.activeConsults,
+    required this.onSurveyNow,
+    required this.onSurveyLater,
+    required this.onSurveyDismiss,
     required this.onConsultSelected,
   });
 
   final bool visible;
+  final _PendingSurvey? pendingSurvey;
   final List<_ActiveConsult> activeConsults;
+  final ValueChanged<_PendingSurvey> onSurveyNow;
+  final ValueChanged<_PendingSurvey> onSurveyLater;
+  final ValueChanged<_PendingSurvey> onSurveyDismiss;
   final ValueChanged<_ActiveConsult> onConsultSelected;
 
   @override
@@ -469,6 +574,15 @@ class _HomeDefaultSection extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const _AiShortcut(),
+          if (pendingSurvey != null) ...[
+            const SizedBox(height: 34),
+            _PendingSurveyCard(
+              survey: pendingSurvey!,
+              onNow: () => onSurveyNow(pendingSurvey!),
+              onLater: () => onSurveyLater(pendingSurvey!),
+              onDismiss: () => onSurveyDismiss(pendingSurvey!),
+            ),
+          ],
           if (activeConsults.isNotEmpty) ...[
             const SizedBox(height: 50),
             const Text(
@@ -487,6 +601,108 @@ class _HomeDefaultSection extends StatelessWidget {
             ),
           ],
         ],
+      ),
+    );
+  }
+}
+
+class _PendingSurveyCard extends StatelessWidget {
+  const _PendingSurveyCard({
+    required this.survey,
+    required this.onNow,
+    required this.onLater,
+    required this.onDismiss,
+  });
+
+  final _PendingSurvey survey;
+  final VoidCallback onNow;
+  final VoidCallback onLater;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 360),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: Colors.black,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Califica tu consulta',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontFamily: 'ABCDiatype',
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                survey.subtitle,
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.68),
+                  fontSize: 13,
+                  fontFamily: 'ABCDiatype',
+                  height: 1.25,
+                ),
+              ),
+              const SizedBox(height: 14),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  _SurveyCardButton(label: 'Calificar ahora', selected: true, onTap: onNow),
+                  _SurveyCardButton(label: 'Más tarde', onTap: onLater),
+                  _SurveyCardButton(label: 'Descartar', onTap: onDismiss),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SurveyCardButton extends StatelessWidget {
+  const _SurveyCardButton({
+    required this.label,
+    required this.onTap,
+    this.selected = false,
+  });
+
+  final String label;
+  final VoidCallback onTap;
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        height: 36,
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: selected ? Colors.white : Colors.white.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: selected ? Colors.black : Colors.white,
+            fontSize: 13,
+            fontFamily: 'ABCDiatype',
+            fontWeight: FontWeight.w500,
+          ),
+        ),
       ),
     );
   }

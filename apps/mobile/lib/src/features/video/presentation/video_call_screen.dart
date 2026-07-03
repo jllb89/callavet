@@ -306,6 +306,7 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
     final params = <String, String>{
       if (message != null && message.isNotEmpty) 'assistantMessage': message,
       if (rejoinEligible) 'rejoinVideo': 'true',
+      'survey': 'true',
     };
     final query = params.isEmpty ? '' : '?${Uri(queryParameters: params).query}';
     context.go('/chat/${Uri.encodeComponent(widget.sessionId)}$query');
