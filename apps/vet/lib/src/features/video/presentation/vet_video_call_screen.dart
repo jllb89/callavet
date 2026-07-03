@@ -149,6 +149,15 @@ class _VetVideoCallScreenState extends State<VetVideoCallScreen> {
     final endState = await _fetchEndState().catchError((_) => null);
     if (!mounted || _ending) return;
     _vetVideoLog('disconnect.resolved sessionId=${widget.sessionId} endReason=${endState?.endReason} endedBy=${endState?.endedByRole}');
+    if (endState?.shouldReturnHome == true) {
+      _vetVideoLog('disconnect.return_dashboard sessionId=${widget.sessionId} endReason=${endState?.endReason}');
+      if (context.canPop()) {
+        context.pop();
+      } else {
+        context.go('/dashboard');
+      }
+      return;
+    }
     setState(() {
       _connecting = false;
       _room = null;
@@ -408,6 +417,8 @@ class _VetVideoEndState {
     }
     return 'Puedes volver al panel de consultas.';
   }
+
+  bool get shouldReturnHome => endedByRole == 'owner' || endReason == 'owner_ended';
 }
 
 class _ConnectedVideoCall extends StatelessWidget {

@@ -2038,6 +2038,37 @@ paths:
       requestBody: { $ref: "#/components/requestBodies/RatingCreate" }
       responses: { "200": { $ref: "#/components/responses/Rating" } }
 
+  /sessions/{sessionId}/survey:
+    get:
+      tags: [Ratings]
+      summary: Get or create a post-consult survey candidate for a session
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/sessionId" } ]
+      responses: { "200": { $ref: "#/components/responses/ConsultSurvey" } }
+    patch:
+      tags: [Ratings]
+      summary: Incrementally save or complete a post-consult survey
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/sessionId" } ]
+      requestBody: { $ref: "#/components/requestBodies/ConsultSurveyPatch" }
+      responses: { "200": { $ref: "#/components/responses/ConsultSurvey" } }
+
+  /sessions/{sessionId}/survey/prompt-response:
+    post:
+      tags: [Ratings]
+      summary: Accept, defer, or dismiss the post-consult survey prompt
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/sessionId" } ]
+      requestBody: { $ref: "#/components/requestBodies/ConsultSurveyPromptResponse" }
+      responses: { "200": { $ref: "#/components/responses/ConsultSurvey" } }
+
+  /me/surveys/pending:
+    get:
+      tags: [Ratings]
+      summary: List due pending/deferred owner surveys for app-launch cards
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { $ref: "#/components/responses/ListConsultSurveys" } }
+
   /kb:
     get:
       tags: [Knowledge Base & Search]
@@ -3303,6 +3334,24 @@ components:
               score: { type: integer, minimum: 1, maximum: 5 }
               comment: { type: string }
             required: [score]
+    ConsultSurveyPromptResponse:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              answer: { type: string, enum: [now, later, dismiss] }
+            required: [answer]
+    ConsultSurveyPatch:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              vetAssistanceScore: { type: integer, minimum: 1, maximum: 5 }
+              appServiceScore: { type: integer, minimum: 1, maximum: 5 }
+              openFeedback: { type: string, nullable: true }
+              status: { type: string, enum: [accepted, completed, dismissed, deferred] }
     NotifyTest:
       content:
         application/json:
@@ -3580,6 +3629,12 @@ components:
     ListRatings:
       description: Ratings
       content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Rating" } } } } } }
+    ConsultSurvey:
+      description: Consult survey response
+      content: { application/json: { schema: { $ref: "#/components/schemas/ConsultSurveyResponse" } } }
+    ListConsultSurveys:
+      description: Pending consult surveys
+      content: { application/json: { schema: { $ref: "#/components/schemas/PendingConsultSurveysResponse" } } }
     SignedUrl:
       description: Signed URL response
       content:
@@ -3991,6 +4046,89 @@ components:
         score: { type: integer, minimum: 1, maximum: 5 }
         comment: { type: string }
         user_name: { type: string, nullable: true }
+    ConsultSurvey:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        sessionId: { type: string, format: uuid }
+        userId: { type: string, format: uuid }
+        vetId: { type: string, format: uuid, nullable: true }
+        petId: { type: string, format: uuid, nullable: true }
+        status: { type: string, enum: [pending, accepted, declined, deferred, completed, dismissed] }
+        promptedAt: { type: string, format: date-time, nullable: true }
+        acceptedAt: { type: string, format: date-time, nullable: true }
+        declinedAt: { type: string, format: date-time, nullable: true }
+        deferredAt: { type: string, format: date-time, nullable: true }
+        nextPromptAt: { type: string, format: date-time, nullable: true }
+        completedAt: { type: string, format: date-time, nullable: true }
+        vetAssistanceScore: { type: integer, minimum: 1, maximum: 5, nullable: true }
+        appServiceScore: { type: integer, minimum: 1, maximum: 5, nullable: true }
+        openFeedback: { type: string, nullable: true }
+        source: { type: string }
+        metadata: { type: object, additionalProperties: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    ConsultSurveySession:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        userId: { type: string, format: uuid }
+        vetId: { type: string, format: uuid, nullable: true }
+        petId: { type: string, format: uuid, nullable: true }
+        mode: { type: string, enum: [chat, video] }
+        status: { type: string }
+        petName: { type: string, nullable: true }
+        vetName: { type: string, nullable: true }
+        roomFinishedAt: { type: string, format: date-time, nullable: true }
+        endReason: { type: string, nullable: true }
+    ConsultSurveyScoreOption:
+      type: object
+      properties:
+        label: { type: string, enum: [Excelente, Buena, Regular, Mala, Pésima] }
+        score: { type: integer, minimum: 1, maximum: 5 }
+    ConsultSurveyQuestionSet:
+      type: object
+      properties:
+        vetAssistance: { type: string }
+        appService: { type: string }
+        openFeedback: { type: string }
+    ConsultSurveyResponse:
+      type: object
+      properties:
+        ok: { type: boolean }
+        eligible: { type: boolean }
+        reason: { type: string, nullable: true }
+        session: { $ref: "#/components/schemas/ConsultSurveySession" }
+        survey: { $ref: "#/components/schemas/ConsultSurvey" }
+        questions: { $ref: "#/components/schemas/ConsultSurveyQuestionSet" }
+        scoreOptions:
+          type: array
+          items: { $ref: "#/components/schemas/ConsultSurveyScoreOption" }
+        deferHours: { type: integer, example: 24 }
+        rating: { $ref: "#/components/schemas/Rating", nullable: true }
+    PendingConsultSurveysResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            allOf:
+              - $ref: "#/components/schemas/ConsultSurvey"
+              - type: object
+                properties:
+                  session:
+                    type: object
+                    properties:
+                      id: { type: string, format: uuid }
+                      mode: { type: string }
+                      status: { type: string }
+                      petName: { type: string, nullable: true }
+                      vetName: { type: string, nullable: true }
+        questions: { $ref: "#/components/schemas/ConsultSurveyQuestionSet" }
+        scoreOptions:
+          type: array
+          items: { $ref: "#/components/schemas/ConsultSurveyScoreOption" }
+        deferHours: { type: integer, example: 24 }
     VetStatus:
       type: object
       properties:

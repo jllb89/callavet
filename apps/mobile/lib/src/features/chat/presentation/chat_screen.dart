@@ -22,6 +22,7 @@ const _chatPlanOrder = [
 const _noUpgradePlanAvailableMessage =
     'No encontré un plan superior que libere disponibilidad para esta consulta.';
 int _chatMessageSequence = 0;
+final _sessionMessageCache = <String, List<_ChatMessage>>{};
 
 String _nextChatMessageId() {
   _chatMessageSequence += 1;
@@ -62,12 +63,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final _inputCtrl = TextEditingController();
   final _focusNode = FocusNode();
   final _scrollController = ScrollController();
-  final _messages = <_ChatMessage>[
-    _ChatMessage.assistant(
-      'Cuéntame qué está pasando con tu caballo y te ayudo a encontrar el veterinario adecuado.',
-      includeInHistory: false,
-    ),
-  ];
+  final _messages = <_ChatMessage>[];
 
   late final String _conversationId;
   bool _isSending = false;
@@ -88,6 +84,20 @@ class _ChatScreenState extends State<ChatScreen> {
       'initialRejoinVideo=${widget.initialRejoinVideo} '
       'apiBaseUrl=${Environment.apiBaseUrl} dryRun=$_aiChatDryRun',
     );
+    final cachedSessionId = _uuidOrNull(widget.sessionId);
+    final cachedMessages = cachedSessionId == null
+        ? null
+        : _sessionMessageCache[cachedSessionId];
+    if (cachedMessages != null && cachedMessages.isNotEmpty) {
+      _messages.addAll(cachedMessages);
+      _aiChatLog(
+          'restored cached session chat sessionId=$cachedSessionId messages=${cachedMessages.length}');
+    } else {
+      _messages.add(_ChatMessage.assistant(
+        'Cuéntame qué está pasando con tu caballo y te ayudo a encontrar el veterinario adecuado.',
+        includeInHistory: false,
+      ));
+    }
     final initialAssistantMessage = widget.initialAssistantMessage?.trim();
     if (initialAssistantMessage != null && initialAssistantMessage.isNotEmpty) {
       _aiChatLog(
@@ -113,6 +123,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    final sessionId = _uuidOrNull(widget.sessionId);
+    if (sessionId != null) _cacheSessionMessages(sessionId);
     _aiChatLog(
         'dispose conversationId=$_conversationId totalMessages=${_messages.length}');
     _inputCtrl.dispose();
@@ -706,6 +718,7 @@ class _ChatScreenState extends State<ChatScreen> {
             includeInHistory: false));
         _isSending = false;
       });
+      _cacheSessionMessages(sessionId);
       _scrollToBottom();
       context.go('/video/${Uri.encodeComponent(sessionId)}');
       return;
@@ -722,6 +735,12 @@ class _ChatScreenState extends State<ChatScreen> {
     });
     _scrollToBottom();
     context.go('/chat/${Uri.encodeComponent(sessionId)}');
+  }
+
+  void _cacheSessionMessages(String sessionId) {
+    _sessionMessageCache[sessionId] = List<_ChatMessage>.from(_messages);
+    _aiChatLog(
+        'cached session chat sessionId=$sessionId messages=${_messages.length}');
   }
 
   Future<Map<String, dynamic>> _startSession(
@@ -1010,6 +1029,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final normalizedSessionId = _uuidOrNull(sessionId);
     if (normalizedSessionId == null) return;
     _aiChatLog('post-call rejoin video action selected sessionId=$normalizedSessionId');
+    _cacheSessionMessages(normalizedSessionId);
     context.go('/video/${Uri.encodeComponent(normalizedSessionId)}');
   }
 }

@@ -32,6 +32,7 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
   bool _ending = false;
   bool _micEnabled = true;
   bool _cameraEnabled = true;
+  bool _returningToChat = false;
   CameraPosition _cameraPosition = CameraPosition.front;
   _VideoEndState? _endState;
   String? _postCallAssistantMessage;
@@ -150,6 +151,12 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
     _handleRoomUpdate();
     if (!mounted || _ending) return;
     _ownerVideoLog('disconnect.remote sessionId=${widget.sessionId} roomName=$_roomName');
+    setState(() {
+      _connecting = false;
+      _room = null;
+      _returningToChat = true;
+      _error = null;
+    });
     final endState = await _fetchEndState().catchError((_) => null);
     final postCallMessage = endState == null
         ? null
@@ -165,6 +172,7 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
     setState(() {
       _connecting = false;
       _room = null;
+      _returningToChat = false;
       _endState = endState;
       _postCallAssistantMessage = postCallMessage;
       _error = endState?.message ??
@@ -245,7 +253,10 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
   Future<void> _leaveCall() async {
     if (_ending) return;
     _ownerVideoLog('leave.requested sessionId=${widget.sessionId} roomName=$_roomName');
-    setState(() => _ending = true);
+    setState(() {
+      _ending = true;
+      _returningToChat = true;
+    });
     _VideoEndState? endState;
     String? postCallMessage;
     try {
@@ -282,6 +293,7 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
       _error = null;
       _endState = null;
       _postCallAssistantMessage = null;
+      _returningToChat = false;
       _connecting = true;
       _ending = false;
     });
@@ -408,7 +420,13 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
           ),
         ),
         child: SafeArea(
-          child: _error != null && room == null
+          child: _returningToChat
+              ? const _VideoStatusView(
+                  icon: Icons.chat_bubble_outline_rounded,
+                  title: 'Volviendo al chat',
+                  message: 'Te llevamos al chat de esta consulta.',
+                )
+              : _error != null && room == null
               ? _VideoStatusView(
                   icon: Icons.videocam_off_rounded,
                 title: endState?.title ?? 'No pude conectar la videollamada',
