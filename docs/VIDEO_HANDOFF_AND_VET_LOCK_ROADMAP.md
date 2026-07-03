@@ -428,7 +428,17 @@ Validation:
 - Completed: `zsh -n env/scripts/smoke-video-observability.sh` passes.
 - Completed: `pnpm --filter @cav/gateway-api run build` passes after logging changes.
 - Completed: Flutter analyze passes for touched owner and vet files.
-- Pending after deploy with real credentials: run `env/scripts/smoke-video-roadmap-regressions.sh` against staging.
+- Completed after deploy: `env/scripts/smoke-video-roadmap-regressions.sh` passed against staging with `PASS=6 FAIL=0`.
+- Completed after deploy: staging regression verified vet busy race, handoff endpoint readiness, LiveKit room creation, `vet_ended` call-end reason mapping, owner rejoin eligibility, AI post-call message generation, and Phase 5 observability smoke.
+
+## Post-Roadmap Manual Smoke Fixes
+
+Manual two-sided simulator smoke found two UX gaps after the deployed regression passed:
+
+- Fixed: when vet/provider ends the room, owner now returns directly to the chat instead of staying on the video screen.
+- Fixed: post-call chat can render a `Volver a videollamada` action tag from route state when rejoin is eligible.
+- Fixed: vet/admin room creation can re-reserve owner video entitlement during the active rejoin window if the previous consumption was released before LiveKit webhooks marked both participants joined.
+- Completed: added regression coverage for vet rejoin after `vet_ended` in `env/scripts/smoke-video-roadmap-regressions.sh`.
 
 ## Proposed Implementation Order
 

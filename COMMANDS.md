@@ -79,7 +79,7 @@ cd /Users/jorge/Desktop/call-a-vet && \
   env/scripts/smoke-video-roadmap-regressions.sh
 ```
 
-This smoke checks vet busy lock race behavior, vet handoff endpoint visibility, vet-ended call reason mapping, owner rejoin eligibility, AI post-call message generation, and observability views.
+This smoke checks vet busy lock race behavior, vet handoff endpoint visibility, vet-ended call reason mapping, owner rejoin eligibility, vet rejoin during the rejoin window, AI post-call message generation, and observability views.
 
 
 ## LiveKit webhook smoke

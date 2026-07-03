@@ -108,13 +108,35 @@ export class VideoController {
     role: LiveKitParticipantRole,
   ) {
     if (session.consumption_id) return session.consumption_id;
-    if (role !== 'owner' && role !== 'admin') {
-      throw new HttpException({ ok: false, reason: 'video_entitlement_not_reserved' }, HttpStatus.PAYMENT_REQUIRED);
-    }
     if (!session.user_id) throw new BadRequestException('session_owner_missing');
+    if (role !== 'owner' && role !== 'admin') {
+      const canReserveForRejoin = await this.canReserveVideoRejoinForVet(session.id);
+      if (!canReserveForRejoin) {
+        throw new HttpException({ ok: false, reason: 'video_entitlement_not_reserved' }, HttpStatus.PAYMENT_REQUIRED);
+      }
+      this.roadmapLog('room.rejoin_reserve_for_vet', { sessionId: session.id, role });
+    }
     const result = await this.db.runInTx(async (q) => this.entitlements.reserveForUser(q, 'video', session.user_id!, session.id));
     if (result?.ok && result.consumption_id) return result.consumption_id;
     throw new HttpException({ ok: false, reason: result?.msg || 'video_entitlement_required' }, HttpStatus.PAYMENT_REQUIRED);
+  }
+
+  private async canReserveVideoRejoinForVet(sessionId: string) {
+    if (this.db.isStub) return true;
+    const { rows } = await this.db.runInTx(async (q) => q<{ ok: boolean }>(
+      `select exists (
+         select 1
+           from video_session_lifecycle v
+           join chat_sessions s on s.id = v.session_id
+          where v.session_id = $1::uuid
+            and s.status = 'active'
+            and v.rejoin_eligible_until is not null
+            and v.rejoin_eligible_until > now()
+            and coalesce(v.end_reason, v.safety_reason) in ('owner_ended', 'vet_ended', 'admin_ended')
+       ) as ok`,
+      [sessionId]
+    ));
+    return rows[0]?.ok === true;
   }
 
   private async markRoomProvisioned(sessionId: string, roomName: string, consumptionId?: string | null) {

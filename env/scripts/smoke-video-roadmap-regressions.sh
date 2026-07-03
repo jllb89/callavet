@@ -33,7 +33,7 @@ assert_ok() {
 
 post_json() {
   local token_kind=$1
-  local path=$2
+  local endpoint=$2
   local payload=$3
   local output=$4
   local status_output=$5
@@ -43,14 +43,14 @@ post_json() {
   else
     hdr=($owner_hdr[@])
   fi
-  local status
-  status=$(curl -sS -o "$output" -w '%{http_code}' -X POST $hdr[@] --data "$payload" "$GATEWAY_BASE$path")
-  print -- "$status" > "$status_output"
+  local http_status
+  http_status=$(curl -sS -o "$output" -w '%{http_code}' -X POST $hdr[@] --data "$payload" "$GATEWAY_BASE$endpoint")
+  print -- "$http_status" > "$status_output"
 }
 
 get_json() {
   local token_kind=$1
-  local path=$2
+  local endpoint=$2
   local output=$3
   local status_output=$4
   local -a hdr
@@ -59,9 +59,9 @@ get_json() {
   else
     hdr=($owner_hdr[@])
   fi
-  local status
-  status=$(curl -sS -o "$output" -w '%{http_code}' -X GET $hdr[@] "$GATEWAY_BASE$path")
-  print -- "$status" > "$status_output"
+  local http_status
+  http_status=$(curl -sS -o "$output" -w '%{http_code}' -X GET $hdr[@] "$GATEWAY_BASE$endpoint")
+  print -- "$http_status" > "$status_output"
 }
 
 cleanup_sessions() {
@@ -91,20 +91,25 @@ status1=$(cat "$st1")
 status2=$(cat "$st2")
 session1=$("$JQ" -r '.sessionId // empty' "$tmp1" 2>/dev/null || true)
 session2=$("$JQ" -r '.sessionId // empty' "$tmp2" 2>/dev/null || true)
+overage1=$("$JQ" -r '.overage // false' "$tmp1" 2>/dev/null || print -- false)
+overage2=$("$JQ" -r '.overage // false' "$tmp2" 2>/dev/null || print -- false)
 busy1=$(grep -c 'vet_busy' "$tmp1" || true)
 busy2=$(grep -c 'vet_busy' "$tmp2" || true)
 success_count=0
 busy_count=0
-[[ -n "$session1" && "$status1" -ge 200 && "$status1" -lt 300 ]] && success_count=$((success_count + 1))
-[[ -n "$session2" && "$status2" -ge 200 && "$status2" -lt 300 ]] && success_count=$((success_count + 1))
+[[ -n "$session1" && "$status1" -ge 200 && "$status1" -lt 300 && "$overage1" != 'true' ]] && success_count=$((success_count + 1))
+[[ -n "$session2" && "$status2" -ge 200 && "$status2" -lt 300 && "$overage2" != 'true' ]] && success_count=$((success_count + 1))
 [[ "$status1" == '409' || "$busy1" -gt 0 ]] && busy_count=$((busy_count + 1))
 [[ "$status2" == '409' || "$busy2" -gt 0 ]] && busy_count=$((busy_count + 1))
 assert_ok $([[ "$success_count" -eq 1 && "$busy_count" -eq 1 ]] && echo 0 || echo 1) 'vet busy lock race allows one session and rejects one vet_busy'
 
 session_id="$session1"
-[[ -z "$session_id" ]] && session_id="$session2"
+[[ "$overage1" == 'true' ]] && session_id=""
+[[ -z "$session_id" && "$overage2" != 'true' ]] && session_id="$session2"
 if [[ -z "$session_id" ]]; then
-  print -- 'ERROR: no successful session created; cannot continue regression smoke'
+  print -- 'ERROR: no non-overage successful session created; cannot continue regression smoke'
+  print -- "[phase6-video] first status=$status1 overage=$overage1 body=$(cat "$tmp1")"
+  print -- "[phase6-video] second status=$status2 overage=$overage2 body=$(cat "$tmp2")"
   exit 1
 fi
 created_sessions+=("$session_id")
@@ -122,6 +127,9 @@ room_status=$(mktemp)
 post_json owner /video/rooms '{"sessionId":"'$session_id'","participantRole":"owner"}' "$room_tmp" "$room_status"
 room_id=$("$JQ" -r '.roomId // empty' "$room_tmp" 2>/dev/null || true)
 assert_ok $([[ -n "$room_id" && "$(cat "$room_status")" -ge 200 && "$(cat "$room_status")" -lt 300 ]] && echo 0 || echo 1) 'owner can create LiveKit room'
+if [[ -z "$room_id" ]]; then
+  print -- "[phase6-video] room create status=$(cat "$room_status") body=$(cat "$room_tmp")"
+fi
 
 end_tmp=$(mktemp)
 end_status=$(mktemp)
@@ -129,6 +137,15 @@ post_json vet "/video/rooms/$room_id/end" '{"participantRole":"vet","reason":"ve
 end_reason=$("$JQ" -r '.endState.endReason // empty' "$end_tmp" 2>/dev/null || true)
 rejoin=$("$JQ" -r '.endState.rejoinEligible // false' "$end_tmp" 2>/dev/null || true)
 assert_ok $([[ "$end_reason" == 'vet_ended' && "$rejoin" == 'true' ]] && echo 0 || echo 1) 'vet end maps to vet_ended with owner rejoin eligibility'
+
+vet_rejoin_tmp=$(mktemp)
+vet_rejoin_status=$(mktemp)
+post_json vet /video/rooms '{"sessionId":"'$session_id'","participantRole":"vet"}' "$vet_rejoin_tmp" "$vet_rejoin_status"
+vet_rejoin_room_id=$("$JQ" -r '.roomId // empty' "$vet_rejoin_tmp" 2>/dev/null || true)
+assert_ok $([[ -n "$vet_rejoin_room_id" && "$(cat "$vet_rejoin_status")" -ge 200 && "$(cat "$vet_rejoin_status")" -lt 300 ]] && echo 0 || echo 1) 'vet can rejoin during rejoin window after vet_ended'
+if [[ -z "$vet_rejoin_room_id" ]]; then
+  print -- "[phase6-video] vet rejoin status=$(cat "$vet_rejoin_status") body=$(cat "$vet_rejoin_tmp")"
+fi
 
 post_call_tmp=$(mktemp)
 post_call_status=$(mktemp)

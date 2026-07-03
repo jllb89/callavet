@@ -99,16 +99,19 @@ class AppRouter {
           final sessionId = state.pathParameters['sessionId'] ?? '';
           final initialMessage = state.uri.queryParameters['message'];
           final assistantMessage = state.uri.queryParameters['assistantMessage'];
+          final rejoinVideo = state.uri.queryParameters['rejoinVideo'] == 'true';
           postLoginRouteLog(
             'Router entered /chat/:sessionId uri=${state.uri} sessionId=$sessionId '
             'initialMessagePresent=${initialMessage?.trim().isNotEmpty == true} '
             'initialMessageLength=${initialMessage?.trim().length ?? 0} '
-            'assistantMessagePresent=${assistantMessage?.trim().isNotEmpty == true}',
+            'assistantMessagePresent=${assistantMessage?.trim().isNotEmpty == true} '
+            'rejoinVideo=$rejoinVideo',
           );
           return ChatScreen(
             sessionId: sessionId,
             initialMessage: initialMessage,
             initialAssistantMessage: assistantMessage,
+            initialRejoinVideo: rejoinVideo,
           );
         },
       ),

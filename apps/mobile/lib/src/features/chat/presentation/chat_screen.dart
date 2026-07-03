@@ -44,12 +44,14 @@ class ChatScreen extends StatefulWidget {
     required this.sessionId,
     this.initialMessage,
     this.initialAssistantMessage,
+    this.initialRejoinVideo = false,
     this.embedded = false,
   });
 
   final String sessionId;
   final String? initialMessage;
   final String? initialAssistantMessage;
+  final bool initialRejoinVideo;
   final bool embedded;
 
   @override
@@ -83,6 +85,7 @@ class _ChatScreenState extends State<ChatScreen> {
       'conversationId=$_conversationId initialMessagePresent=${widget.initialMessage?.trim().isNotEmpty == true} '
       'initialMessageLength=${widget.initialMessage?.trim().length ?? 0} '
       'initialAssistantMessagePresent=${widget.initialAssistantMessage?.trim().isNotEmpty == true} '
+      'initialRejoinVideo=${widget.initialRejoinVideo} '
       'apiBaseUrl=${Environment.apiBaseUrl} dryRun=$_aiChatDryRun',
     );
     final initialAssistantMessage = widget.initialAssistantMessage?.trim();
@@ -92,6 +95,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _messages.add(_ChatMessage.assistant(
         initialAssistantMessage,
         includeInHistory: false,
+        rejoinSessionId: widget.initialRejoinVideo ? widget.sessionId : null,
       ));
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -945,6 +949,7 @@ class _ChatScreenState extends State<ChatScreen> {
             onOneOffPurchaseSelected: _purchaseSingleSession,
             onUpgradeSelected: _openSubscriptionUpgrade,
             onPlanUpgradeConfirmed: _confirmSubscriptionUpgrade,
+            onRejoinVideo: _openVideoFromChat,
           ),
         );
       },
@@ -999,6 +1004,13 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
       ],
     );
+  }
+
+  void _openVideoFromChat(String sessionId) {
+    final normalizedSessionId = _uuidOrNull(sessionId);
+    if (normalizedSessionId == null) return;
+    _aiChatLog('post-call rejoin video action selected sessionId=$normalizedSessionId');
+    context.go('/video/${Uri.encodeComponent(normalizedSessionId)}');
   }
 }
 
@@ -1133,6 +1145,7 @@ class _MessageBubble extends StatelessWidget {
     required this.onOneOffPurchaseSelected,
     required this.onUpgradeSelected,
     required this.onPlanUpgradeConfirmed,
+    required this.onRejoinVideo,
   });
 
   final _ChatMessage message;
@@ -1146,6 +1159,7 @@ class _MessageBubble extends StatelessWidget {
   final void Function(_AiChatTurnResult result) onUpgradeSelected;
   final void Function(_ChatSubscriptionPlan plan, _AiChatTurnResult result)
       onPlanUpgradeConfirmed;
+  final ValueChanged<String> onRejoinVideo;
 
   @override
   Widget build(BuildContext context) {
@@ -1212,6 +1226,15 @@ class _MessageBubble extends StatelessWidget {
                   onOneOffPurchaseSelected: onOneOffPurchaseSelected,
                   onUpgradeSelected: onUpgradeSelected,
                   onPlanUpgradeConfirmed: onPlanUpgradeConfirmed,
+                ),
+              ],
+              if (!isUser && message.rejoinSessionId != null) ...[
+                const SizedBox(height: 8),
+                _ServiceButton(
+                  label: 'Volver a videollamada',
+                  selected: true,
+                  enabled: !sending,
+                  onTap: () => onRejoinVideo(message.rejoinSessionId!),
                 ),
               ],
             ],
@@ -1760,6 +1783,7 @@ class _ChatMessage {
     required this.role,
     required this.text,
     this.result,
+    this.rejoinSessionId,
     this.includeInHistory = true,
   });
 
@@ -1772,12 +1796,14 @@ class _ChatMessage {
     String text, {
     _AiChatTurnResult? result,
     bool includeInHistory = true,
+    String? rejoinSessionId,
   }) {
     return _ChatMessage(
       id: _nextChatMessageId(),
       role: _ChatRole.assistant,
       text: text,
       result: result,
+      rejoinSessionId: rejoinSessionId,
       includeInHistory: includeInHistory,
     );
   }
@@ -1786,6 +1812,7 @@ class _ChatMessage {
   final _ChatRole role;
   final String text;
   final _AiChatTurnResult? result;
+  final String? rejoinSessionId;
   final bool includeInHistory;
 
   bool get isUser => role == _ChatRole.user;

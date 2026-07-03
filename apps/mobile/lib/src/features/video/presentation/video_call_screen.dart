@@ -157,6 +157,11 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
     if (!mounted || _ending) return;
     _ownerVideoLog(
       'disconnect.resolved sessionId=${widget.sessionId} endReason=${endState?.endReason} endedBy=${endState?.endedByRole} rejoin=${endState?.rejoinEligible} postCallMessage=${postCallMessage?.trim().isNotEmpty == true}');
+    if (endState != null && endState.shouldReturnToChat) {
+      _ownerVideoLog('disconnect.open_chat sessionId=${widget.sessionId} endReason=${endState.endReason}');
+      _openPostCallChat(postCallMessage, rejoinEligible: endState.rejoinEligible);
+      return;
+    }
     setState(() {
       _connecting = false;
       _room = null;
@@ -266,7 +271,7 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
     }
     if (!mounted) return;
     _ownerVideoLog('leave.open_chat sessionId=${widget.sessionId} hasAssistantMessage=${postCallMessage?.trim().isNotEmpty == true}');
-    _openPostCallChat(postCallMessage);
+    _openPostCallChat(postCallMessage, rejoinEligible: endState?.rejoinEligible == true);
   }
 
   void _rejoinCall() {
@@ -283,12 +288,14 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
     unawaited(_connect());
   }
 
-  void _openPostCallChat([String? assistantMessage]) {
+  void _openPostCallChat(String? assistantMessage, {bool rejoinEligible = false}) {
     final message = assistantMessage?.trim();
-    _ownerVideoLog('post_call.open_chat sessionId=${widget.sessionId} hasAssistantMessage=${message?.isNotEmpty == true}');
-    final query = message == null || message.isEmpty
-        ? ''
-        : '?${Uri(queryParameters: {'assistantMessage': message}).query}';
+    _ownerVideoLog('post_call.open_chat sessionId=${widget.sessionId} hasAssistantMessage=${message?.isNotEmpty == true} rejoinEligible=$rejoinEligible');
+    final params = <String, String>{
+      if (message != null && message.isNotEmpty) 'assistantMessage': message,
+      if (rejoinEligible) 'rejoinVideo': 'true',
+    };
+    final query = params.isEmpty ? '' : '?${Uri(queryParameters: params).query}';
     context.go('/chat/${Uri.encodeComponent(widget.sessionId)}$query');
   }
 
@@ -498,6 +505,14 @@ class _VideoEndState {
   }
 
   String get actionLabel => rejoinEligible ? 'volver a entrar' : 'volver al chat';
+
+  bool get shouldReturnToChat {
+    return endedByRole == 'vet' ||
+        endReason == 'vet_ended' ||
+        endReason == 'owner_ended' ||
+        endReason == 'admin_ended' ||
+        endReason == 'provider_room_finished';
+  }
 
   Map<String, dynamic> toJson() => {
         'sessionId': sessionId,
