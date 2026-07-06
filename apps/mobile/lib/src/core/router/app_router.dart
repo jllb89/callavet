@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../navigation/post_login_routing_controller.dart';
+import 'route_observer.dart';
 
 import '../../features/auth/presentation/login_screen.dart';
 import '../../features/chat/presentation/chat_screen.dart';
@@ -18,6 +19,7 @@ import '../../features/video/presentation/video_call_screen.dart';
 class AppRouter {
   static final router = GoRouter(
     initialLocation: '/splash',
+    observers: [mobileRouteObserver],
     routes: [
       GoRoute(
         path: '/splash',
@@ -98,8 +100,10 @@ class AppRouter {
         builder: (context, state) {
           final sessionId = state.pathParameters['sessionId'] ?? '';
           final initialMessage = state.uri.queryParameters['message'];
-          final assistantMessage = state.uri.queryParameters['assistantMessage'];
-          final rejoinVideo = state.uri.queryParameters['rejoinVideo'] == 'true';
+          final assistantMessage =
+              state.uri.queryParameters['assistantMessage'];
+          final rejoinVideo =
+              state.uri.queryParameters['rejoinVideo'] == 'true';
           final startSurvey = state.uri.queryParameters['survey'] == 'true';
           postLoginRouteLog(
             'Router entered /chat/:sessionId uri=${state.uri} sessionId=$sessionId '

@@ -422,11 +422,7 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
         ),
         child: SafeArea(
           child: _returningToChat
-              ? const _VideoStatusView(
-                  icon: Icons.chat_bubble_outline_rounded,
-                  title: 'Volviendo al chat',
-                  message: 'Te llevamos al chat de esta consulta.',
-                )
+              ? const _ReturningToChatView()
               : _error != null && room == null
               ? _VideoStatusView(
                   icon: Icons.videocam_off_rounded,
@@ -459,6 +455,62 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
                     ),
         ),
       ),
+    );
+  }
+}
+
+class _ReturningToChatView extends StatelessWidget {
+  const _ReturningToChatView();
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        const DecoratedBox(
+          decoration: BoxDecoration(
+            image: DecorationImage(
+              image: AssetImage('assets/images/onboarding/rectangle_1.png'),
+              fit: BoxFit.cover,
+            ),
+          ),
+        ),
+        DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [
+                Colors.black.withValues(alpha: 0.18),
+                Colors.black.withValues(alpha: 0.62),
+              ],
+            ),
+          ),
+        ),
+        Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Image.asset(
+                'assets/icons/call_a_vet.png',
+                width: 148,
+                height: 40,
+                fit: BoxFit.contain,
+              ),
+              const SizedBox(height: 26),
+              SizedBox(
+                width: 28,
+                height: 28,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2.4,
+                  color: Colors.white,
+                  backgroundColor: Colors.white.withValues(alpha: 0.18),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }

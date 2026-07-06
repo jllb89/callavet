@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
+import 'route_observer.dart';
 import '../../features/auth/presentation/login_screen.dart';
 import '../../features/chat/presentation/vet_chat_screen.dart';
 import '../../features/dashboard/presentation/vet_dashboard_screen.dart';
@@ -10,6 +11,7 @@ import '../../features/video/presentation/vet_video_call_screen.dart';
 class AppRouter {
   static final router = GoRouter(
     initialLocation: '/splash',
+    observers: [vetRouteObserver],
     routes: [
       GoRoute(
         path: '/splash',

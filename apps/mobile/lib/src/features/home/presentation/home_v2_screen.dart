@@ -8,6 +8,7 @@ import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../core/config/environment.dart';
+import '../../../core/router/route_observer.dart';
 import '../../chat/presentation/chat_screen.dart';
 
 enum _HomeAiPhase { home, fadingOut, prompt, conversation }
@@ -27,7 +28,7 @@ class HomeV2Screen extends StatefulWidget {
   State<HomeV2Screen> createState() => _HomeV2ScreenState();
 }
 
-class _HomeV2ScreenState extends State<HomeV2Screen> {
+class _HomeV2ScreenState extends State<HomeV2Screen> with RouteAware {
   final _messageCtrl = TextEditingController();
   final _messageFocusNode = FocusNode();
   final _activeConsults = <_ActiveConsult>[];
@@ -36,6 +37,8 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
   String? _conversationInitialMessage;
   int _conversationKey = 0;
   _HomeAiPhase _aiPhase = _HomeAiPhase.home;
+  bool _homeVisible = false;
+  PageRoute<dynamic>? _route;
 
   @override
   void initState() {
@@ -43,13 +46,40 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
     _loadFirstName();
     unawaited(_loadActiveConsults());
     unawaited(_loadPendingSurveys());
+    WidgetsBinding.instance.addPostFrameCallback((_) => _playHomeFade());
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    if (route is PageRoute<dynamic> && _route != route) {
+      if (_route != null) mobileRouteObserver.unsubscribe(this);
+      mobileRouteObserver.subscribe(this, route);
+      _route = route;
+    }
+  }
+
+  @override
+  void didPopNext() {
+    if (_aiPhase == _HomeAiPhase.home) _playHomeFade();
   }
 
   @override
   void dispose() {
+    mobileRouteObserver.unsubscribe(this);
     _messageCtrl.dispose();
     _messageFocusNode.dispose();
     super.dispose();
+  }
+
+  void _playHomeFade() {
+    if (!mounted) return;
+    setState(() => _homeVisible = false);
+    Future<void>.delayed(const Duration(milliseconds: 16), () {
+      if (!mounted) return;
+      setState(() => _homeVisible = true);
+    });
   }
 
   Future<void> _loadActiveConsults() async {
@@ -57,14 +87,16 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
     if (token == null || token.isEmpty) return;
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
     try {
-      final request = await client.getUrl(
-          Uri.parse('${Environment.apiBaseUrl}/sessions?limit=20'));
+      final request = await client
+          .getUrl(Uri.parse('${Environment.apiBaseUrl}/sessions?limit=20'));
       request.headers.set(HttpHeaders.acceptHeader, 'application/json');
       request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
-      final response = await request.close().timeout(const Duration(seconds: 20));
+      final response =
+          await request.close().timeout(const Duration(seconds: 20));
       final rawBody = await utf8.decoder.bind(response).join();
       if (response.statusCode < 200 || response.statusCode >= 300) return;
-      final decoded = rawBody.trim().isEmpty ? <String, dynamic>{} : jsonDecode(rawBody);
+      final decoded =
+          rawBody.trim().isEmpty ? <String, dynamic>{} : jsonDecode(rawBody);
       final rows = _asList(_asMap(decoded)?['data']) ?? const [];
       final active = rows
           .map(_asMap)
@@ -91,14 +123,16 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
     if (token == null || token.isEmpty) return;
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
     try {
-      final request = await client.getUrl(
-          Uri.parse('${Environment.apiBaseUrl}/me/surveys/pending'));
+      final request = await client
+          .getUrl(Uri.parse('${Environment.apiBaseUrl}/me/surveys/pending'));
       request.headers.set(HttpHeaders.acceptHeader, 'application/json');
       request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
-      final response = await request.close().timeout(const Duration(seconds: 20));
+      final response =
+          await request.close().timeout(const Duration(seconds: 20));
       final rawBody = await utf8.decoder.bind(response).join();
       if (response.statusCode < 200 || response.statusCode >= 300) return;
-      final decoded = rawBody.trim().isEmpty ? <String, dynamic>{} : jsonDecode(rawBody);
+      final decoded =
+          rawBody.trim().isEmpty ? <String, dynamic>{} : jsonDecode(rawBody);
       final rows = _asList(_asMap(decoded)?['data']) ?? const [];
       _PendingSurvey? pending;
       for (final row in rows) {
@@ -120,10 +154,12 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
     }
   }
 
-  Future<void> _answerPendingSurvey(_PendingSurvey survey, String answer) async {
+  Future<void> _answerPendingSurvey(
+      _PendingSurvey survey, String answer) async {
     final token = Supabase.instance.client.auth.currentSession?.accessToken;
     if (token == null || token.isEmpty) return;
-    _surveyHomeLog('pending answer sessionId=${survey.sessionId} answer=$answer');
+    _surveyHomeLog(
+        'pending answer sessionId=${survey.sessionId} answer=$answer');
     if (answer == 'now') {
       context.go('/chat/${Uri.encodeComponent(survey.sessionId)}?survey=true');
       return;
@@ -136,7 +172,8 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
       request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
       request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
       request.add(utf8.encode(jsonEncode({'answer': answer})));
-      final response = await request.close().timeout(const Duration(seconds: 20));
+      final response =
+          await request.close().timeout(const Duration(seconds: 20));
       if (response.statusCode >= 200 && response.statusCode < 300 && mounted) {
         setState(() => _pendingSurvey = null);
       }
@@ -208,6 +245,7 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
       _aiPhase = _HomeAiPhase.home;
       _conversationInitialMessage = null;
     });
+    _playHomeFade();
   }
 
   void _useSuggestion(String text) {
@@ -262,85 +300,123 @@ class _HomeV2ScreenState extends State<HomeV2Screen> {
           ),
         ),
         child: SafeArea(
-          child: Padding(
-            padding: EdgeInsets.fromLTRB(
-                horizontalPadding, 24, horizontalPadding, 24 + bottomInset),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _HomeTopBar(
-                  phase: _aiPhase,
-                  onBack: _exitAiMode,
-                ),
-                if (!isConversation) ...[
-                  AnimatedContainer(
-                    duration: const Duration(milliseconds: 560),
-                    curve: Curves.easeOutCubic,
-                    height: isAiActive ? 24 : 96,
-                  ),
-                  Text(
-                    '¡Hola, $displayName!',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 20,
-                      fontFamily: 'ABCDiatype',
-                      fontWeight: FontWeight.w400,
+          child: AnimatedOpacity(
+            duration: const Duration(milliseconds: 320),
+            curve: Curves.easeOutCubic,
+            opacity: _homeVisible ? 1 : 0,
+            child: AnimatedSlide(
+              duration: const Duration(milliseconds: 320),
+              curve: Curves.easeOutCubic,
+              offset: _homeVisible ? Offset.zero : const Offset(0, 0.018),
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(
+                    horizontalPadding, 24, horizontalPadding, 24 + bottomInset),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _HomeTopBar(
+                      phase: _aiPhase,
+                      onBack: _exitAiMode,
                     ),
-                  ),
-                  const SizedBox(height: 8),
-                  SizedBox(
-                    width: 340,
-                    child: Text(
-                      hasActiveConsults
-                          ? 'Esta es tu actividad:'
-                          : '¿Cómo podemos asistirte hoy?',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 36,
-                        fontFamily: 'ABCDiatype',
-                        fontWeight: FontWeight.w400,
-                        height: 1.02,
+                    if (!isConversation) ...[
+                      AnimatedContainer(
+                        duration: const Duration(milliseconds: 560),
+                        curve: Curves.easeOutCubic,
+                        height: isAiActive ? 24 : 96,
+                      ),
+                      Text(
+                        '¡Hola, $displayName!',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 20,
+                          fontFamily: 'ABCDiatype',
+                          fontWeight: FontWeight.w400,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      SizedBox(
+                        width: 340,
+                        child: Text(
+                          hasActiveConsults
+                              ? 'Esta es tu actividad:'
+                              : '¿Cómo podemos asistirte hoy?',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 36,
+                            fontFamily: 'ABCDiatype',
+                            fontWeight: FontWeight.w400,
+                            height: 1.02,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 34),
+                    ] else
+                      const SizedBox(height: 16),
+                    Expanded(
+                      child: AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 320),
+                        switchInCurve: Curves.easeOutCubic,
+                        switchOutCurve: Curves.easeInCubic,
+                        transitionBuilder: (child, animation) {
+                          final offsetAnimation = Tween<Offset>(
+                            begin: const Offset(0, 0.025),
+                            end: Offset.zero,
+                          ).animate(animation);
+                          return FadeTransition(
+                            opacity: animation,
+                            child: SlideTransition(
+                              position: offsetAnimation,
+                              child: child,
+                            ),
+                          );
+                        },
+                        child: isConversation
+                            ? ChatScreen(
+                                key: ValueKey('home-ai-$_conversationKey'),
+                                sessionId: 'ai',
+                                initialMessage: _conversationInitialMessage,
+                                embedded: true,
+                              )
+                            : isPrompt
+                                ? _AiSuggestionList(
+                                    key:
+                                        const ValueKey('ai-prompt-suggestions'),
+                                    onSelected: _useSuggestion,
+                                  )
+                                : _HomeDefaultSection(
+                                    key: const ValueKey('home-default-section'),
+                                    visible: _aiPhase == _HomeAiPhase.home,
+                                    pendingSurvey: _pendingSurvey,
+                                    activeConsults: _activeConsults,
+                                    onSurveyNow: (survey) =>
+                                        _answerPendingSurvey(survey, 'now'),
+                                    onSurveyLater: (survey) =>
+                                        _answerPendingSurvey(survey, 'later'),
+                                    onSurveyDismiss: (survey) =>
+                                        _answerPendingSurvey(survey, 'dismiss'),
+                                    onConsultSelected: (consult) {
+                                      if (consult.mode == 'video') {
+                                        context.go(
+                                            '/video/${Uri.encodeComponent(consult.id)}');
+                                      } else {
+                                        context.go(
+                                            '/chat/${Uri.encodeComponent(consult.id)}');
+                                      }
+                                    },
+                                  ),
                       ),
                     ),
-                  ),
-                  const SizedBox(height: 34),
-                ] else
-                  const SizedBox(height: 16),
-                Expanded(
-                  child: isConversation
-                      ? ChatScreen(
-                          key: ValueKey('home-ai-$_conversationKey'),
-                          sessionId: 'ai',
-                          initialMessage: _conversationInitialMessage,
-                          embedded: true,
-                        )
-                      : isPrompt
-                          ? _AiSuggestionList(onSelected: _useSuggestion)
-                          : _HomeDefaultSection(
-                              visible: _aiPhase == _HomeAiPhase.home,
-                              pendingSurvey: _pendingSurvey,
-                              activeConsults: _activeConsults,
-                              onSurveyNow: (survey) => _answerPendingSurvey(survey, 'now'),
-                              onSurveyLater: (survey) => _answerPendingSurvey(survey, 'later'),
-                              onSurveyDismiss: (survey) => _answerPendingSurvey(survey, 'dismiss'),
-                              onConsultSelected: (consult) {
-                                if (consult.mode == 'video') {
-                                  context.go('/video/${Uri.encodeComponent(consult.id)}');
-                                } else {
-                                  context.go('/chat/${Uri.encodeComponent(consult.id)}');
-                                }
-                              },
-                            ),
+                    if (!isConversation)
+                      _MessageComposer(
+                        controller: _messageCtrl,
+                        focusNode: _messageFocusNode,
+                        isPrompt: isPrompt,
+                        onTap: _enterAiMode,
+                        onSend: _openAiChat,
+                      ),
+                  ],
                 ),
-                if (!isConversation)
-                  _MessageComposer(
-                    controller: _messageCtrl,
-                    focusNode: _messageFocusNode,
-                    isPrompt: isPrompt,
-                    onTap: _enterAiMode,
-                    onSend: _openAiChat,
-                  ),
-              ],
+              ),
             ),
           ),
         ),
@@ -364,9 +440,13 @@ class _ActiveConsult {
       id: json['id']?.toString() ?? '',
       mode: json['mode']?.toString().toLowerCase() ?? 'chat',
       status: json['status']?.toString().toLowerCase() ?? '',
-      petName: _cleanLabel(json['pet_name']) ?? _cleanLabel(json['petName']) ?? 'Consulta',
+      petName: _cleanLabel(json['pet_name']) ??
+          _cleanLabel(json['petName']) ??
+          'Consulta',
       priority: _cleanLabel(json['priority']) ?? 'rutina',
-      specialtyName: _cleanLabel(json['specialty_name']) ?? _cleanLabel(json['specialtyName']) ?? 'general',
+      specialtyName: _cleanLabel(json['specialty_name']) ??
+          _cleanLabel(json['specialtyName']) ??
+          'general',
     );
   }
 
@@ -377,7 +457,8 @@ class _ActiveConsult {
   final String priority;
   final String specialtyName;
 
-  bool get isActive => id.isNotEmpty &&
+  bool get isActive =>
+      id.isNotEmpty &&
       (status == 'active' || status == 'scheduled') &&
       (mode == 'chat' || mode == 'video');
 
@@ -394,7 +475,9 @@ class _ActiveConsult {
     if (normalized.contains('urgenc')) return 'crítico';
     if (normalized.contains('general')) return 'general';
     if (normalized.contains('deport')) return 'sport';
-    if (normalized.contains('cojera') || normalized.contains('ortop')) return 'cojera';
+    if (normalized.contains('cojera') || normalized.contains('ortop')) {
+      return 'cojera';
+    }
     return _shortLabel(specialtyName, maxLength: 9).toLowerCase();
   }
 }
@@ -422,7 +505,8 @@ class _PendingSurvey {
   final String petName;
   final String vetName;
 
-  String get subtitle => 'Cuéntanos cómo fue la atención de $vetName para $petName.';
+  String get subtitle =>
+      'Cuéntanos cómo fue la atención de $vetName para $petName.';
 }
 
 Map<String, dynamic>? _asMap(Object? value) {
@@ -547,6 +631,7 @@ class _HomeTopBar extends StatelessWidget {
 
 class _HomeDefaultSection extends StatelessWidget {
   const _HomeDefaultSection({
+    super.key,
     required this.visible,
     required this.pendingSurvey,
     required this.activeConsults,
@@ -657,7 +742,8 @@ class _PendingSurveyCard extends StatelessWidget {
                 spacing: 8,
                 runSpacing: 8,
                 children: [
-                  _SurveyCardButton(label: 'Calificar ahora', selected: true, onTap: onNow),
+                  _SurveyCardButton(
+                      label: 'Calificar ahora', selected: true, onTap: onNow),
                   _SurveyCardButton(label: 'Más tarde', onTap: onLater),
                   _SurveyCardButton(label: 'Descartar', onTap: onDismiss),
                 ],
@@ -828,7 +914,7 @@ class _AiShortcut extends StatelessWidget {
 }
 
 class _AiSuggestionList extends StatefulWidget {
-  const _AiSuggestionList({required this.onSelected});
+  const _AiSuggestionList({super.key, required this.onSelected});
 
   final ValueChanged<String> onSelected;
 

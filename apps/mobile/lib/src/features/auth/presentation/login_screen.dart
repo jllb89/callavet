@@ -22,6 +22,13 @@ const bool _bypassOtpValidationForDev = bool.fromEnvironment(
   defaultValue: false,
 );
 const String _trustedDevPhoneDigits = '5542850675';
+const _loginOverlayStyle = SystemUiOverlayStyle(
+  statusBarColor: Colors.transparent,
+  statusBarIconBrightness: Brightness.light,
+  statusBarBrightness: Brightness.dark,
+  systemNavigationBarColor: Color(0xFF070707),
+  systemNavigationBarIconBrightness: Brightness.light,
+);
 
 void _loginLog(String message) {
   if (_loginFlowDebug) {
@@ -147,7 +154,8 @@ class _LoginScreenState extends State<LoginScreen> {
       return;
     }
 
-    _phoneValidationDebounce = Timer(const Duration(milliseconds: 300), () async {
+    _phoneValidationDebounce =
+        Timer(const Duration(milliseconds: 300), () async {
       final number = rawText.replaceAll(RegExp(r'\s+'), '');
       bool isValid;
       String? normalized;
@@ -223,7 +231,8 @@ class _LoginScreenState extends State<LoginScreen> {
     return '$message (intenta de nuevo en $waitText)';
   }
 
-  String _gatewayOtpErrorMessage(_GatewayOtpException err, {required String channel}) {
+  String _gatewayOtpErrorMessage(_GatewayOtpException err,
+      {required String channel}) {
     final code = (err.code ?? '').toLowerCase();
     final message = err.message.toLowerCase();
     final isNotFound = code.contains('not_found') ||
@@ -242,7 +251,8 @@ class _LoginScreenState extends State<LoginScreen> {
     return _retryMessage(err.message, err.retryAfterSeconds);
   }
 
-  Future<Map<String, dynamic>> _gatewayPost(String path, Map<String, dynamic> body) async {
+  Future<Map<String, dynamic>> _gatewayPost(
+      String path, Map<String, dynamic> body) async {
     final uri = Uri.parse('${Environment.apiBaseUrl}$path');
     final client = HttpClient();
     try {
@@ -252,11 +262,14 @@ class _LoginScreenState extends State<LoginScreen> {
 
       final res = await req.close();
       final text = await utf8.decoder.bind(res).join();
-      final data = text.isEmpty ? <String, dynamic>{} : (jsonDecode(text) as Map<String, dynamic>);
+      final data = text.isEmpty
+          ? <String, dynamic>{}
+          : (jsonDecode(text) as Map<String, dynamic>);
 
       if (res.statusCode < 200 || res.statusCode >= 300) {
         throw _GatewayOtpException(
-          message: data['message']?.toString() ?? 'No se pudo completar la solicitud.',
+          message: data['message']?.toString() ??
+              'No se pudo completar la solicitud.',
           code: data['code']?.toString(),
           retryAfterSeconds: (data['retryAfterSeconds'] as num?)?.toInt(),
           statusCode: (data['statusCode'] as num?)?.toInt() ?? res.statusCode,
@@ -291,11 +304,13 @@ class _LoginScreenState extends State<LoginScreen> {
         return null;
       }
 
-      final decoded =
-          text.isEmpty ? <String, dynamic>{} : (jsonDecode(text) as Map<String, dynamic>);
+      final decoded = text.isEmpty
+          ? <String, dynamic>{}
+          : (jsonDecode(text) as Map<String, dynamic>);
       final data = decoded['data'];
       if (data is! List) {
-        _loginLog('Active subscription check response has non-list data: $decoded');
+        _loginLog(
+            'Active subscription check response has non-list data: $decoded');
         return false;
       }
 
@@ -331,8 +346,9 @@ class _LoginScreenState extends State<LoginScreen> {
         return null;
       }
 
-      final decoded =
-          text.isEmpty ? <String, dynamic>{} : (jsonDecode(text) as Map<String, dynamic>);
+      final decoded = text.isEmpty
+          ? <String, dynamic>{}
+          : (jsonDecode(text) as Map<String, dynamic>);
       final data = decoded['data'];
       if (data is! List) {
         _loginLog('Horse check response has non-list data: $decoded');
@@ -340,7 +356,8 @@ class _LoginScreenState extends State<LoginScreen> {
       }
 
       final hasAtLeastOneHorse = data.whereType<Map>().isNotEmpty;
-      _loginLog('Horse check via gateway: hasAtLeastOneHorse=$hasAtLeastOneHorse');
+      _loginLog(
+          'Horse check via gateway: hasAtLeastOneHorse=$hasAtLeastOneHorse');
       return hasAtLeastOneHorse;
     } catch (err) {
       _loginLog('Horse check threw error: $err');
@@ -380,7 +397,9 @@ class _LoginScreenState extends State<LoginScreen> {
     return {
       'ok': true,
       'cooldownSeconds': 60,
-      'message': channel == 'sms' ? 'Código enviado por SMS.' : 'Código enviado a tu correo.',
+      'message': channel == 'sms'
+          ? 'Código enviado por SMS.'
+          : 'Código enviado a tu correo.',
     };
   }
 
@@ -418,7 +437,8 @@ class _LoginScreenState extends State<LoginScreen> {
       });
     } on _GatewayOtpException catch (err) {
       if (_isGatewayRouteMissing(err)) {
-        _loginLog('Gateway OTP routes unavailable on this env. Falling back to direct Supabase OTP.');
+        _loginLog(
+            'Gateway OTP routes unavailable on this env. Falling back to direct Supabase OTP.');
         _gatewayOtpUnavailable = true;
         return _sendOtpDirectSupabase(
           channel: channel,
@@ -443,7 +463,8 @@ class _LoginScreenState extends State<LoginScreen> {
       });
     } on _GatewayOtpException catch (err) {
       if (_isGatewayRouteMissing(err)) {
-        _loginLog('Gateway verify-lock route unavailable. Continuing without server-side lock checks.');
+        _loginLog(
+            'Gateway verify-lock route unavailable. Continuing without server-side lock checks.');
         _gatewayOtpUnavailable = true;
         return;
       }
@@ -464,7 +485,8 @@ class _LoginScreenState extends State<LoginScreen> {
       });
     } on _GatewayOtpException catch (err) {
       if (_isGatewayRouteMissing(err)) {
-        _loginLog('Gateway verify-attempt route unavailable. Skipping verify-attempt tracking.');
+        _loginLog(
+            'Gateway verify-attempt route unavailable. Skipping verify-attempt tracking.');
         _gatewayOtpUnavailable = true;
         return;
       }
@@ -545,17 +567,21 @@ class _LoginScreenState extends State<LoginScreen> {
     final row = userRow ??
         await client
             .from('users')
-            .select('id, phone, email, full_name, country, state, customer_type')
+            .select(
+                'id, phone, email, full_name, country, state, customer_type')
             .eq('id', userId)
             .maybeSingle();
 
-    _loginLog('Post-login route does not request auth email confirmation; email linking is handled during explicit KYC/profile updates.');
+    _loginLog(
+        'Post-login route does not request auth email confirmation; email linking is handled during explicit KYC/profile updates.');
 
     final missingStep = _missingKycStep(row);
-    _loginLog('Post-login KYC completeness check userId=$userId missingStep=$missingStep row=$row');
+    _loginLog(
+        'Post-login KYC completeness check userId=$userId missingStep=$missingStep row=$row');
     if (!mounted) return;
     if (missingStep != null) {
-      _loginLog('Routing userId=$userId to /kyc?start=$missingStep due to incomplete KYC');
+      _loginLog(
+          'Routing userId=$userId to /kyc?start=$missingStep due to incomplete KYC');
       context.go('/kyc?start=$missingStep');
       return;
     }
@@ -567,7 +593,8 @@ class _LoginScreenState extends State<LoginScreen> {
       final hasAtLeastOneHorse = await _hasAtLeastOneHorseViaGateway();
       if (!mounted) return;
       if (hasAtLeastOneHorse == true) {
-        _loginLog('Routing userId=$userId to /home (active subscription with horses found)');
+        _loginLog(
+            'Routing userId=$userId to /home (active subscription with horses found)');
         PostLoginRoutingController.routeTo(
           context,
           route: '/home',
@@ -576,7 +603,8 @@ class _LoginScreenState extends State<LoginScreen> {
           reason: 'active-subscription-with-horses',
         );
       } else {
-        _loginLog('Routing userId=$userId to /horse-kyc (active subscription but no horses yet)');
+        _loginLog(
+            'Routing userId=$userId to /horse-kyc (active subscription but no horses yet)');
         PostLoginRoutingController.routeTo(
           context,
           route: '/horse-kyc',
@@ -622,9 +650,11 @@ class _LoginScreenState extends State<LoginScreen> {
         final sessionPhoneDigits = _digitsOnly(currentUser?.phone ?? '');
 
         if (currentSession == null || currentUser == null) {
-          _loginLog('BYPASS_OTP=true blocked: no active auth session for phone=$normalized');
+          _loginLog(
+              'BYPASS_OTP=true blocked: no active auth session for phone=$normalized');
           setState(() {
-            _errorText = 'BYPASS_OTP requiere una sesión activa. Inicia sesión primero o desactiva el bypass.';
+            _errorText =
+                'BYPASS_OTP requiere una sesión activa. Inicia sesión primero o desactiva el bypass.';
           });
           return;
         }
@@ -634,12 +664,14 @@ class _LoginScreenState extends State<LoginScreen> {
             'BYPASS_OTP=true blocked: entered phone does not match active session phone. entered=$enteredDigits session=$sessionPhoneDigits sessionUserId=${currentUser.id}',
           );
           setState(() {
-            _errorText = 'El teléfono no coincide con la sesión activa. Cierra sesión o usa OTP normal.';
+            _errorText =
+                'El teléfono no coincide con la sesión activa. Cierra sesión o usa OTP normal.';
           });
           return;
         }
 
-        _loginLog('BYPASS_OTP=true with matching active session, skipping OTP verify and checking profile completeness');
+        _loginLog(
+            'BYPASS_OTP=true with matching active session, skipping OTP verify and checking profile completeness');
         final userId = currentUser.id;
         if (userId.isEmpty) {
           if (!mounted) return;
@@ -648,7 +680,8 @@ class _LoginScreenState extends State<LoginScreen> {
         }
         final row = await Supabase.instance.client
             .from('users')
-            .select('id, phone, email, full_name, country, state, customer_type')
+            .select(
+                'id, phone, email, full_name, country, state, customer_type')
             .eq('id', userId)
             .maybeSingle();
         if (!mounted) return;
@@ -662,7 +695,8 @@ class _LoginScreenState extends State<LoginScreen> {
         phone: normalized,
         shouldCreateUser: true,
       );
-      final cooldownSeconds = (response['cooldownSeconds'] as num?)?.toInt() ?? 60;
+      final cooldownSeconds =
+          (response['cooldownSeconds'] as num?)?.toInt() ?? 60;
 
       _loginLog('OTP requested successfully for phone=$normalized');
       setState(() {
@@ -676,7 +710,8 @@ class _LoginScreenState extends State<LoginScreen> {
         if (mounted) FocusScope.of(context).requestFocus(_otpFocusNode);
       });
     } on _GatewayOtpException catch (err) {
-      _loginLog('OTP request gateway error: ${err.message} code=${err.code} retry=${err.retryAfterSeconds}');
+      _loginLog(
+          'OTP request gateway error: ${err.message} code=${err.code} retry=${err.retryAfterSeconds}');
       setState(() => _errorText = _gatewayOtpErrorMessage(err, channel: 'sms'));
     } on AuthException catch (err) {
       _loginLog('OTP request auth error: ${err.message}');
@@ -703,7 +738,8 @@ class _LoginScreenState extends State<LoginScreen> {
 
     try {
       if (_bypassOtpValidationForDev) {
-        _loginLog('BYPASS_OTP=true, skipping login OTP verify (email path) and checking profile completeness');
+        _loginLog(
+            'BYPASS_OTP=true, skipping login OTP verify (email path) and checking profile completeness');
         final userId = Supabase.instance.client.auth.currentUser?.id;
         if (userId == null) {
           if (!mounted) return;
@@ -712,7 +748,8 @@ class _LoginScreenState extends State<LoginScreen> {
         }
         final row = await Supabase.instance.client
             .from('users')
-          .select('id, phone, email, full_name, country, state, customer_type')
+            .select(
+                'id, phone, email, full_name, country, state, customer_type')
             .eq('id', userId)
             .maybeSingle();
         if (!mounted) return;
@@ -721,7 +758,8 @@ class _LoginScreenState extends State<LoginScreen> {
       }
 
       final response = await _sendOtpViaGateway(channel: 'email', email: email);
-      final cooldownSeconds = (response['cooldownSeconds'] as num?)?.toInt() ?? 60;
+      final cooldownSeconds =
+          (response['cooldownSeconds'] as num?)?.toInt() ?? 60;
 
       setState(() {
         _otpChannel = 'email';
@@ -734,8 +772,10 @@ class _LoginScreenState extends State<LoginScreen> {
         if (mounted) FocusScope.of(context).requestFocus(_otpFocusNode);
       });
     } on _GatewayOtpException catch (err) {
-      _loginLog('Email OTP request gateway error: ${err.message} code=${err.code} retry=${err.retryAfterSeconds}');
-      setState(() => _errorText = _gatewayOtpErrorMessage(err, channel: 'email'));
+      _loginLog(
+          'Email OTP request gateway error: ${err.message} code=${err.code} retry=${err.retryAfterSeconds}');
+      setState(
+          () => _errorText = _gatewayOtpErrorMessage(err, channel: 'email'));
     } catch (err) {
       _loginLog('Email OTP request error: $err');
       setState(() => _errorText = 'No se pudo enviar el código: $err');
@@ -772,7 +812,8 @@ class _LoginScreenState extends State<LoginScreen> {
         response = await _sendOtpViaGateway(channel: 'sms', phone: phone);
       }
 
-      final cooldownSeconds = (response['cooldownSeconds'] as num?)?.toInt() ?? 60;
+      final cooldownSeconds =
+          (response['cooldownSeconds'] as num?)?.toInt() ?? 60;
       _startResendCooldown(cooldownSeconds);
 
       if (!mounted) return;
@@ -780,8 +821,10 @@ class _LoginScreenState extends State<LoginScreen> {
         const SnackBar(content: Text('código reenviado.')),
       );
     } on _GatewayOtpException catch (err) {
-      _loginLog('Resend gateway error: ${err.message} code=${err.code} retry=${err.retryAfterSeconds}');
-      setState(() => _errorText = _retryMessage(err.message, err.retryAfterSeconds));
+      _loginLog(
+          'Resend gateway error: ${err.message} code=${err.code} retry=${err.retryAfterSeconds}');
+      setState(
+          () => _errorText = _retryMessage(err.message, err.retryAfterSeconds));
     } catch (err) {
       _loginLog('Resend OTP error: $err');
       setState(() => _errorText = 'No se pudo reenviar: $err');
@@ -811,7 +854,8 @@ class _LoginScreenState extends State<LoginScreen> {
     try {
       final client = Supabase.instance.client;
       await _checkVerifyLock();
-      _loginLog('Verifying OTP. channel=$_otpChannel tokenLength=${token.length} phone=$phone email=$email');
+      _loginLog(
+          'Verifying OTP. channel=$_otpChannel tokenLength=${token.length} phone=$phone email=$email');
       final result = await client.auth.verifyOTP(
         type: _otpChannel == 'sms' ? OtpType.sms : OtpType.email,
         token: token,
@@ -820,7 +864,8 @@ class _LoginScreenState extends State<LoginScreen> {
       );
       await _recordVerifyAttempt(true);
       final userId = result.user?.id ?? client.auth.currentUser?.id;
-      _loginLog('verifyOTP success. session=${result.session != null} userId=$userId');
+      _loginLog(
+          'verifyOTP success. session=${result.session != null} userId=$userId');
 
       if (userId == null) {
         setState(() => _errorText = 'No se creó sesión de usuario.');
@@ -835,10 +880,12 @@ class _LoginScreenState extends State<LoginScreen> {
       _loginLog('public.users row after login verify: $existingRow');
 
       if (!mounted) return;
-        await _routeAfterLogin(userId: userId, userRow: existingRow);
+      await _routeAfterLogin(userId: userId, userRow: existingRow);
     } on _GatewayOtpException catch (err) {
-      _loginLog('verify-lock gateway error: ${err.message} code=${err.code} retry=${err.retryAfterSeconds}');
-      setState(() => _errorText = _retryMessage(err.message, err.retryAfterSeconds));
+      _loginLog(
+          'verify-lock gateway error: ${err.message} code=${err.code} retry=${err.retryAfterSeconds}');
+      setState(
+          () => _errorText = _retryMessage(err.message, err.retryAfterSeconds));
     } on AuthException catch (err) {
       await _recordVerifyAttempt(false);
       _loginLog('verifyOTP auth error: ${err.message}');
@@ -855,9 +902,11 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Widget _buildPhoneStep() {
     final phoneReady = _isPhoneValid && _normalizedPhone != null;
-    final showInvalidPhoneHint =
-        _phoneController.text.trim().isNotEmpty && !_isPhoneValid && _errorText == null;
+    final showInvalidPhoneHint = _phoneController.text.trim().isNotEmpty &&
+        !_isPhoneValid &&
+        _errorText == null;
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const SizedBox(height: 24),
         const SizedBox(
@@ -866,7 +915,7 @@ class _LoginScreenState extends State<LoginScreen> {
             'bienvenido a call a vet.\npor favor introduce tu número de teléfono para continuar:',
             style: TextStyle(
               color: Colors.white,
-              fontSize: 16,
+              fontSize: 14,
               fontFamily: 'ABC Diatype',
               fontWeight: FontWeight.w500,
             ),
@@ -879,34 +928,35 @@ class _LoginScreenState extends State<LoginScreen> {
               onTap: _pickCountry,
               borderRadius: BorderRadius.circular(20),
               child: Container(
-              width: 94,
-              height: 62,
-              padding: const EdgeInsets.symmetric(horizontal: 10),
-              decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.06),
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: Row(
-                children: [
-                  CircleAvatar(
-                    radius: 12.5,
-                    backgroundColor: const Color(0xFF2E2E2E),
-                    child: Text(_flagEmoji, style: const TextStyle(fontSize: 14)),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    '+$_dialCode',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 13,
-                      fontFamily: 'ABC Diatype',
-                      fontWeight: FontWeight.w400,
-                      height: 1.85,
+                width: 94,
+                height: 62,
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.06),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Row(
+                  children: [
+                    CircleAvatar(
+                      radius: 12.5,
+                      backgroundColor: const Color(0xFF2E2E2E),
+                      child: Text(_flagEmoji,
+                          style: const TextStyle(fontSize: 14)),
                     ),
-                  ),
-                ],
+                    const SizedBox(width: 8),
+                    Text(
+                      '+$_dialCode',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        fontFamily: 'ABC Diatype',
+                        fontWeight: FontWeight.w400,
+                        height: 1.85,
+                      ),
+                    ),
+                  ],
+                ),
               ),
-            ),
             ),
             const SizedBox(width: 11),
             Expanded(
@@ -981,55 +1031,19 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
         ],
         const Spacer(),
-        Padding(
-          padding: const EdgeInsets.only(bottom: 16),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              const Text(
-                'continuar',
-                textAlign: TextAlign.right,
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 13,
-                  fontFamily: 'ABC Diatype',
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-              const SizedBox(width: 10),
-              SizedBox(
-                width: 45,
-                height: 45,
-                child: ElevatedButton(
-                  onPressed: (phoneReady && !_isSendingOtp) ? _sendOtp : null,
-                  style: ElevatedButton.styleFrom(
-                    shape: const CircleBorder(),
-                    padding: EdgeInsets.zero,
-                    backgroundColor: Colors.white,
-                    foregroundColor: const Color(0xFF101010),
-                    disabledBackgroundColor: Colors.white.withValues(alpha: 0.2),
-                  ),
-                  child: _isSendingOtp
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF101010)),
-                          ),
-                        )
-                      : const Icon(Icons.arrow_forward, size: 18),
-                ),
-              ),
-            ],
-          ),
+        _RoundActionRow(
+          label: 'continuar',
+          busy: _isSendingOtp,
+          enabled: phoneReady && !_isSendingOtp,
+          onPressed: _sendOtp,
         ),
       ],
     );
   }
 
   Widget _buildOtpStep() {
-    final canSubmit = _otpController.text.trim().length == 6 && !_isVerifyingOtp;
+    final canSubmit =
+        _otpController.text.trim().length == 6 && !_isVerifyingOtp;
     final destinationLabel = _otpChannel == 'sms' ? _phoneE164 : _emailForOtp;
     final emailFallbackEnabled = _resendSecondsLeft == 0 && !_isSendingOtp;
     return Column(
@@ -1115,7 +1129,9 @@ class _LoginScreenState extends State<LoginScreen> {
         Align(
           alignment: Alignment.centerLeft,
           child: TextButton(
-            onPressed: (_resendSecondsLeft == 0 && !_isSendingOtp) ? _resendCode : null,
+            onPressed: (_resendSecondsLeft == 0 && !_isSendingOtp)
+                ? _resendCode
+                : null,
             style: TextButton.styleFrom(foregroundColor: Colors.white),
             child: Text(
               _isSendingOtp
@@ -1147,7 +1163,9 @@ class _LoginScreenState extends State<LoginScreen> {
             child: Text(
               'enviarlo por correo electrónico',
               style: TextStyle(
-                color: emailFallbackEnabled ? Colors.white : const Color(0x99FFFFFF),
+                color: emailFallbackEnabled
+                    ? Colors.white
+                    : const Color(0x99FFFFFF),
                 fontSize: 12,
                 fontFamily: 'ABC Diatype',
                 fontWeight: FontWeight.w500,
@@ -1157,48 +1175,11 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
         ),
         const Spacer(),
-        Padding(
-          padding: const EdgeInsets.only(bottom: 16),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              const Text(
-                'continuar',
-                textAlign: TextAlign.right,
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 13,
-                  fontFamily: 'ABC Diatype',
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-              const SizedBox(width: 10),
-              SizedBox(
-                width: 45,
-                height: 45,
-                child: ElevatedButton(
-                  onPressed: canSubmit ? _verifyOtpAndLogin : null,
-                  style: ElevatedButton.styleFrom(
-                    shape: const CircleBorder(),
-                    padding: EdgeInsets.zero,
-                    backgroundColor: Colors.white,
-                    foregroundColor: const Color(0xFF101010),
-                    disabledBackgroundColor: Colors.white.withValues(alpha: 0.2),
-                  ),
-                  child: _isVerifyingOtp
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF101010)),
-                          ),
-                        )
-                      : const Icon(Icons.arrow_forward, size: 18),
-                ),
-              ),
-            ],
-          ),
+        _RoundActionRow(
+          label: 'continuar',
+          busy: _isVerifyingOtp,
+          enabled: canSubmit,
+          onPressed: _verifyOtpAndLogin,
         ),
       ],
     );
@@ -1207,9 +1188,11 @@ class _LoginScreenState extends State<LoginScreen> {
   Widget _buildEmailStep() {
     final email = _emailController.text.trim();
     final isEmailValid = _isValidEmail(email);
-    final showInvalidEmailHint = _showEmailValidationError && _errorText == null;
+    final showInvalidEmailHint =
+        _showEmailValidationError && _errorText == null;
 
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const SizedBox(height: 24),
         const SizedBox(
@@ -1218,7 +1201,7 @@ class _LoginScreenState extends State<LoginScreen> {
             'bienvenido a call a vet.\npor favor introduce tu correo electrónico para continuar:',
             style: TextStyle(
               color: Colors.white,
-              fontSize: 16,
+              fontSize: 14,
               fontFamily: 'ABC Diatype',
               fontWeight: FontWeight.w500,
             ),
@@ -1292,48 +1275,11 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
         ],
         const Spacer(),
-        Padding(
-          padding: const EdgeInsets.only(bottom: 16),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              const Text(
-                'continuar',
-                textAlign: TextAlign.right,
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 13,
-                  fontFamily: 'ABC Diatype',
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-              const SizedBox(width: 10),
-              SizedBox(
-                width: 45,
-                height: 45,
-                child: ElevatedButton(
-                  onPressed: (isEmailValid && !_isSendingOtp) ? _sendEmailOtp : null,
-                  style: ElevatedButton.styleFrom(
-                    shape: const CircleBorder(),
-                    padding: EdgeInsets.zero,
-                    backgroundColor: Colors.white,
-                    foregroundColor: const Color(0xFF101010),
-                    disabledBackgroundColor: Colors.white.withValues(alpha: 0.2),
-                  ),
-                  child: _isSendingOtp
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF101010)),
-                          ),
-                        )
-                      : const Icon(Icons.arrow_forward, size: 18),
-                ),
-              ),
-            ],
-          ),
+        _RoundActionRow(
+          label: 'continuar',
+          busy: _isSendingOtp,
+          enabled: isEmailValid && !_isSendingOtp,
+          onPressed: _sendEmailOtp,
         ),
       ],
     );
@@ -1342,7 +1288,7 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   Widget build(BuildContext context) {
     final headerAction = _step == 0
-        ? const SizedBox(height: 38, width: 38)
+        ? const SizedBox(height: 38)
         : TextButton(
             onPressed: () {
               final currentStep = _step;
@@ -1368,11 +1314,18 @@ class _LoginScreenState extends State<LoginScreen> {
             ),
           );
 
-    return Scaffold(
-      backgroundColor: const Color(0xFF101010),
-      body: Stack(
-        children: [
-          SafeArea(
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: _loginOverlayStyle,
+      child: Scaffold(
+        body: DecoratedBox(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment(0.50, -0.00),
+              end: Alignment(0.50, 1.00),
+              colors: [Color(0xFF141417), Color(0xFF070707)],
+            ),
+          ),
+          child: SafeArea(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Column(
@@ -1423,6 +1376,68 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RoundActionRow extends StatelessWidget {
+  const _RoundActionRow({
+    required this.label,
+    required this.busy,
+    required this.enabled,
+    required this.onPressed,
+  });
+
+  final String label;
+  final bool busy;
+  final bool enabled;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.end,
+        children: [
+          Text(
+            label,
+            textAlign: TextAlign.right,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 13,
+              fontFamily: 'ABC Diatype',
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(width: 10),
+          SizedBox(
+            width: 45,
+            height: 45,
+            child: ElevatedButton(
+              onPressed: enabled ? onPressed : null,
+              style: ElevatedButton.styleFrom(
+                shape: const CircleBorder(),
+                padding: EdgeInsets.zero,
+                backgroundColor: Colors.white,
+                foregroundColor: const Color(0xFF101010),
+                disabledBackgroundColor: Colors.white.withValues(alpha: 0.2),
+              ),
+              child: busy
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        valueColor:
+                            AlwaysStoppedAnimation<Color>(Color(0xFF101010)),
+                      ),
+                    )
+                  : const Icon(Icons.arrow_forward, size: 18),
+            ),
+          ),
         ],
       ),
     );
@@ -1466,7 +1481,8 @@ class _OtpGroupBox extends StatelessWidget {
         children: List.generate(3, (index) {
           final digitIndex = startIndex + index;
           final value = digitIndex < digits.length ? digits[digitIndex] : '';
-          return _OtpDigitSlot(value: value, isActive: digitIndex == digits.length);
+          return _OtpDigitSlot(
+              value: value, isActive: digitIndex == digits.length);
         }),
       ),
     );

@@ -9,6 +9,7 @@ import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../core/config/environment.dart';
+import '../../../core/router/route_observer.dart';
 
 void _vetDashboardRoadmapLog(String message) {
   debugPrint('[VideoRoadmap][VetDashboard] $message');
@@ -22,7 +23,7 @@ class VetDashboardScreen extends StatefulWidget {
 }
 
 class _VetDashboardScreenState extends State<VetDashboardScreen>
-    with WidgetsBindingObserver {
+    with WidgetsBindingObserver, RouteAware {
   static const _dashboardRealtimeTables = <String>[
     'chat_sessions',
     'appointments',
@@ -37,6 +38,8 @@ class _VetDashboardScreenState extends State<VetDashboardScreen>
   String? _dashboardBroadcastTopic;
   Timer? _dashboardRefreshDebounce;
   late Future<_VetProfileBundle> _profileBundleFuture;
+  bool _dashboardVisible = false;
+  PageRoute<dynamic>? _route;
 
   @override
   void initState() {
@@ -44,15 +47,42 @@ class _VetDashboardScreenState extends State<VetDashboardScreen>
     WidgetsBinding.instance.addObserver(this);
     _profileBundleFuture = _loadProfileBundle();
     _startDashboardRealtime();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _playDashboardFade());
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    if (route is PageRoute<dynamic> && _route != route) {
+      if (_route != null) vetRouteObserver.unsubscribe(this);
+      vetRouteObserver.subscribe(this, route);
+      _route = route;
+    }
+  }
+
+  @override
+  void didPopNext() {
+    if (!_showProfile) _playDashboardFade();
   }
 
   @override
   void dispose() {
+    vetRouteObserver.unsubscribe(this);
     WidgetsBinding.instance.removeObserver(this);
     _dashboardRefreshDebounce?.cancel();
     _removeDashboardBroadcast();
     _removeDashboardRealtime();
     super.dispose();
+  }
+
+  void _playDashboardFade() {
+    if (!mounted) return;
+    setState(() => _dashboardVisible = false);
+    Future<void>.delayed(const Duration(milliseconds: 16), () {
+      if (!mounted) return;
+      setState(() => _dashboardVisible = true);
+    });
   }
 
   @override
@@ -265,6 +295,7 @@ class _VetDashboardScreenState extends State<VetDashboardScreen>
 
   void _showHome() {
     setState(() => _showProfile = false);
+    _playDashboardFade();
   }
 
   void _showProfileScreen() {
@@ -283,7 +314,8 @@ class _VetDashboardScreenState extends State<VetDashboardScreen>
   void _openVideoHandoff(_VideoJoinTarget target) {
     final sessionId = target.sessionId.trim();
     if (sessionId.isEmpty) return;
-    _vetDashboardRoadmapLog('handoff.open sessionId=$sessionId name=${target.name}');
+    _vetDashboardRoadmapLog(
+        'handoff.open sessionId=$sessionId name=${target.name}');
     final handoffFuture = _getGatewayJson(
       '/sessions/${Uri.encodeComponent(sessionId)}/handoff',
     ).then((json) {
@@ -292,7 +324,8 @@ class _VetDashboardScreenState extends State<VetDashboardScreen>
           'handoff.fetch.succeeded sessionId=$sessionId ready=${bundle.ready} hasHandoff=${bundle.handoff != null}');
       return bundle;
     }).catchError((error) {
-      _vetDashboardRoadmapLog('handoff.fetch.failed sessionId=$sessionId error=$error');
+      _vetDashboardRoadmapLog(
+          'handoff.fetch.failed sessionId=$sessionId error=$error');
       throw error;
     });
 
@@ -395,7 +428,7 @@ class _VetDashboardScreenState extends State<VetDashboardScreen>
         : _DashboardPage(
             availableNow: _availableNow,
             profileBundleFuture: _profileBundleFuture,
-          onJoinVideo: _openVideoHandoff,
+            onJoinVideo: _openVideoHandoff,
             onOpenChat: _openChat,
             onEndConsult: _endActiveConsult,
             endingConsultIds: _endingConsultIds,
@@ -411,23 +444,33 @@ class _VetDashboardScreenState extends State<VetDashboardScreen>
           ),
         ),
         child: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(32, 24, 32, 22),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (_showProfile)
-                  _ProfileTopBar(onBack: _showHome)
-                else
-                  _VetTopBar(
-                    availableNow: _availableNow,
-                    onHomeTap: _showHome,
-                    onProfileTap: _showProfileScreen,
-                    onAvailabilityChanged: (value) =>
-                        setState(() => _availableNow = value),
-                  ),
-                Expanded(child: content),
-              ],
+          child: AnimatedOpacity(
+            duration: const Duration(milliseconds: 320),
+            curve: Curves.easeOutCubic,
+            opacity: _dashboardVisible ? 1 : 0,
+            child: AnimatedSlide(
+              duration: const Duration(milliseconds: 320),
+              curve: Curves.easeOutCubic,
+              offset: _dashboardVisible ? Offset.zero : const Offset(0, 0.018),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(32, 24, 32, 22),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (_showProfile)
+                      _ProfileTopBar(onBack: _showHome)
+                    else
+                      _VetTopBar(
+                        availableNow: _availableNow,
+                        onHomeTap: _showHome,
+                        onProfileTap: _showProfileScreen,
+                        onAvailabilityChanged: (value) =>
+                            setState(() => _availableNow = value),
+                      ),
+                    Expanded(child: content),
+                  ],
+                ),
+              ),
             ),
           ),
         ),
@@ -709,7 +752,7 @@ class _ActivitySections extends StatelessWidget {
             queue?.upcomingAppointments ?? const <_UpcomingAppointment>[];
         final isLoading = snapshot.connectionState == ConnectionState.waiting;
         final hasJoinableVideo =
-          activeConsults.any((consult) => consult.canJoinVideo);
+            activeConsults.any((consult) => consult.canJoinVideo);
         if (!isLoading &&
             activeConsults.isEmpty &&
             upcomingAppointments.isEmpty) {
@@ -797,7 +840,7 @@ class _ActiveConsultEventList extends StatelessWidget {
             consult: consult,
             isEnding: isEnding,
             onJoinVideo: consult.canJoinVideo
-              ? () => onJoinVideo(consult.videoJoinTarget)
+                ? () => onJoinVideo(consult.videoJoinTarget)
                 : null,
             onOpenChat: consult.canOpenChat
                 ? () => onOpenChat(consult.sessionId)
@@ -934,9 +977,8 @@ class _ActiveConsultEventRow extends StatelessWidget {
           Wrap(
             spacing: 8,
             runSpacing: 8,
-            children: consult.tags
-                .map((label) => _ConsultTag(label: label))
-                .toList(),
+            children:
+                consult.tags.map((label) => _ConsultTag(label: label)).toList(),
           ),
         ],
       ),
@@ -1160,7 +1202,7 @@ class _UpcomingAppointmentsList extends StatelessWidget {
                 name: appointment.name,
                 time: appointment.formattedStart,
                 onJoin: appointment.canJoinVideo
-                  ? () => onJoinVideo(appointment.videoJoinTarget)
+                    ? () => onJoinVideo(appointment.videoJoinTarget)
                     : null,
               ),
             ),
@@ -1294,9 +1336,11 @@ class _PreCallHandoffSheet extends StatelessWidget {
               final petName = session?.petName.trim().isNotEmpty == true
                   ? session!.petName
                   : target.name;
-              final priority = handoff?.urgency ?? session?.priority ?? target.priority;
+              final priority =
+                  handoff?.urgency ?? session?.priority ?? target.priority;
               final specialty = session?.specialtyName ?? target.specialtyName;
-              final isLoading = snapshot.connectionState == ConnectionState.waiting;
+              final isLoading =
+                  snapshot.connectionState == ConnectionState.waiting;
               final hasError = snapshot.hasError;
 
               return Column(
@@ -1337,8 +1381,10 @@ class _PreCallHandoffSheet extends StatelessWidget {
                               spacing: 8,
                               runSpacing: 8,
                               children: [
-                                _HandoffBadge(label: _handoffPriorityLabel(priority)),
-                                if (specialty != null && specialty.trim().isNotEmpty)
+                                _HandoffBadge(
+                                    label: _handoffPriorityLabel(priority)),
+                                if (specialty != null &&
+                                    specialty.trim().isNotEmpty)
                                   _HandoffBadge(label: specialty.trim()),
                                 const _HandoffBadge(label: 'video'),
                               ],
@@ -1574,7 +1620,8 @@ class _HandoffLoadingState extends StatelessWidget {
           const SizedBox(
             width: 18,
             height: 18,
-            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+            child:
+                CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
           ),
           const SizedBox(width: 12),
           Text(
@@ -1599,7 +1646,8 @@ class _HandoffFallbackState extends StatelessWidget {
     return const _HandoffNotice(
       icon: Icons.cloud_off_rounded,
       title: 'Handoff no disponible',
-      message: 'Puedes entrar a la videollamada mientras se recupera el contexto.',
+      message:
+          'Puedes entrar a la videollamada mientras se recupera el contexto.',
     );
   }
 }
@@ -1612,7 +1660,8 @@ class _HandoffMissingState extends StatelessWidget {
     return const _HandoffNotice(
       icon: Icons.notes_rounded,
       title: 'Sin handoff AI todavía',
-      message: 'La sesión no tiene un handoff generado, pero puedes entrar a la videollamada.',
+      message:
+          'La sesión no tiene un handoff generado, pero puedes entrar a la videollamada.',
     );
   }
 }
@@ -2484,7 +2533,8 @@ class _VideoJoinTarget {
 }
 
 class _SessionHandoffBundle {
-  const _SessionHandoffBundle({required this.ready, this.session, this.handoff});
+  const _SessionHandoffBundle(
+      {required this.ready, this.session, this.handoff});
 
   factory _SessionHandoffBundle.fromJson(Map<String, dynamic> json) {
     final sessionMap = _asMap(json['session']);
@@ -2545,7 +2595,8 @@ class _AiHandoff {
               ?.map(_asMap)
               .whereType<Map<String, dynamic>>()
               .map(_HandoffQuestionAnswer.fromJson)
-              .where((answer) => answer.question.isNotEmpty && answer.answer.isNotEmpty)
+              .where((answer) =>
+                  answer.question.isNotEmpty && answer.answer.isNotEmpty)
               .toList() ??
           const <_HandoffQuestionAnswer>[],
       questionsUnanswered: _stringList(json['questionsUnanswered']),

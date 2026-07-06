@@ -93,6 +93,11 @@ class _ChatScreenState extends State<ChatScreen> {
       'initialSurvey=${widget.initialSurvey} '
       'apiBaseUrl=${Environment.apiBaseUrl} dryRun=$_aiChatDryRun',
     );
+    final initialMessage = widget.initialMessage?.trim();
+    final hasInitialMessage = initialMessage != null && initialMessage.isNotEmpty;
+    final initialAssistantMessage = widget.initialAssistantMessage?.trim();
+    final hasInitialAssistantMessage =
+        initialAssistantMessage != null && initialAssistantMessage.isNotEmpty;
     final cachedSessionId = _uuidOrNull(widget.sessionId);
     final cachedMessages = cachedSessionId == null
         ? null
@@ -101,14 +106,8 @@ class _ChatScreenState extends State<ChatScreen> {
       _messages.addAll(cachedMessages);
       _aiChatLog(
           'restored cached session chat sessionId=$cachedSessionId messages=${cachedMessages.length}');
-    } else {
-      _messages.add(_ChatMessage.assistant(
-        'Cuéntame qué está pasando con tu caballo y te ayudo a encontrar el veterinario adecuado.',
-        includeInHistory: false,
-      ));
     }
-    final initialAssistantMessage = widget.initialAssistantMessage?.trim();
-    if (initialAssistantMessage != null && initialAssistantMessage.isNotEmpty) {
+    if (hasInitialAssistantMessage) {
       _aiChatLog(
           'initial assistant post-call message inserted length=${initialAssistantMessage.length}');
       _messages.add(_ChatMessage.assistant(
@@ -118,8 +117,7 @@ class _ChatScreenState extends State<ChatScreen> {
       ));
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final initialMessage = widget.initialMessage?.trim();
-      if (initialMessage != null && initialMessage.isNotEmpty) {
+      if (hasInitialMessage) {
         _aiChatLog(
             'postFrame auto-sending initial message preview="${_preview(initialMessage)}"');
         _sendUserMessage(initialMessage);
@@ -1242,6 +1240,9 @@ class _ChatScreenState extends State<ChatScreen> {
     final topInset = MediaQuery.paddingOf(context).top;
     final bottomInset =
         widget.embedded ? 0.0 : MediaQuery.paddingOf(context).bottom;
+    final showEmbeddedIntro = widget.embedded &&
+        widget.initialMessage?.trim().isNotEmpty != true &&
+        widget.initialAssistantMessage?.trim().isNotEmpty != true;
     final messageList = ListView.builder(
       controller: _scrollController,
       padding: EdgeInsets.fromLTRB(
@@ -1250,10 +1251,10 @@ class _ChatScreenState extends State<ChatScreen> {
         widget.embedded ? 0 : 22,
         widget.embedded ? 20 : bottomInset + 102,
       ),
-      itemCount: (widget.embedded ? 1 : 0) + _messages.length,
+      itemCount: (showEmbeddedIntro ? 1 : 0) + _messages.length,
       itemBuilder: (context, index) {
-        final introCount = widget.embedded ? 1 : 0;
-        if (widget.embedded && index == 0) {
+        final introCount = showEmbeddedIntro ? 1 : 0;
+        if (showEmbeddedIntro && index == 0) {
           return const _EmbeddedChatIntro();
         }
         final messageIndex = index - introCount;
