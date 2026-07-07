@@ -91,6 +91,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   RealtimeChannel? _consultMessagesChannel;
   RealtimeChannel? _consultSessionChannel;
   RealtimeChannel? _consultRoomChannel;
+  bool _disposing = false;
   Timer? _consultRefreshDebounce;
   Timer? _consultReconnectTimer;
   Timer? _consultReadReceiptDebounce;
@@ -191,6 +192,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _disposing = true;
     WidgetsBinding.instance.removeObserver(this);
     final sessionId = _uuidOrNull(widget.sessionId);
     if (sessionId != null && !_isConsultChatRoute) {
@@ -393,33 +395,35 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   void _startConsultRealtime(String sessionId) {
     final messagesChannel =
         Supabase.instance.client.channel('owner-chat-messages:$sessionId');
+    _consultMessagesChannel = messagesChannel;
     messagesChannel
         .onPostgresChanges(
-          event: PostgresChangeEvent.all,
-          schema: 'public',
-          table: 'messages',
-          filter: PostgresChangeFilter(
-            type: PostgresChangeFilterType.eq,
-            column: 'session_id',
-            value: sessionId,
-          ),
-          callback: (payload) {
-            final record = payload.newRecord.isNotEmpty
-                ? payload.newRecord
-                : payload.oldRecord;
-            final message = _ChatMessage.consultFromJson(record);
-            if (message.id.isEmpty) {
-              _scheduleConsultRefresh();
-              return;
-            }
-            if (_hasConsultStreamGap(message)) _scheduleConsultRefresh();
-            if (message.attachments.isEmpty) _scheduleConsultRefresh();
-            _upsertConsultMessage(message);
-          },
-        )
-        .subscribe(
-            (status, [_]) => _handleConsultRealtimeStatus(sessionId, status));
-    _consultMessagesChannel = messagesChannel;
+      event: PostgresChangeEvent.all,
+      schema: 'public',
+      table: 'messages',
+      filter: PostgresChangeFilter(
+        type: PostgresChangeFilterType.eq,
+        column: 'session_id',
+        value: sessionId,
+      ),
+      callback: (payload) {
+        final record = payload.newRecord.isNotEmpty
+            ? payload.newRecord
+            : payload.oldRecord;
+        final message = _ChatMessage.consultFromJson(record);
+        if (message.id.isEmpty) {
+          _scheduleConsultRefresh();
+          return;
+        }
+        if (_hasConsultStreamGap(message)) _scheduleConsultRefresh();
+        if (message.attachments.isEmpty) _scheduleConsultRefresh();
+        _upsertConsultMessage(message);
+      },
+    )
+        .subscribe((status, [_]) {
+      if (!identical(_consultMessagesChannel, messagesChannel)) return;
+      _handleConsultRealtimeStatus(sessionId, status);
+    });
 
     final sessionChannel =
         Supabase.instance.client.channel('owner-chat-session:$sessionId');
@@ -453,6 +457,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       'consult-room:$sessionId',
       opts: RealtimeChannelConfig(private: true, key: userId),
     );
+    _consultRoomChannel = channel;
     channel
         .onBroadcast(
           event: 'typing',
@@ -512,6 +517,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         )
         .onPresenceSync((_) => _syncVetPresence(channel))
         .subscribe((status, [_]) {
+      if (!identical(_consultRoomChannel, channel)) return;
       if (status == RealtimeSubscribeStatus.subscribed) {
         _handleConsultRealtimeStatus(sessionId, status);
         unawaited(channel.track({
@@ -523,21 +529,22 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         _handleConsultRealtimeStatus(sessionId, status);
       }
     });
-    _consultRoomChannel = channel;
   }
 
   void _handleConsultRealtimeStatus(
       String sessionId, RealtimeSubscribeStatus status) {
-    if (!mounted) return;
+    if (!mounted || _disposing) return;
     if (status == RealtimeSubscribeStatus.subscribed) {
       _consultReconnectAttempts = 0;
       _consultReconnectTimer?.cancel();
       if (_consultRealtimeStatus != null) {
+        if (!mounted || _disposing) return;
         setState(() => _consultRealtimeStatus = null);
       }
       unawaited(_catchUpConsultMessages(sessionId));
       return;
     }
+    if (!mounted || _disposing) return;
     setState(() {
       _consultRealtimeStatus = switch (status) {
         RealtimeSubscribeStatus.channelError => 'reconectando chat...',
@@ -728,19 +735,19 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   void _stopConsultRealtime() {
     final messagesChannel = _consultMessagesChannel;
     if (messagesChannel != null) {
-      Supabase.instance.client.removeChannel(messagesChannel);
       _consultMessagesChannel = null;
+      Supabase.instance.client.removeChannel(messagesChannel);
     }
     final sessionChannel = _consultSessionChannel;
     if (sessionChannel != null) {
-      Supabase.instance.client.removeChannel(sessionChannel);
       _consultSessionChannel = null;
+      Supabase.instance.client.removeChannel(sessionChannel);
     }
     final roomChannel = _consultRoomChannel;
     if (roomChannel != null) {
+      _consultRoomChannel = null;
       unawaited(roomChannel.untrack());
       Supabase.instance.client.removeChannel(roomChannel);
-      _consultRoomChannel = null;
     }
   }
 
@@ -5149,7 +5156,7 @@ class _ConsultOutboxStore {
   static Future<List<_ConsultOutboxEntry>> _readAll() async {
     try {
       final file = await _file();
-      if (!await file.exists()) return const [];
+      if (!await file.exists()) return <_ConsultOutboxEntry>[];
       final decoded = jsonDecode(await file.readAsString());
       return (_asList(decoded) ?? const [])
           .map(_asMap)
@@ -5157,9 +5164,9 @@ class _ConsultOutboxStore {
           .map(_ConsultOutboxEntry.fromJson)
           .where((entry) =>
               entry.sessionId.isNotEmpty && entry.clientKey.isNotEmpty)
-          .toList(growable: false);
+          .toList(growable: true);
     } catch (_) {
-      return const [];
+      return <_ConsultOutboxEntry>[];
     }
   }
 

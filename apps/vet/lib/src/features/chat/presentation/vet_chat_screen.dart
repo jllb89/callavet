@@ -60,6 +60,7 @@ class _VetChatScreenState extends State<VetChatScreen>
   RealtimeChannel? _messagesChannel;
   RealtimeChannel? _sessionChannel;
   RealtimeChannel? _roomChannel;
+  bool _disposing = false;
   Timer? _refreshDebounce;
   Timer? _reconnectTimer;
   Timer? _readReceiptDebounce;
@@ -128,6 +129,7 @@ class _VetChatScreenState extends State<VetChatScreen>
 
   @override
   void dispose() {
+    _disposing = true;
     WidgetsBinding.instance.removeObserver(this);
     _refreshDebounce?.cancel();
     _reconnectTimer?.cancel();
@@ -247,32 +249,35 @@ class _VetChatScreenState extends State<VetChatScreen>
     if (normalizedSessionId.isEmpty) return;
     final channel =
         Supabase.instance.client.channel('vet-chat:$normalizedSessionId');
+    _messagesChannel = channel;
     channel
         .onPostgresChanges(
-          event: PostgresChangeEvent.all,
-          schema: 'public',
-          table: 'messages',
-          filter: PostgresChangeFilter(
-            type: PostgresChangeFilterType.eq,
-            column: 'session_id',
-            value: normalizedSessionId,
-          ),
-          callback: (payload) {
-            final record = payload.newRecord.isNotEmpty
-                ? payload.newRecord
-                : payload.oldRecord;
-            final message = _VetChatMessage.fromJson(record);
-            if (message.id.isEmpty) {
-              _scheduleRefresh();
-              return;
-            }
-            if (_hasStreamGap(message)) _scheduleRefresh();
-            if (message.attachments.isEmpty) _scheduleRefresh();
-            _upsertConsultMessage(message);
-          },
-        )
-        .subscribe((status, [_]) => _handleRealtimeStatus(status));
-    _messagesChannel = channel;
+      event: PostgresChangeEvent.all,
+      schema: 'public',
+      table: 'messages',
+      filter: PostgresChangeFilter(
+        type: PostgresChangeFilterType.eq,
+        column: 'session_id',
+        value: normalizedSessionId,
+      ),
+      callback: (payload) {
+        final record = payload.newRecord.isNotEmpty
+            ? payload.newRecord
+            : payload.oldRecord;
+        final message = _VetChatMessage.fromJson(record);
+        if (message.id.isEmpty) {
+          _scheduleRefresh();
+          return;
+        }
+        if (_hasStreamGap(message)) _scheduleRefresh();
+        if (message.attachments.isEmpty) _scheduleRefresh();
+        _upsertConsultMessage(message);
+      },
+    )
+        .subscribe((status, [_]) {
+      if (!identical(_messagesChannel, channel)) return;
+      _handleRealtimeStatus(status);
+    });
   }
 
   void _startSessionRealtime() {
@@ -312,6 +317,7 @@ class _VetChatScreenState extends State<VetChatScreen>
       'consult-room:$normalizedSessionId',
       opts: RealtimeChannelConfig(private: true, key: userId),
     );
+    _roomChannel = channel;
     channel
         .onBroadcast(
           event: 'typing',
@@ -374,6 +380,7 @@ class _VetChatScreenState extends State<VetChatScreen>
         )
         .onPresenceSync((_) => _syncOwnerPresence(channel))
         .subscribe((status, [_]) {
+      if (!identical(_roomChannel, channel)) return;
       if (status == RealtimeSubscribeStatus.subscribed) {
         _handleRealtimeStatus(status);
         unawaited(channel.track({
@@ -385,18 +392,21 @@ class _VetChatScreenState extends State<VetChatScreen>
         _handleRealtimeStatus(status);
       }
     });
-    _roomChannel = channel;
   }
 
   void _handleRealtimeStatus(RealtimeSubscribeStatus status) {
-    if (!mounted) return;
+    if (!mounted || _disposing) return;
     if (status == RealtimeSubscribeStatus.subscribed) {
       _reconnectAttempts = 0;
       _reconnectTimer?.cancel();
-      if (_realtimeStatus != null) setState(() => _realtimeStatus = null);
+      if (_realtimeStatus != null) {
+        if (!mounted || _disposing) return;
+        setState(() => _realtimeStatus = null);
+      }
       unawaited(_catchUpMessages());
       return;
     }
+    if (!mounted || _disposing) return;
     setState(() {
       _realtimeStatus = switch (status) {
         RealtimeSubscribeStatus.channelError => 'reconectando chat...',
@@ -429,19 +439,19 @@ class _VetChatScreenState extends State<VetChatScreen>
   void _stopRealtime() {
     final messagesChannel = _messagesChannel;
     if (messagesChannel != null) {
-      Supabase.instance.client.removeChannel(messagesChannel);
       _messagesChannel = null;
+      Supabase.instance.client.removeChannel(messagesChannel);
     }
     final sessionChannel = _sessionChannel;
     if (sessionChannel != null) {
-      Supabase.instance.client.removeChannel(sessionChannel);
       _sessionChannel = null;
+      Supabase.instance.client.removeChannel(sessionChannel);
     }
     final roomChannel = _roomChannel;
     if (roomChannel != null) {
+      _roomChannel = null;
       unawaited(roomChannel.untrack());
       Supabase.instance.client.removeChannel(roomChannel);
-      _roomChannel = null;
     }
   }
 
@@ -4257,7 +4267,7 @@ class _VetOutboxStore {
   static Future<List<_VetOutboxEntry>> _readAll() async {
     try {
       final file = await _file();
-      if (!await file.exists()) return const [];
+      if (!await file.exists()) return <_VetOutboxEntry>[];
       final decoded = jsonDecode(await file.readAsString());
       return (_asList(decoded) ?? const [])
           .map(_asMap)
@@ -4265,9 +4275,9 @@ class _VetOutboxStore {
           .map(_VetOutboxEntry.fromJson)
           .where((entry) =>
               entry.sessionId.isNotEmpty && entry.clientKey.isNotEmpty)
-          .toList(growable: false);
+          .toList(growable: true);
     } catch (_) {
-      return const [];
+      return <_VetOutboxEntry>[];
     }
   }
 
