@@ -99,6 +99,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Timer? _typingDebounce;
   Timer? _vetTypingClearTimer;
   Timer? _surveyReturnHomeTimer;
+  Timer? _recordingTicker;
   bool _isSending = false;
   bool _isReturningHome = false;
   bool _surveyLoading = false;
@@ -220,6 +221,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
     _typingDebounce?.cancel();
     _vetTypingClearTimer?.cancel();
+    _recordingTicker?.cancel();
     _aiChatLog(
         'dispose conversationId=$_conversationId totalMessages=${_messages.length}');
     _inputCtrl.dispose();
@@ -1641,6 +1643,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         _recordingVoice = true;
         _recordingStartedAt = DateTime.now();
       });
+      _recordingTicker?.cancel();
+      _recordingTicker = Timer.periodic(const Duration(milliseconds: 250), (_) {
+        if (mounted && _recordingVoice) setState(() {});
+      });
       unawaited(HapticFeedback.mediumImpact());
       _announceForAccessibility('Grabando nota de voz.');
     } catch (error) {
@@ -1659,6 +1665,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _recordingVoice = false;
       _recordingStartedAt = null;
     });
+    _recordingTicker?.cancel();
+    _recordingTicker = null;
     unawaited(HapticFeedback.lightImpact());
     final path = await _audioRecorder.stop();
     if (!send || path == null) return;
@@ -2816,6 +2824,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final topChromeHeight = topInset + 90;
     final topFadeHeight = topInset + 132;
     final bottomFadeHeight = bottomInset + 150;
+    final bottomListPadding = bottomInset +
+        (_stagedConsultAttachments.isNotEmpty || _recordingVoice ? 178 : 126);
     final showHomeIntro = _showsHomeIntro;
     final messageList = ListView.builder(
       controller: _scrollController,
@@ -2823,7 +2833,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         18,
         topChromeHeight,
         18,
-        bottomInset + 102,
+        bottomListPadding,
       ),
       itemCount: (showHomeIntro ? 1 : 0) + _messages.length,
       itemBuilder: (context, index) {
@@ -2930,6 +2940,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             mediaEnabled: _canSendConsultMedia,
             showMediaControls: _isConsultChatRoute,
             recording: _recordingVoice,
+            recordingStartedAt: _recordingStartedAt,
             stagedAttachments: _stagedConsultAttachments,
             includeBottomInset: true,
             onSend: _sendComposerMessage,
@@ -3477,7 +3488,9 @@ class _ConsultAttachmentStrip extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: attachments
           .map((attachment) => Padding(
-                padding: const EdgeInsets.only(bottom: 6),
+                padding: EdgeInsets.only(
+                    bottom:
+                        flushSingleImage && attachments.length == 1 ? 0 : 6),
                 child: _ConsultAttachmentPreview(
                   attachment: attachment,
                   clientKey: clientKey,
@@ -3569,8 +3582,9 @@ class _ConsultAttachmentPreview extends StatelessWidget {
     if (attachment.kind == _ConsultAttachmentKind.image &&
         (url != null || localPath != null)) {
       final image = localPath != null
-          ? Image.file(File(localPath), fit: BoxFit.cover)
-          : Image.network(url!, fit: BoxFit.cover);
+          ? Image.file(File(localPath),
+              fit: BoxFit.cover, gaplessPlayback: true)
+          : Image.network(url!, fit: BoxFit.cover, gaplessPlayback: true);
       return GestureDetector(
         onTap: () => _openImage(context),
         child: ClipRRect(
@@ -3631,7 +3645,7 @@ class _ConsultAttachmentPreview extends StatelessWidget {
           Flexible(
             child: Text(
               attachment.isUploading
-                  ? 'Subiendo $label ${_uploadProgressText(attachment)}'
+                  ? _uploadProgressText(attachment)
                   : _attachmentLabel(label, attachment),
               style: const TextStyle(
                 color: Colors.white,
@@ -3672,13 +3686,19 @@ class _AttachmentUploadOverlay extends StatelessWidget {
               Row(
                 children: [
                   Expanded(
-                    child: Text(
-                      'Subiendo ${_uploadProgressText(attachment)}',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                      ),
+                    child: Row(
+                      children: [
+                        _TinyUploadSpinner(progress: progress),
+                        const SizedBox(width: 7),
+                        Text(
+                          _uploadProgressText(attachment),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                   if (onCancel != null)
@@ -3708,6 +3728,26 @@ class _AttachmentUploadOverlay extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _TinyUploadSpinner extends StatelessWidget {
+  const _TinyUploadSpinner({required this.progress});
+
+  final double progress;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 12,
+      height: 12,
+      child: CircularProgressIndicator(
+        value: progress <= 0 ? null : progress,
+        strokeWidth: 1.6,
+        color: Colors.white,
+        backgroundColor: Colors.white.withValues(alpha: 0.18),
       ),
     );
   }
@@ -3940,7 +3980,7 @@ class _ConsultVoiceNoteBubbleState extends State<_ConsultVoiceNoteBubble> {
                   _failed
                       ? 'Toca para reintentar'
                       : widget.attachment.isUploading
-                          ? 'Subiendo nota de voz ${_uploadProgressText(widget.attachment)}'
+                          ? _uploadProgressText(widget.attachment)
                           : durationText,
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.7),
@@ -4139,7 +4179,7 @@ class _ConsultVideoBubbleState extends State<_ConsultVideoBubble> {
     final label = _failed
         ? 'Toca para reintentar'
         : widget.attachment.isUploading
-            ? 'Subiendo video ${_uploadProgressText(widget.attachment)}'
+            ? _uploadProgressText(widget.attachment)
             : duration.inMilliseconds > 0
                 ? '${_formatVoiceDuration(position)} / ${_formatVoiceDuration(duration)}'
                 : _attachmentLabel('Video', widget.attachment);
@@ -4641,6 +4681,7 @@ class _ChatComposer extends StatelessWidget {
     required this.mediaEnabled,
     required this.showMediaControls,
     required this.recording,
+    required this.recordingStartedAt,
     required this.stagedAttachments,
     required this.includeBottomInset,
     required this.onSend,
@@ -4656,6 +4697,7 @@ class _ChatComposer extends StatelessWidget {
   final bool mediaEnabled;
   final bool showMediaControls;
   final bool recording;
+  final DateTime? recordingStartedAt;
   final List<_PendingConsultAttachment> stagedAttachments;
   final bool includeBottomInset;
   final VoidCallback onSend;
@@ -4718,8 +4760,11 @@ class _ChatComposer extends StatelessWidget {
                         ),
                         decoration: InputDecoration(
                           border: InputBorder.none,
-                          hintText:
-                              sending ? 'Pensando...' : 'escribir mensaje...',
+                          hintText: recording
+                              ? _formatRecordingElapsed(recordingStartedAt)
+                              : sending
+                                  ? 'Pensando...'
+                                  : 'escribir mensaje...',
                           hintStyle: TextStyle(
                             color: Colors.white.withValues(alpha: 0.32),
                             fontSize: 14,
@@ -4805,17 +4850,28 @@ class _ChatComposer extends StatelessWidget {
                     ],
                     Padding(
                       padding: const EdgeInsets.only(bottom: 1),
-                      child: IconButton.filled(
-                        tooltip: 'Enviar mensaje',
-                        onPressed: sending ? null : onSend,
-                        style: IconButton.styleFrom(
-                          backgroundColor: Colors.white,
-                          disabledBackgroundColor:
-                              Colors.white.withValues(alpha: 0.25),
-                          foregroundColor: Colors.black,
-                          fixedSize: const Size(44, 44),
-                        ),
-                        icon: const Icon(Icons.arrow_upward_rounded, size: 19),
+                      child: ValueListenableBuilder<TextEditingValue>(
+                        valueListenable: controller,
+                        builder: (context, value, _) {
+                          final canSend = !sending &&
+                              (value.text.trim().isNotEmpty ||
+                                  stagedAttachments.isNotEmpty);
+                          return IconButton.filled(
+                            tooltip: 'Enviar mensaje',
+                            onPressed: canSend ? onSend : null,
+                            style: IconButton.styleFrom(
+                              backgroundColor: Colors.white,
+                              disabledBackgroundColor:
+                                  Colors.white.withValues(alpha: 0.16),
+                              disabledForegroundColor:
+                                  Colors.black.withValues(alpha: 0.36),
+                              foregroundColor: Colors.black,
+                              fixedSize: const Size(44, 44),
+                            ),
+                            icon: const Icon(Icons.arrow_upward_rounded,
+                                size: 19),
+                          );
+                        },
                       ),
                     ),
                   ],
@@ -4882,7 +4938,7 @@ class _ComposerAttachmentChip extends StatelessWidget {
         Container(
           width: isVoice ? 232 : 72,
           height: isVoice ? 62 : 72,
-          padding: EdgeInsets.all(isVoice ? 0 : 6),
+          padding: EdgeInsets.all(isVoice || isImage ? 0 : 6),
           decoration: BoxDecoration(
             color: Colors.black.withValues(alpha: 0.72),
             borderRadius: BorderRadius.circular(isVoice ? 18 : 14),
@@ -6361,6 +6417,14 @@ double? _asDouble(Object? value) {
 String _uploadProgressText(_ConsultAttachment attachment) {
   final percent = (attachment.uploadProgress.clamp(0.0, 1.0) * 100).round();
   return '$percent%';
+}
+
+String _formatRecordingElapsed(DateTime? startedAt) {
+  final elapsed =
+      startedAt == null ? Duration.zero : DateTime.now().difference(startedAt);
+  final minutes = elapsed.inMinutes.remainder(60).toString().padLeft(2, '0');
+  final seconds = elapsed.inSeconds.remainder(60).toString().padLeft(2, '0');
+  return '$minutes:$seconds';
 }
 
 String _chatDateLabel(DateTime date) {

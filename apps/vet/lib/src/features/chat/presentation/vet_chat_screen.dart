@@ -68,6 +68,7 @@ class _VetChatScreenState extends State<VetChatScreen>
   Timer? _draftDebounce;
   Timer? _typingDebounce;
   Timer? _remoteTypingClearTimer;
+  Timer? _recordingTicker;
   _VetHandoffBrief? _handoffBrief;
   Object? _consultLoadError;
   bool _sending = false;
@@ -154,6 +155,7 @@ class _VetChatScreenState extends State<VetChatScreen>
     }
     _typingDebounce?.cancel();
     _remoteTypingClearTimer?.cancel();
+    _recordingTicker?.cancel();
     _audioRecorder.dispose();
     _composerController.dispose();
     _composerFocusNode.dispose();
@@ -1498,6 +1500,10 @@ class _VetChatScreenState extends State<VetChatScreen>
         _recordingVoice = true;
         _recordingStartedAt = DateTime.now();
       });
+      _recordingTicker?.cancel();
+      _recordingTicker = Timer.periodic(const Duration(milliseconds: 250), (_) {
+        if (mounted && _recordingVoice) setState(() {});
+      });
       unawaited(HapticFeedback.mediumImpact());
       _announceForAccessibility('Grabando nota de voz.');
     } catch (error) {
@@ -1516,6 +1522,8 @@ class _VetChatScreenState extends State<VetChatScreen>
       _recordingVoice = false;
       _recordingStartedAt = null;
     });
+    _recordingTicker?.cancel();
+    _recordingTicker = null;
     unawaited(HapticFeedback.lightImpact());
     final path = await _audioRecorder.stop();
     if (!send || path == null) return;
@@ -1717,6 +1725,8 @@ class _VetChatScreenState extends State<VetChatScreen>
     final topChromeHeight = topInset + 90;
     final topFadeHeight = topInset + 132;
     final bottomFadeHeight = bottomInset + 150;
+    final bottomListPadding = bottomInset +
+        (_stagedVetAttachments.isNotEmpty || _recordingVoice ? 178 : 126);
     final hasHandoff = _handoffBrief != null || _handoffPending;
     final itemCount = (hasHandoff ? 1 : 0) + _consultMessages.length;
     final messageList = _consultLoading && itemCount == 0
@@ -1746,7 +1756,7 @@ class _VetChatScreenState extends State<VetChatScreen>
                       18,
                       topChromeHeight,
                       18,
-                      bottomInset + 102,
+                      bottomListPadding,
                     ),
                     itemCount: itemCount,
                     itemBuilder: (context, index) {
@@ -1830,6 +1840,7 @@ class _VetChatScreenState extends State<VetChatScreen>
             mediaEnabled: _canSendConsultMedia,
             showMediaControls: !_isAssistant,
             recording: _recordingVoice,
+            recordingStartedAt: _recordingStartedAt,
             stagedAttachments: _stagedVetAttachments,
             includeBottomInset: true,
             onSend: _sendMessage,
@@ -1896,6 +1907,7 @@ class _VetChatScreenState extends State<VetChatScreen>
             mediaEnabled: false,
             showMediaControls: false,
             recording: false,
+            recordingStartedAt: null,
             stagedAttachments: const [],
             includeBottomInset: true,
             onSend: _sendMessage,
@@ -2643,7 +2655,9 @@ class _VetAttachmentStrip extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: attachments
           .map((attachment) => Padding(
-                padding: const EdgeInsets.only(bottom: 6),
+                padding: EdgeInsets.only(
+                    bottom:
+                        flushSingleImage && attachments.length == 1 ? 0 : 6),
                 child: _VetAttachmentPreview(
                   attachment: attachment,
                   clientKey: clientKey,
@@ -2735,8 +2749,9 @@ class _VetAttachmentPreview extends StatelessWidget {
     if (attachment.kind == _VetAttachmentKind.image &&
         (url != null || localPath != null)) {
       final image = localPath != null
-          ? Image.file(File(localPath), fit: BoxFit.cover)
-          : Image.network(url!, fit: BoxFit.cover);
+          ? Image.file(File(localPath),
+              fit: BoxFit.cover, gaplessPlayback: true)
+          : Image.network(url!, fit: BoxFit.cover, gaplessPlayback: true);
       return GestureDetector(
         onTap: () => _openImage(context),
         child: ClipRRect(
@@ -2797,7 +2812,7 @@ class _VetAttachmentPreview extends StatelessWidget {
           Flexible(
             child: Text(
               attachment.isUploading
-                  ? 'Subiendo $label ${_vetUploadProgressText(attachment)}'
+                  ? _vetUploadProgressText(attachment)
                   : _vetAttachmentLabel(label, attachment),
               style: const TextStyle(
                 color: Colors.white,
@@ -2839,14 +2854,20 @@ class _VetAttachmentUploadOverlay extends StatelessWidget {
               Row(
                 children: [
                   Expanded(
-                    child: Text(
-                      'Subiendo ${_vetUploadProgressText(attachment)}',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 12,
-                        fontFamily: 'ABC Diatype',
-                        fontWeight: FontWeight.w600,
-                      ),
+                    child: Row(
+                      children: [
+                        _TinyUploadSpinner(progress: progress),
+                        const SizedBox(width: 7),
+                        Text(
+                          _vetUploadProgressText(attachment),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontFamily: 'ABC Diatype',
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                   if (onCancel != null)
@@ -2876,6 +2897,26 @@ class _VetAttachmentUploadOverlay extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _TinyUploadSpinner extends StatelessWidget {
+  const _TinyUploadSpinner({required this.progress});
+
+  final double progress;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 12,
+      height: 12,
+      child: CircularProgressIndicator(
+        value: progress <= 0 ? null : progress,
+        strokeWidth: 1.6,
+        color: Colors.white,
+        backgroundColor: Colors.white.withValues(alpha: 0.18),
       ),
     );
   }
@@ -3107,7 +3148,7 @@ class _VetVoiceNoteBubbleState extends State<_VetVoiceNoteBubble> {
                   _failed
                       ? 'Toca para reintentar'
                       : widget.attachment.isUploading
-                          ? 'Subiendo nota de voz ${_vetUploadProgressText(widget.attachment)}'
+                          ? _vetUploadProgressText(widget.attachment)
                           : durationText,
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.7),
@@ -3300,7 +3341,7 @@ class _VetVideoBubbleState extends State<_VetVideoBubble> {
     final label = _failed
         ? 'Toca para reintentar'
         : widget.attachment.isUploading
-            ? 'Subiendo video ${_vetUploadProgressText(widget.attachment)}'
+            ? _vetUploadProgressText(widget.attachment)
             : duration.inMilliseconds > 0
                 ? '${_formatVetVoiceDuration(position)} / ${_formatVetVoiceDuration(duration)}'
                 : _vetAttachmentLabel('Video', widget.attachment);
@@ -3689,6 +3730,7 @@ class _ChatComposer extends StatelessWidget {
     required this.mediaEnabled,
     required this.showMediaControls,
     required this.recording,
+    required this.recordingStartedAt,
     required this.stagedAttachments,
     required this.includeBottomInset,
     required this.onSend,
@@ -3704,6 +3746,7 @@ class _ChatComposer extends StatelessWidget {
   final bool mediaEnabled;
   final bool showMediaControls;
   final bool recording;
+  final DateTime? recordingStartedAt;
   final List<_PendingVetAttachment> stagedAttachments;
   final bool includeBottomInset;
   final VoidCallback onSend;
@@ -3768,8 +3811,11 @@ class _ChatComposer extends StatelessWidget {
                         ),
                         decoration: InputDecoration(
                           border: InputBorder.none,
-                          hintText:
-                              sending ? 'Pensando...' : 'escribir mensaje...',
+                          hintText: recording
+                              ? _formatRecordingElapsed(recordingStartedAt)
+                              : sending
+                                  ? 'Pensando...'
+                                  : 'escribir mensaje...',
                           hintStyle: TextStyle(
                             color: Colors.white.withValues(alpha: 0.32),
                             fontFamily: 'ABC Diatype',
@@ -3857,26 +3903,37 @@ class _ChatComposer extends StatelessWidget {
                     ],
                     Padding(
                       padding: const EdgeInsets.only(bottom: 1),
-                      child: IconButton.filled(
-                        tooltip: 'Enviar mensaje',
-                        onPressed: sending ? null : onSend,
-                        style: IconButton.styleFrom(
-                          backgroundColor: Colors.white,
-                          disabledBackgroundColor:
-                              Colors.white.withValues(alpha: 0.25),
-                          foregroundColor: Colors.black,
-                          fixedSize: const Size(44, 44),
-                        ),
-                        icon: sending
-                            ? const SizedBox(
-                                width: 15,
-                                height: 15,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.black,
-                                ),
-                              )
-                            : const Icon(Icons.arrow_upward_rounded, size: 19),
+                      child: ValueListenableBuilder<TextEditingValue>(
+                        valueListenable: controller,
+                        builder: (context, value, _) {
+                          final canSend = !sending &&
+                              (value.text.trim().isNotEmpty ||
+                                  stagedAttachments.isNotEmpty);
+                          return IconButton.filled(
+                            tooltip: 'Enviar mensaje',
+                            onPressed: canSend ? onSend : null,
+                            style: IconButton.styleFrom(
+                              backgroundColor: Colors.white,
+                              disabledBackgroundColor:
+                                  Colors.white.withValues(alpha: 0.16),
+                              disabledForegroundColor:
+                                  Colors.black.withValues(alpha: 0.36),
+                              foregroundColor: Colors.black,
+                              fixedSize: const Size(44, 44),
+                            ),
+                            icon: sending
+                                ? const SizedBox(
+                                    width: 15,
+                                    height: 15,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: Colors.black,
+                                    ),
+                                  )
+                                : const Icon(Icons.arrow_upward_rounded,
+                                    size: 19),
+                          );
+                        },
                       ),
                     ),
                   ],
@@ -4068,7 +4125,7 @@ class _ComposerAttachmentChip extends StatelessWidget {
         Container(
           width: isVoice ? 232 : 72,
           height: isVoice ? 62 : 72,
-          padding: EdgeInsets.all(isVoice ? 0 : 6),
+          padding: EdgeInsets.all(isVoice || isImage ? 0 : 6),
           decoration: BoxDecoration(
             color: Colors.black.withValues(alpha: 0.72),
             borderRadius: BorderRadius.circular(isVoice ? 18 : 14),
@@ -4807,6 +4864,14 @@ String _vetAttachmentLabel(String label, _VetAttachment attachment) {
 String _vetUploadProgressText(_VetAttachment attachment) {
   final percent = (attachment.uploadProgress.clamp(0.0, 1.0) * 100).round();
   return '$percent%';
+}
+
+String _formatRecordingElapsed(DateTime? startedAt) {
+  final elapsed =
+      startedAt == null ? Duration.zero : DateTime.now().difference(startedAt);
+  final minutes = elapsed.inMinutes.remainder(60).toString().padLeft(2, '0');
+  final seconds = elapsed.inSeconds.remainder(60).toString().padLeft(2, '0');
+  return '$minutes:$seconds';
 }
 
 String _vetChatDateLabel(DateTime date) {
