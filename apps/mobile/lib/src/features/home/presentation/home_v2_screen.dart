@@ -906,7 +906,12 @@ class _ActiveConsultStrip extends StatelessWidget {
       clipBehavior: Clip.none,
       child: Row(
         children: [
-          _ActivePetPill(consult: consult, onTap: () => onSelected(consult)),
+          _ActivePetPill(consult: consult),
+          const SizedBox(width: 14),
+          _ActiveConsultActionPill(
+            mode: consult.mode,
+            onTap: () => onSelected(consult),
+          ),
           const SizedBox(width: 14),
           _ActiveMetaPill(label: consult.priorityLabel),
           const SizedBox(width: 14),
@@ -918,20 +923,66 @@ class _ActiveConsultStrip extends StatelessWidget {
 }
 
 class _ActivePetPill extends StatelessWidget {
-  const _ActivePetPill({required this.consult, required this.onTap});
+  const _ActivePetPill({required this.consult});
 
   final _ActiveConsult consult;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 51,
+      constraints: const BoxConstraints(minWidth: 111, maxWidth: 150),
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      decoration: BoxDecoration(
+        color: Colors.black,
+        borderRadius: BorderRadius.circular(40),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            consult.mode == 'video'
+                ? Icons.videocam_rounded
+                : Icons.chat_bubble_outline_rounded,
+            color: Colors.white,
+            size: 17,
+          ),
+          const SizedBox(width: 14),
+          Flexible(
+            child: Text(
+              consult.petName,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 13,
+                fontFamily: 'ABCDiatype',
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ActiveConsultActionPill extends StatelessWidget {
+  const _ActiveConsultActionPill({required this.mode, required this.onTap});
+
+  final String mode;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
+    final isVideo = mode == 'video';
     return GestureDetector(
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
       child: Container(
         height: 51,
-        constraints: const BoxConstraints(minWidth: 111, maxWidth: 150),
-        padding: const EdgeInsets.symmetric(horizontal: 20),
+        constraints: const BoxConstraints(minWidth: 116, maxWidth: 142),
+        padding: const EdgeInsets.symmetric(horizontal: 18),
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(40),
@@ -940,16 +991,14 @@ class _ActivePetPill extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(
-              consult.mode == 'video'
-                  ? Icons.videocam_rounded
-                  : Icons.chat_bubble_outline_rounded,
+              isVideo ? Icons.videocam_rounded : Icons.chat_bubble_rounded,
               color: Colors.black,
-              size: 17,
+              size: isVideo ? 17 : 16,
             ),
-            const SizedBox(width: 14),
+            const SizedBox(width: 10),
             Flexible(
               child: Text(
-                consult.petName,
+                isVideo ? 'unirse' : 'abrir chat',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(

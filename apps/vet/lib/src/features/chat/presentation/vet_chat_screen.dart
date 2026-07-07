@@ -1335,6 +1335,13 @@ class _VetChatScreenState extends State<VetChatScreen>
           children: [
             ListTile(
               leading:
+                  const Icon(Icons.photo_camera_rounded, color: Colors.white),
+              title:
+                  const Text('cámara', style: TextStyle(color: Colors.white)),
+              onTap: () => Navigator.of(context).pop(_VetMediaChoice.camera),
+            ),
+            ListTile(
+              leading:
                   const Icon(Icons.photo_library_rounded, color: Colors.white),
               title:
                   const Text('imágenes', style: TextStyle(color: Colors.white)),
@@ -1351,7 +1358,18 @@ class _VetChatScreenState extends State<VetChatScreen>
     );
     if (choice == null) return;
     try {
-      if (choice == _VetMediaChoice.images) {
+      if (choice == _VetMediaChoice.camera) {
+        final file = await _imagePicker.pickImage(
+          source: ImageSource.camera,
+          imageQuality: 82,
+          maxWidth: 1800,
+          maxHeight: 1800,
+        );
+        if (file == null) return;
+        _stageVetAttachments([
+          await _pendingAttachmentFromXFile(file, _VetAttachmentKind.image)
+        ]);
+      } else if (choice == _VetMediaChoice.images) {
         final files = await _imagePicker.pickMultiImage(
           imageQuality: 82,
           maxWidth: 1800,
@@ -4345,7 +4363,7 @@ class _VetChatMessage {
 
 enum _VetAttachmentKind { image, video, voice }
 
-enum _VetMediaChoice { images, video }
+enum _VetMediaChoice { camera, images, video }
 
 class _PendingVetAttachment {
   const _PendingVetAttachment({

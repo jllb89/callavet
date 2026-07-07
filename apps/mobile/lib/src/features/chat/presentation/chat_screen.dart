@@ -1472,6 +1472,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           children: [
             ListTile(
               leading:
+                  const Icon(Icons.photo_camera_rounded, color: Colors.white),
+              title:
+                  const Text('cámara', style: TextStyle(color: Colors.white)),
+              onTap: () =>
+                  Navigator.of(context).pop(_ConsultMediaChoice.camera),
+            ),
+            ListTile(
+              leading:
                   const Icon(Icons.photo_library_rounded, color: Colors.white),
               title:
                   const Text('imágenes', style: TextStyle(color: Colors.white)),
@@ -1489,7 +1497,18 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
     if (choice == null) return;
     try {
-      if (choice == _ConsultMediaChoice.images) {
+      if (choice == _ConsultMediaChoice.camera) {
+        final file = await _imagePicker.pickImage(
+          source: ImageSource.camera,
+          imageQuality: 82,
+          maxWidth: 1800,
+          maxHeight: 1800,
+        );
+        if (file == null) return;
+        _stageConsultAttachments([
+          await _pendingAttachmentFromXFile(file, _ConsultAttachmentKind.image)
+        ]);
+      } else if (choice == _ConsultMediaChoice.images) {
         final files = await _imagePicker.pickMultiImage(
           imageQuality: 82,
           maxWidth: 1800,
@@ -5117,7 +5136,7 @@ enum _ChatRole { user, vet, assistant }
 
 enum _ConsultAttachmentKind { image, video, voice }
 
-enum _ConsultMediaChoice { images, video }
+enum _ConsultMediaChoice { camera, images, video }
 
 class _PendingConsultAttachment {
   const _PendingConsultAttachment({
