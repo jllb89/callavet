@@ -2637,6 +2637,7 @@ class _VetQueue {
               ?.map(_asMap)
               .whereType<Map<String, dynamic>>()
               .map(_ActiveConsult.fromJson)
+              .where((consult) => consult.isActive)
               .toList() ??
           const <_ActiveConsult>[],
       upcomingAppointments: _asList(json['upcomingAppointments'])
@@ -2687,9 +2688,12 @@ class _ActiveConsult {
   final String? specialtyName;
   final String? priority;
 
-  bool get canJoinVideo => mode == 'video' && sessionId.trim().isNotEmpty;
-  bool get canOpenChat => mode == 'chat' && sessionId.trim().isNotEmpty;
-  bool get canEnd => status.toLowerCase() == 'active';
+  bool get isActive => status.trim().toLowerCase() == 'active';
+  bool get canJoinVideo =>
+      isActive && mode == 'video' && sessionId.trim().isNotEmpty;
+  bool get canOpenChat =>
+      isActive && mode == 'chat' && sessionId.trim().isNotEmpty;
+  bool get canEnd => isActive;
   String get startedLabel => startedAt == null
       ? 'inicio por confirmar'
       : 'inició ${_formatShortDateTime(startedAt!)}';

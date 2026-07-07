@@ -480,6 +480,7 @@ export class VetsController {
       left join video_session_lifecycle v on v.session_id = a.session_id
           where a.vet_id = $1::uuid
             and a.status = 'active'
+            and coalesce(s.status, 'active') = 'active'
             and a.starts_at >= now() - ($2::int * interval '1 minute')
             and (
               coalesce(s.mode, 'video') <> 'video'
@@ -504,26 +505,13 @@ export class VetsController {
                  s.specialty_id,
                  vs.name as specialty_name,
                  s.priority,
-                case
-                  when coalesce(s.mode, 'chat') = 'chat'
-                   and s.status = 'completed'
-                   and s.ended_at >= now() - interval '5 minutes'
-                  then 'rejoin_grace'
-                  else v.status
-                end as lifecycle_status
+                v.status as lifecycle_status
            from chat_sessions s
            join users u on u.id = s.user_id
              left join vet_specialties vs on vs.id = s.specialty_id
       left join video_session_lifecycle v on v.session_id = s.id
           where s.vet_id = $1::uuid
-            and (
-              s.status = 'active'
-              or (
-                coalesce(s.mode, 'chat') = 'chat'
-                and s.status = 'completed'
-                and s.ended_at >= now() - interval '5 minutes'
-              )
-            )
+            and s.status = 'active'
             and coalesce(s.started_at, s.created_at) >= now() - ($2::int * interval '1 minute')
             and (
               coalesce(s.mode, 'chat') <> 'video'

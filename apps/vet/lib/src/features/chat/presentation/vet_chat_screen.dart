@@ -81,6 +81,7 @@ class _VetChatScreenState extends State<VetChatScreen>
   bool _ownerTyping = false;
   bool _handoffPending = false;
   bool _outboxFlushing = false;
+  bool _catchUpInFlight = false;
   bool _showDraftRestoredBanner = false;
   int _reconnectAttempts = 0;
   int _handoffRetryAttempts = 0;
@@ -266,17 +267,23 @@ class _VetChatScreenState extends State<VetChatScreen>
             : payload.oldRecord;
         final message = _VetChatMessage.fromJson(record);
         if (message.id.isEmpty) {
-          _scheduleRefresh();
+          _scheduleFullRefresh();
           return;
         }
         if (_hasStreamGap(message)) _scheduleRefresh();
-        if (message.attachments.isEmpty) _scheduleRefresh();
         _upsertConsultMessage(message);
+        if (message.role != 'vet' || message.content.trim().isEmpty) {
+          _scheduleFullRefresh();
+        }
       },
     )
         .subscribe((status, [_]) {
       if (!identical(_messagesChannel, channel)) return;
-      _handleRealtimeStatus(status);
+      _handleRealtimeStatus(
+        status,
+        drivesReconnect: true,
+        catchUpOnSubscribe: true,
+      );
     });
   }
 
@@ -367,15 +374,18 @@ class _VetChatScreenState extends State<VetChatScreen>
           callback: (payload) {
             final record = _asMap(payload['message']);
             if (record == null) {
-              _scheduleRefresh();
+              _scheduleFullRefresh();
               return;
             }
             final message = _VetChatMessage.fromJson(record);
             if (message.id.isEmpty) {
-              _scheduleRefresh();
+              _scheduleFullRefresh();
               return;
             }
             _upsertConsultMessage(message);
+            if (message.role != 'vet' || message.content.trim().isEmpty) {
+              _scheduleFullRefresh();
+            }
           },
         )
         .onPresenceSync((_) => _syncOwnerPresence(channel))
@@ -394,18 +404,25 @@ class _VetChatScreenState extends State<VetChatScreen>
     });
   }
 
-  void _handleRealtimeStatus(RealtimeSubscribeStatus status) {
+  void _handleRealtimeStatus(
+    RealtimeSubscribeStatus status, {
+    bool drivesReconnect = false,
+    bool catchUpOnSubscribe = false,
+  }) {
     if (!mounted || _disposing) return;
     if (status == RealtimeSubscribeStatus.subscribed) {
-      _reconnectAttempts = 0;
-      _reconnectTimer?.cancel();
+      if (drivesReconnect) {
+        _reconnectAttempts = 0;
+        _reconnectTimer?.cancel();
+      }
       if (_realtimeStatus != null) {
         if (!mounted || _disposing) return;
         setState(() => _realtimeStatus = null);
       }
-      unawaited(_catchUpMessages());
+      if (catchUpOnSubscribe) unawaited(_catchUpMessages());
       return;
     }
+    if (!drivesReconnect) return;
     if (!mounted || _disposing) return;
     setState(() {
       _realtimeStatus = switch (status) {
@@ -531,6 +548,14 @@ class _VetChatScreenState extends State<VetChatScreen>
         Timer(const Duration(milliseconds: 450), _refreshMessages);
   }
 
+  void _scheduleFullRefresh() {
+    _refreshDebounce?.cancel();
+    _refreshDebounce = Timer(
+      const Duration(milliseconds: 450),
+      () => unawaited(_loadConsultThread()),
+    );
+  }
+
   void _scheduleHandoffRetry() {
     if (_isAssistant || _handoffBrief != null || _consultClosed) return;
     if (_handoffRetryAttempts >= _maxHandoffRetryAttempts) return;
@@ -585,9 +610,9 @@ class _VetChatScreenState extends State<VetChatScreen>
   bool _shouldShowDateSeparator(
       _VetChatMessage? previous, _VetChatMessage current) {
     final currentDate = current.createdAt;
-    if (currentDate == null) return previous == null;
+    if (currentDate == null) return false;
     final previousDate = previous?.createdAt;
-    if (previousDate == null) return true;
+    if (previousDate == null) return false;
     return previousDate.year != currentDate.year ||
         previousDate.month != currentDate.month ||
         previousDate.day != currentDate.day;
@@ -595,13 +620,15 @@ class _VetChatScreenState extends State<VetChatScreen>
 
   Future<void> _catchUpMessages() async {
     if (_isAssistant) return;
+    if (_catchUpInFlight) return;
+    _catchUpInFlight = true;
     final afterStreamOrder = _lastConsultStreamOrder;
-    if (afterStreamOrder <= 0) {
-      await _loadConsultThread();
-      return;
-    }
-    final startedAt = DateTime.now();
     try {
+      if (afterStreamOrder <= 0) {
+        await _loadConsultThread();
+        return;
+      }
+      final startedAt = DateTime.now();
       final response = await _getGatewayJson(
         '/sessions/${Uri.encodeComponent(widget.sessionId)}/messages?afterStreamOrder=$afterStreamOrder&limit=100&sort=stream_order.asc',
       );
@@ -637,6 +664,8 @@ class _VetChatScreenState extends State<VetChatScreen>
       );
     } catch (_) {
       await _loadConsultThread();
+    } finally {
+      _catchUpInFlight = false;
     }
   }
 
@@ -1789,6 +1818,7 @@ class _VetChatScreenState extends State<VetChatScreen>
             focusNode: _composerFocusNode,
             sending: _sending || _endingConsult || _consultClosed,
             mediaEnabled: _canSendConsultMedia,
+            showMediaControls: !_isAssistant,
             recording: _recordingVoice,
             stagedAttachments: _stagedVetAttachments,
             includeBottomInset: true,
@@ -1854,6 +1884,7 @@ class _VetChatScreenState extends State<VetChatScreen>
             focusNode: _composerFocusNode,
             sending: _sending,
             mediaEnabled: false,
+            showMediaControls: false,
             recording: false,
             stagedAttachments: const [],
             includeBottomInset: true,
@@ -2499,6 +2530,12 @@ class _ChatBubble extends StatelessWidget {
     final widthFactor = isVet ? 0.66 : 0.72;
     final fixedCap = isVet ? 350.0 : 380.0;
     final maxBubbleWidth = math.min(viewportWidth * widthFactor, fixedCap);
+    final trimmedContent = message.content.trim();
+    final isVoiceOnly = trimmedContent.isEmpty &&
+        message.attachments.length == 1 &&
+        message.attachments.first.kind == _VetAttachmentKind.voice;
+    final isEmptyPlaceholder =
+        trimmedContent.isEmpty && message.attachments.isEmpty;
     return Align(
       alignment: isVet ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
@@ -2508,42 +2545,51 @@ class _ChatBubble extends StatelessWidget {
           crossAxisAlignment:
               isVet ? CrossAxisAlignment.end : CrossAxisAlignment.start,
           children: [
-            DecoratedBox(
-              decoration: BoxDecoration(
-                color: isVet ? const Color(0xFF242426) : Colors.black,
-                borderRadius: BorderRadius.only(
-                  topLeft: const Radius.circular(22),
-                  topRight: const Radius.circular(22),
-                  bottomLeft: Radius.circular(isVet ? 22 : 6),
-                  bottomRight: Radius.circular(isVet ? 6 : 22),
+            if (!isEmptyPlaceholder)
+              if (isVoiceOnly)
+                _VetAttachmentStrip(
+                  attachments: message.attachments,
+                  clientKey: message.clientKey,
+                  onCancelUpload: onCancelUpload,
+                  onRefreshAttachment: onRefreshAttachment,
+                )
+              else
+                DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: isVet ? const Color(0xFF242426) : Colors.black,
+                    borderRadius: BorderRadius.only(
+                      topLeft: const Radius.circular(22),
+                      topRight: const Radius.circular(22),
+                      bottomLeft: Radius.circular(isVet ? 22 : 6),
+                      bottomRight: Radius.circular(isVet ? 6 : 22),
+                    ),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 18, vertical: 13),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (trimmedContent.isNotEmpty)
+                          isAi
+                              ? _AiMessageContent(
+                                  content: message.content, style: messageStyle)
+                              : Text(message.content, style: messageStyle),
+                        if (message.attachments.isNotEmpty) ...[
+                          if (trimmedContent.isNotEmpty)
+                            const SizedBox(height: 10),
+                          _VetAttachmentStrip(
+                            attachments: message.attachments,
+                            clientKey: message.clientKey,
+                            onCancelUpload: onCancelUpload,
+                            onRefreshAttachment: onRefreshAttachment,
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
                 ),
-              ),
-              child: Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 18, vertical: 13),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (message.content.trim().isNotEmpty)
-                      isAi
-                          ? _AiMessageContent(
-                              content: message.content, style: messageStyle)
-                          : Text(message.content, style: messageStyle),
-                    if (message.attachments.isNotEmpty) ...[
-                      if (message.content.trim().isNotEmpty)
-                        const SizedBox(height: 10),
-                      _VetAttachmentStrip(
-                        attachments: message.attachments,
-                        clientKey: message.clientKey,
-                        onCancelUpload: onCancelUpload,
-                        onRefreshAttachment: onRefreshAttachment,
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            ),
             const SizedBox(height: 4),
             Text(
               message.label(ownerName: ownerName),
@@ -2834,7 +2880,8 @@ class _VetVoiceNoteBubbleState extends State<_VetVoiceNoteBubble> {
   void didUpdateWidget(covariant _VetVoiceNoteBubble oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.attachment.id != widget.attachment.id ||
-        oldWidget.attachment.downloadUrl != widget.attachment.downloadUrl) {
+        oldWidget.attachment.downloadUrl != widget.attachment.downloadUrl ||
+        oldWidget.attachment.localPath != widget.attachment.localPath) {
       _downloadUrl = widget.attachment.downloadUrl;
       _loaded = false;
       _failed = false;
@@ -2867,7 +2914,7 @@ class _VetVoiceNoteBubbleState extends State<_VetVoiceNoteBubble> {
       await _player.pause();
       return;
     }
-    final source = _downloadUrl;
+    final source = widget.attachment.localPath ?? _downloadUrl;
     if (source == null || source.isEmpty) return;
     _activeVetVoiceNoteId.value = widget.attachment.id;
     if (!_loaded || _failed) {
@@ -2876,11 +2923,16 @@ class _VetVoiceNoteBubbleState extends State<_VetVoiceNoteBubble> {
         _failed = false;
       });
       try {
-        await _player.setUrl(source);
+        if (widget.attachment.localPath != null) {
+          await _player.setFilePath(widget.attachment.localPath!);
+        } else {
+          await _player.setUrl(source);
+        }
         if (!mounted) return;
         setState(() => _loaded = true);
       } catch (error) {
-        if (await _refreshDownloadUrl()) {
+        if (widget.attachment.localPath == null &&
+            await _refreshDownloadUrl()) {
           try {
             await _player.setUrl(_downloadUrl!);
             if (!mounted) return;
@@ -3576,6 +3628,7 @@ class _ChatComposer extends StatelessWidget {
     required this.focusNode,
     required this.sending,
     required this.mediaEnabled,
+    required this.showMediaControls,
     required this.recording,
     required this.stagedAttachments,
     required this.includeBottomInset,
@@ -3590,6 +3643,7 @@ class _ChatComposer extends StatelessWidget {
   final FocusNode focusNode;
   final bool sending;
   final bool mediaEnabled;
+  final bool showMediaControls;
   final bool recording;
   final List<_PendingVetAttachment> stagedAttachments;
   final bool includeBottomInset;
@@ -3665,68 +3719,71 @@ class _ChatComposer extends StatelessWidget {
                         ),
                       ),
                     ),
-                    const SizedBox(width: 8),
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 5),
-                      child: IconButton(
-                        tooltip: 'Adjuntar imagen o video',
-                        onPressed: mediaEnabled ? onPickMedia : null,
-                        visualDensity: VisualDensity.compact,
-                        style: IconButton.styleFrom(
-                          fixedSize: const Size(44, 44),
-                          padding: EdgeInsets.zero,
-                        ),
-                        icon: SvgPicture.asset(
-                          'assets/icons/image-video.svg',
-                          width: 17,
-                          height: 17,
-                          colorFilter: ColorFilter.mode(
-                            Colors.white
-                                .withValues(alpha: mediaEnabled ? 0.72 : 0.24),
-                            BlendMode.srcIn,
+                    if (showMediaControls) ...[
+                      const SizedBox(width: 8),
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 5),
+                        child: IconButton(
+                          tooltip: 'Adjuntar imagen o video',
+                          onPressed: mediaEnabled ? onPickMedia : null,
+                          visualDensity: VisualDensity.compact,
+                          style: IconButton.styleFrom(
+                            fixedSize: const Size(44, 44),
+                            padding: EdgeInsets.zero,
+                          ),
+                          icon: SvgPicture.asset(
+                            'assets/icons/image-video.svg',
+                            width: 17,
+                            height: 17,
+                            colorFilter: ColorFilter.mode(
+                              Colors.white.withValues(
+                                  alpha: mediaEnabled ? 0.72 : 0.24),
+                              BlendMode.srcIn,
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 5),
-                      child: Semantics(
-                        button: true,
-                        enabled: mediaEnabled,
-                        label: recording
-                            ? 'Soltar para adjuntar nota de voz'
-                            : 'Mantener presionado para grabar nota de voz',
-                        child: Tooltip(
-                          message: recording ? 'Soltar voz' : 'Grabar voz',
-                          child: GestureDetector(
-                            onTapDown:
-                                mediaEnabled ? (_) => onMicStart() : null,
-                            onTapUp: mediaEnabled ? (_) => onMicStop() : null,
-                            onTapCancel: mediaEnabled
-                                ? () => onMicStop(send: false)
-                                : null,
-                            behavior: HitTestBehavior.opaque,
-                            child: SizedBox(
-                              width: 44,
-                              height: 44,
-                              child: Center(
-                                child: AnimatedContainer(
-                                  duration: const Duration(milliseconds: 140),
-                                  width: 34,
-                                  height: 34,
-                                  decoration: BoxDecoration(
-                                    color: recording
-                                        ? Colors.white
-                                        : Colors.transparent,
-                                    shape: BoxShape.circle,
-                                  ),
-                                  child: Icon(
-                                    Icons.mic_rounded,
-                                    size: 18,
-                                    color: recording
-                                        ? Colors.black
-                                        : Colors.white.withValues(
-                                            alpha: mediaEnabled ? 0.72 : 0.24),
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 5),
+                        child: Semantics(
+                          button: true,
+                          enabled: mediaEnabled,
+                          label: recording
+                              ? 'Soltar para adjuntar nota de voz'
+                              : 'Mantener presionado para grabar nota de voz',
+                          child: Tooltip(
+                            message: recording ? 'Soltar voz' : 'Grabar voz',
+                            child: GestureDetector(
+                              onTapDown:
+                                  mediaEnabled ? (_) => onMicStart() : null,
+                              onTapUp: mediaEnabled ? (_) => onMicStop() : null,
+                              onTapCancel: mediaEnabled
+                                  ? () => onMicStop(send: false)
+                                  : null,
+                              behavior: HitTestBehavior.opaque,
+                              child: SizedBox(
+                                width: 44,
+                                height: 44,
+                                child: Center(
+                                  child: AnimatedContainer(
+                                    duration: const Duration(milliseconds: 140),
+                                    width: 34,
+                                    height: 34,
+                                    decoration: BoxDecoration(
+                                      color: recording
+                                          ? Colors.white
+                                          : Colors.transparent,
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: Icon(
+                                      Icons.mic_rounded,
+                                      size: 18,
+                                      color: recording
+                                          ? Colors.black
+                                          : Colors.white.withValues(
+                                              alpha:
+                                                  mediaEnabled ? 0.72 : 0.24),
+                                    ),
                                   ),
                                 ),
                               ),
@@ -3734,8 +3791,8 @@ class _ChatComposer extends StatelessWidget {
                           ),
                         ),
                       ),
-                    ),
-                    const SizedBox(width: 4),
+                      const SizedBox(width: 4),
+                    ],
                     Padding(
                       padding: const EdgeInsets.only(bottom: 1),
                       child: IconButton.filled(
@@ -3816,81 +3873,43 @@ class _ComposerAttachmentChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final label = switch (attachment.kind) {
-      _VetAttachmentKind.image => 'Imagen',
-      _VetAttachmentKind.video => 'Video',
-      _VetAttachmentKind.voice => 'Voz',
-    };
+    final isImage = attachment.kind == _VetAttachmentKind.image;
+    final isVoice = attachment.kind == _VetAttachmentKind.voice;
     return Stack(
       clipBehavior: Clip.none,
       children: [
         Container(
-          width: 142,
-          padding: const EdgeInsets.all(10),
+          width: isVoice ? 232 : 72,
+          height: isVoice ? 62 : 72,
+          padding: EdgeInsets.all(isVoice ? 0 : 6),
           decoration: BoxDecoration(
             color: Colors.black.withValues(alpha: 0.72),
-            borderRadius: BorderRadius.circular(16),
+            borderRadius: BorderRadius.circular(isVoice ? 18 : 14),
             border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
           ),
-          child: Row(
-            children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(10),
-                child: SizedBox(
-                  width: 44,
-                  height: 44,
-                  child: attachment.kind == _VetAttachmentKind.image
+          child: isVoice
+              ? _VetVoiceNoteBubble(
+                  attachment: attachment.toComposerAttachment())
+              : ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: isImage
                       ? Image.file(File(attachment.path), fit: BoxFit.cover)
                       : ColoredBox(
                           color: Colors.white.withValues(alpha: 0.10),
-                          child: Icon(
-                            attachment.kind == _VetAttachmentKind.video
-                                ? Icons.play_arrow_rounded
-                                : Icons.mic_rounded,
+                          child: const Icon(
+                            Icons.play_arrow_rounded,
                             color: Colors.white,
-                            size: 22,
+                            size: 24,
                           ),
                         ),
                 ),
-              ),
-              const SizedBox(width: 9),
-              Expanded(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      sending ? 'Subiendo' : 'Listo',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.52),
-                        fontSize: 10,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
         ),
         Positioned(
-          top: -13,
-          right: -13,
+          top: -8,
+          right: -8,
           child: SizedBox(
-            width: 44,
-            height: 44,
+            width: 32,
+            height: 32,
             child: Center(
               child: IconButton.filled(
                 tooltip: 'Quitar adjunto',
@@ -3899,10 +3918,10 @@ class _ComposerAttachmentChip extends StatelessWidget {
                   backgroundColor: Colors.white,
                   disabledBackgroundColor: Colors.white.withValues(alpha: 0.35),
                   foregroundColor: Colors.black,
-                  fixedSize: const Size(30, 30),
+                  fixedSize: const Size(22, 22),
                   padding: EdgeInsets.zero,
                 ),
-                icon: const Icon(Icons.close_rounded, size: 15),
+                icon: const Icon(Icons.close_rounded, size: 13),
               ),
             ),
           ),
@@ -4150,6 +4169,15 @@ class _PendingVetAttachment {
         localPath: path,
         status: 'uploading',
         uploadProgress: 0,
+      );
+
+  _VetAttachment toComposerAttachment() => _VetAttachment(
+        id: path,
+        kind: kind,
+        contentType: contentType,
+        byteSize: byteSize,
+        durationMs: durationMs,
+        localPath: path,
       );
 }
 

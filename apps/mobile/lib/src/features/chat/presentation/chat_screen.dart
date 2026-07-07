@@ -111,6 +111,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   bool _vetTyping = false;
   bool _vetEnteredAnnounced = false;
   bool _consultOutboxFlushing = false;
+  bool _consultCatchUpInFlight = false;
   bool _showConsultDraftRestoredBanner = false;
   int _consultReconnectAttempts = 0;
   DateTime? _lastVetTypingAt;
@@ -412,17 +413,24 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             : payload.oldRecord;
         final message = _ChatMessage.consultFromJson(record);
         if (message.id.isEmpty) {
-          _scheduleConsultRefresh();
+          _scheduleConsultFullRefresh();
           return;
         }
         if (_hasConsultStreamGap(message)) _scheduleConsultRefresh();
-        if (message.attachments.isEmpty) _scheduleConsultRefresh();
         _upsertConsultMessage(message);
+        if (!message.isUser || message.text.trim().isEmpty) {
+          _scheduleConsultFullRefresh();
+        }
       },
     )
         .subscribe((status, [_]) {
       if (!identical(_consultMessagesChannel, messagesChannel)) return;
-      _handleConsultRealtimeStatus(sessionId, status);
+      _handleConsultRealtimeStatus(
+        sessionId,
+        status,
+        drivesReconnect: true,
+        catchUpOnSubscribe: true,
+      );
     });
 
     final sessionChannel =
@@ -504,15 +512,18 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           callback: (payload) {
             final record = _asMap(payload['message']);
             if (record == null) {
-              _scheduleConsultRefresh();
+              _scheduleConsultFullRefresh();
               return;
             }
             final message = _ChatMessage.consultFromJson(record);
             if (message.id.isEmpty) {
-              _scheduleConsultRefresh();
+              _scheduleConsultFullRefresh();
               return;
             }
             _upsertConsultMessage(message);
+            if (!message.isUser || message.text.trim().isEmpty) {
+              _scheduleConsultFullRefresh();
+            }
           },
         )
         .onPresenceSync((_) => _syncVetPresence(channel))
@@ -532,18 +543,25 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   void _handleConsultRealtimeStatus(
-      String sessionId, RealtimeSubscribeStatus status) {
+    String sessionId,
+    RealtimeSubscribeStatus status, {
+    bool drivesReconnect = false,
+    bool catchUpOnSubscribe = false,
+  }) {
     if (!mounted || _disposing) return;
     if (status == RealtimeSubscribeStatus.subscribed) {
-      _consultReconnectAttempts = 0;
-      _consultReconnectTimer?.cancel();
+      if (drivesReconnect) {
+        _consultReconnectAttempts = 0;
+        _consultReconnectTimer?.cancel();
+      }
       if (_consultRealtimeStatus != null) {
         if (!mounted || _disposing) return;
         setState(() => _consultRealtimeStatus = null);
       }
-      unawaited(_catchUpConsultMessages(sessionId));
+      if (catchUpOnSubscribe) unawaited(_catchUpConsultMessages(sessionId));
       return;
     }
+    if (!drivesReconnect) return;
     if (!mounted || _disposing) return;
     setState(() {
       _consultRealtimeStatus = switch (status) {
@@ -659,6 +677,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         Timer(const Duration(milliseconds: 350), _refreshConsultMessages);
   }
 
+  void _scheduleConsultFullRefresh() {
+    _consultRefreshDebounce?.cancel();
+    _consultRefreshDebounce = Timer(
+      const Duration(milliseconds: 350),
+      () => unawaited(_loadConsultMessages()),
+    );
+  }
+
   void _refreshConsultMessages() {
     if (!mounted) return;
     final sessionId = _consultSessionId;
@@ -677,13 +703,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _catchUpConsultMessages(String sessionId) async {
+    if (_consultCatchUpInFlight) return;
+    _consultCatchUpInFlight = true;
     final afterStreamOrder = _lastConsultStreamOrder;
-    if (afterStreamOrder <= 0) {
-      await _loadConsultMessages();
-      return;
-    }
-    final startedAt = DateTime.now();
     try {
+      if (afterStreamOrder <= 0) {
+        await _loadConsultMessages();
+        return;
+      }
+      final startedAt = DateTime.now();
       final response = await _getGatewayJson(
         '/sessions/${Uri.encodeComponent(sessionId)}/messages?afterStreamOrder=$afterStreamOrder&limit=100&sort=stream_order.asc',
       );
@@ -719,14 +747,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       );
     } catch (error) {
       _aiChatLog('consult catch-up failed: ${error.runtimeType} $error');
+    } finally {
+      _consultCatchUpInFlight = false;
     }
   }
 
   bool _shouldShowDateSeparator(_ChatMessage? previous, _ChatMessage current) {
     final currentDate = current.createdAt;
-    if (currentDate == null) return previous == null;
+    if (currentDate == null) return false;
     final previousDate = previous?.createdAt;
-    if (previousDate == null) return true;
+    if (previousDate == null) return false;
     return previousDate.year != currentDate.year ||
         previousDate.month != currentDate.month ||
         previousDate.day != currentDate.day;
@@ -2888,6 +2918,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 _endingConsult ||
                 (_consultLoading && _messages.isEmpty),
             mediaEnabled: _canSendConsultMedia,
+            showMediaControls: _isConsultChatRoute,
             recording: _recordingVoice,
             stagedAttachments: _stagedConsultAttachments,
             includeBottomInset: true,
@@ -3270,6 +3301,11 @@ class _MessageBubble extends StatelessWidget {
     final widthFactor = isUser ? 0.66 : 0.72;
     final fixedCap = isUser ? 350.0 : 380.0;
     final maxBubbleWidth = math.min(viewportWidth * widthFactor, fixedCap);
+    final trimmedText = message.text.trim();
+    final isVoiceOnly = trimmedText.isEmpty &&
+        message.attachments.length == 1 &&
+        message.attachments.first.kind == _ConsultAttachmentKind.voice;
+    final isEmptyPlaceholder = trimmedText.isEmpty && !message.hasAttachments;
     const messageTextStyle = TextStyle(
       color: textColor,
       fontSize: 15,
@@ -3289,45 +3325,54 @@ class _MessageBubble extends StatelessWidget {
             crossAxisAlignment:
                 isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
             children: [
-              DecoratedBox(
-                decoration: BoxDecoration(
-                  color: bubbleColor,
-                  borderRadius: BorderRadius.only(
-                    topLeft: const Radius.circular(22),
-                    topRight: const Radius.circular(22),
-                    bottomLeft: Radius.circular(isUser ? 22 : 6),
-                    bottomRight: Radius.circular(isUser ? 6 : 22),
+              if (!isEmptyPlaceholder)
+                if (isVoiceOnly)
+                  _ConsultAttachmentStrip(
+                    attachments: message.attachments,
+                    clientKey: message.clientKey,
+                    onCancelUpload: onCancelUpload,
+                    onRefreshAttachment: onRefreshAttachment,
+                  )
+                else
+                  DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: bubbleColor,
+                      borderRadius: BorderRadius.only(
+                        topLeft: const Radius.circular(22),
+                        topRight: const Radius.circular(22),
+                        bottomLeft: Radius.circular(isUser ? 22 : 6),
+                        bottomRight: Radius.circular(isUser ? 6 : 22),
+                      ),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 18, vertical: 13),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (trimmedText.isNotEmpty)
+                            isUser
+                                ? Text(message.text, style: messageTextStyle)
+                                : _AssistantMessageContent(
+                                    text: message.text,
+                                    payload: message.result?.payload,
+                                    style: messageTextStyle,
+                                  ),
+                          if (message.hasAttachments) ...[
+                            if (trimmedText.isNotEmpty)
+                              const SizedBox(height: 10),
+                            _ConsultAttachmentStrip(
+                              attachments: message.attachments,
+                              clientKey: message.clientKey,
+                              onCancelUpload: onCancelUpload,
+                              onRefreshAttachment: onRefreshAttachment,
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
                   ),
-                ),
-                child: Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 18, vertical: 13),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (message.text.trim().isNotEmpty)
-                        isUser
-                            ? Text(message.text, style: messageTextStyle)
-                            : _AssistantMessageContent(
-                                text: message.text,
-                                payload: message.result?.payload,
-                                style: messageTextStyle,
-                              ),
-                      if (message.hasAttachments) ...[
-                        if (message.text.trim().isNotEmpty)
-                          const SizedBox(height: 10),
-                        _ConsultAttachmentStrip(
-                          attachments: message.attachments,
-                          clientKey: message.clientKey,
-                          onCancelUpload: onCancelUpload,
-                          onRefreshAttachment: onRefreshAttachment,
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-              ),
               if (message.consultLabel(vetName: vetName) != null) ...[
                 const SizedBox(height: 4),
                 Text(
@@ -4518,6 +4563,7 @@ class _ChatComposer extends StatelessWidget {
     required this.focusNode,
     required this.sending,
     required this.mediaEnabled,
+    required this.showMediaControls,
     required this.recording,
     required this.stagedAttachments,
     required this.includeBottomInset,
@@ -4532,6 +4578,7 @@ class _ChatComposer extends StatelessWidget {
   final FocusNode focusNode;
   final bool sending;
   final bool mediaEnabled;
+  final bool showMediaControls;
   final bool recording;
   final List<_PendingConsultAttachment> stagedAttachments;
   final bool includeBottomInset;
@@ -4606,68 +4653,71 @@ class _ChatComposer extends StatelessWidget {
                         ),
                       ),
                     ),
-                    const SizedBox(width: 8),
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 5),
-                      child: IconButton(
-                        tooltip: 'Adjuntar imagen o video',
-                        onPressed: mediaEnabled ? onPickMedia : null,
-                        visualDensity: VisualDensity.compact,
-                        style: IconButton.styleFrom(
-                          fixedSize: const Size(44, 44),
-                          padding: EdgeInsets.zero,
-                        ),
-                        icon: SvgPicture.asset(
-                          'assets/icons/image-video.svg',
-                          width: 17,
-                          height: 17,
-                          colorFilter: ColorFilter.mode(
-                            Colors.white
-                                .withValues(alpha: mediaEnabled ? 0.72 : 0.24),
-                            BlendMode.srcIn,
+                    if (showMediaControls) ...[
+                      const SizedBox(width: 8),
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 5),
+                        child: IconButton(
+                          tooltip: 'Adjuntar imagen o video',
+                          onPressed: mediaEnabled ? onPickMedia : null,
+                          visualDensity: VisualDensity.compact,
+                          style: IconButton.styleFrom(
+                            fixedSize: const Size(44, 44),
+                            padding: EdgeInsets.zero,
+                          ),
+                          icon: SvgPicture.asset(
+                            'assets/icons/image-video.svg',
+                            width: 17,
+                            height: 17,
+                            colorFilter: ColorFilter.mode(
+                              Colors.white.withValues(
+                                  alpha: mediaEnabled ? 0.72 : 0.24),
+                              BlendMode.srcIn,
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 5),
-                      child: Semantics(
-                        button: true,
-                        enabled: mediaEnabled,
-                        label: recording
-                            ? 'Soltar para adjuntar nota de voz'
-                            : 'Mantener presionado para grabar nota de voz',
-                        child: Tooltip(
-                          message: recording ? 'Soltar voz' : 'Grabar voz',
-                          child: GestureDetector(
-                            onTapDown:
-                                mediaEnabled ? (_) => onMicStart() : null,
-                            onTapUp: mediaEnabled ? (_) => onMicStop() : null,
-                            onTapCancel: mediaEnabled
-                                ? () => onMicStop(send: false)
-                                : null,
-                            behavior: HitTestBehavior.opaque,
-                            child: SizedBox(
-                              width: 44,
-                              height: 44,
-                              child: Center(
-                                child: AnimatedContainer(
-                                  duration: const Duration(milliseconds: 140),
-                                  width: 34,
-                                  height: 34,
-                                  decoration: BoxDecoration(
-                                    color: recording
-                                        ? Colors.white
-                                        : Colors.transparent,
-                                    shape: BoxShape.circle,
-                                  ),
-                                  child: Icon(
-                                    Icons.mic_rounded,
-                                    size: 18,
-                                    color: recording
-                                        ? Colors.black
-                                        : Colors.white.withValues(
-                                            alpha: mediaEnabled ? 0.72 : 0.24),
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 5),
+                        child: Semantics(
+                          button: true,
+                          enabled: mediaEnabled,
+                          label: recording
+                              ? 'Soltar para adjuntar nota de voz'
+                              : 'Mantener presionado para grabar nota de voz',
+                          child: Tooltip(
+                            message: recording ? 'Soltar voz' : 'Grabar voz',
+                            child: GestureDetector(
+                              onTapDown:
+                                  mediaEnabled ? (_) => onMicStart() : null,
+                              onTapUp: mediaEnabled ? (_) => onMicStop() : null,
+                              onTapCancel: mediaEnabled
+                                  ? () => onMicStop(send: false)
+                                  : null,
+                              behavior: HitTestBehavior.opaque,
+                              child: SizedBox(
+                                width: 44,
+                                height: 44,
+                                child: Center(
+                                  child: AnimatedContainer(
+                                    duration: const Duration(milliseconds: 140),
+                                    width: 34,
+                                    height: 34,
+                                    decoration: BoxDecoration(
+                                      color: recording
+                                          ? Colors.white
+                                          : Colors.transparent,
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: Icon(
+                                      Icons.mic_rounded,
+                                      size: 18,
+                                      color: recording
+                                          ? Colors.black
+                                          : Colors.white.withValues(
+                                              alpha:
+                                                  mediaEnabled ? 0.72 : 0.24),
+                                    ),
                                   ),
                                 ),
                               ),
@@ -4675,8 +4725,8 @@ class _ChatComposer extends StatelessWidget {
                           ),
                         ),
                       ),
-                    ),
-                    const SizedBox(width: 4),
+                      const SizedBox(width: 4),
+                    ],
                     Padding(
                       padding: const EdgeInsets.only(bottom: 1),
                       child: IconButton.filled(
@@ -4748,81 +4798,43 @@ class _ComposerAttachmentChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final label = switch (attachment.kind) {
-      _ConsultAttachmentKind.image => 'Imagen',
-      _ConsultAttachmentKind.video => 'Video',
-      _ConsultAttachmentKind.voice => 'Voz',
-    };
+    final isImage = attachment.kind == _ConsultAttachmentKind.image;
+    final isVoice = attachment.kind == _ConsultAttachmentKind.voice;
     return Stack(
       clipBehavior: Clip.none,
       children: [
         Container(
-          width: 142,
-          padding: const EdgeInsets.all(10),
+          width: isVoice ? 232 : 72,
+          height: isVoice ? 62 : 72,
+          padding: EdgeInsets.all(isVoice ? 0 : 6),
           decoration: BoxDecoration(
             color: Colors.black.withValues(alpha: 0.72),
-            borderRadius: BorderRadius.circular(16),
+            borderRadius: BorderRadius.circular(isVoice ? 18 : 14),
             border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
           ),
-          child: Row(
-            children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(10),
-                child: SizedBox(
-                  width: 44,
-                  height: 44,
-                  child: attachment.kind == _ConsultAttachmentKind.image
+          child: isVoice
+              ? _ConsultVoiceNoteBubble(
+                  attachment: attachment.toComposerAttachment())
+              : ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: isImage
                       ? Image.file(File(attachment.path), fit: BoxFit.cover)
                       : ColoredBox(
                           color: Colors.white.withValues(alpha: 0.10),
-                          child: Icon(
-                            attachment.kind == _ConsultAttachmentKind.video
-                                ? Icons.play_arrow_rounded
-                                : Icons.mic_rounded,
+                          child: const Icon(
+                            Icons.play_arrow_rounded,
                             color: Colors.white,
-                            size: 22,
+                            size: 24,
                           ),
                         ),
                 ),
-              ),
-              const SizedBox(width: 9),
-              Expanded(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      sending ? 'Subiendo' : 'Listo',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.52),
-                        fontSize: 10,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
         ),
         Positioned(
-          top: -13,
-          right: -13,
+          top: -8,
+          right: -8,
           child: SizedBox(
-            width: 44,
-            height: 44,
+            width: 32,
+            height: 32,
             child: Center(
               child: IconButton.filled(
                 tooltip: 'Quitar adjunto',
@@ -4831,10 +4843,10 @@ class _ComposerAttachmentChip extends StatelessWidget {
                   backgroundColor: Colors.white,
                   disabledBackgroundColor: Colors.white.withValues(alpha: 0.35),
                   foregroundColor: Colors.black,
-                  fixedSize: const Size(30, 30),
+                  fixedSize: const Size(22, 22),
                   padding: EdgeInsets.zero,
                 ),
-                icon: const Icon(Icons.close_rounded, size: 15),
+                icon: const Icon(Icons.close_rounded, size: 13),
               ),
             ),
           ),
@@ -5039,6 +5051,15 @@ class _PendingConsultAttachment {
         localPath: path,
         status: 'uploading',
         uploadProgress: 0,
+      );
+
+  _ConsultAttachment toComposerAttachment() => _ConsultAttachment(
+        id: path,
+        kind: kind,
+        contentType: contentType,
+        byteSize: byteSize,
+        durationMs: durationMs,
+        localPath: path,
       );
 }
 
@@ -5446,7 +5467,8 @@ class _ChatMessage {
       if (time == null) return receipt;
       return receipt == null ? time : '$time · $receipt';
     }
-    final name = vetName.trim().isEmpty ? 'vet' : vetName.trim();
+    final trimmedName = vetName.trim();
+    final name = trimmedName.isEmpty ? 'MVZ vet' : 'MVZ $trimmedName';
     return time == null ? name : '$name · $time';
   }
 
