@@ -5,8 +5,14 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:just_audio/just_audio.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:record/record.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:video_player/video_player.dart';
 
 import '../../../core/config/environment.dart';
 
@@ -23,6 +29,8 @@ const _noUpgradePlanAvailableMessage =
     'No encontré un plan superior que libere disponibilidad para esta consulta.';
 int _chatMessageSequence = 0;
 final _sessionMessageCache = <String, List<_ChatMessage>>{};
+final _activeConsultVoiceNoteId = ValueNotifier<String?>(null);
+final _activeConsultVideoId = ValueNotifier<String?>(null);
 
 String _nextChatMessageId() {
   _chatMessageSequence += 1;
@@ -70,6 +78,8 @@ class _ChatScreenState extends State<ChatScreen> {
   final _focusNode = FocusNode();
   final _scrollController = ScrollController();
   final _messages = <_ChatMessage>[];
+  final _imagePicker = ImagePicker();
+  final _audioRecorder = AudioRecorder();
 
   late final String _conversationId;
   RealtimeChannel? _consultMessagesChannel;
@@ -85,6 +95,8 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _consultLoading = false;
   bool _consultClosed = false;
   bool _endingConsult = false;
+  bool _recordingVoice = false;
+  DateTime? _recordingStartedAt;
   bool _vetOnline = false;
   bool _vetTyping = false;
   bool _vetEnteredAnnounced = false;
@@ -183,6 +195,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _aiChatLog(
         'dispose conversationId=$_conversationId totalMessages=${_messages.length}');
     _inputCtrl.dispose();
+    _audioRecorder.dispose();
     _focusNode.dispose();
     _scrollController.dispose();
     _surveyReturnHomeTimer?.cancel();
@@ -603,6 +616,13 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _sendConsultMessage(String text) async {
+    await _sendConsultPayload(text: text);
+  }
+
+  Future<void> _sendConsultPayload({
+    String text = '',
+    List<_PendingConsultAttachment> pendingAttachments = const [],
+  }) async {
     final sessionId = _consultSessionId;
     if (sessionId == null || _isSending) return;
     if (_consultClosed) {
@@ -615,9 +635,17 @@ class _ChatScreenState extends State<ChatScreen> {
       _scrollToBottom();
       return;
     }
+    final trimmedText = text.trim();
+    if (trimmedText.isEmpty && pendingAttachments.isEmpty) return;
     final clientKey =
         'owner-${DateTime.now().microsecondsSinceEpoch}-${_nextChatMessageId()}';
-    final optimisticMessage = _ChatMessage.user(text, includeInHistory: false);
+    final optimisticMessage = _ChatMessage.user(
+      trimmedText,
+      includeInHistory: false,
+      attachments: pendingAttachments
+          .map((attachment) => attachment.toPreviewAttachment())
+          .toList(growable: false),
+    );
     setState(() {
       _messages.add(optimisticMessage);
       _isSending = true;
@@ -625,11 +653,17 @@ class _ChatScreenState extends State<ChatScreen> {
     _scrollToBottom();
 
     try {
+      final attachmentRefs = <Map<String, String>>[];
+      for (final attachment in pendingAttachments) {
+        final uploaded = await _uploadConsultAttachment(sessionId, attachment);
+        attachmentRefs.add({'id': uploaded.id});
+      }
       final response = await _postGatewayJson(
         '/sessions/${Uri.encodeComponent(sessionId)}/messages',
         {
-          'content': text,
+          'content': trimmedText,
           'clientKey': clientKey,
+          if (attachmentRefs.isNotEmpty) 'attachments': attachmentRefs,
         },
       );
       final message = _asMap(response['message']);
@@ -645,11 +679,218 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (error) {
       _aiChatLog('consult send failed: ${error.runtimeType} $error');
       if (!mounted) return;
-      setState(() => _messages.add(_ChatMessage.assistant(_friendlyError(error),
-          includeInHistory: false)));
+      setState(() {
+        _messages
+            .removeWhere((candidate) => candidate.id == optimisticMessage.id);
+        _messages.add(_ChatMessage.assistant(_friendlyError(error),
+            includeInHistory: false));
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('No se pudo enviar.'),
+          action: _consultClosed
+              ? null
+              : SnackBarAction(
+                  label: 'Reintentar',
+                  onPressed: () => unawaited(_sendConsultPayload(
+                    text: trimmedText,
+                    pendingAttachments: pendingAttachments,
+                  )),
+                ),
+        ),
+      );
       _scrollToBottom();
     } finally {
       if (mounted) setState(() => _isSending = false);
+    }
+  }
+
+  Future<_ConsultAttachment> _uploadConsultAttachment(
+      String sessionId, _PendingConsultAttachment attachment) async {
+    final response = await _postGatewayJson(
+      '/sessions/${Uri.encodeComponent(sessionId)}/attachments/upload-url',
+      attachment.toUploadBody(),
+    );
+    final attachmentJson = _asMap(response['attachment']);
+    final uploadJson = _asMap(response['upload']);
+    final bucket = uploadJson?['bucket']?.toString();
+    final path = uploadJson?['path']?.toString();
+    final token = uploadJson?['token']?.toString();
+    if (attachmentJson == null ||
+        bucket == null ||
+        path == null ||
+        token == null) {
+      throw const _ChatApiException(
+          'No pude preparar el archivo para subirlo.');
+    }
+    await Supabase.instance.client.storage.from(bucket).uploadToSignedUrl(
+          path,
+          token,
+          File(attachment.path),
+          FileOptions(contentType: attachment.contentType),
+        );
+    return _ConsultAttachment.fromJson(attachmentJson);
+  }
+
+  Future<_ConsultAttachment?> _refreshConsultAttachmentDownloadUrl(
+      _ConsultAttachment attachment) async {
+    final sessionId = _consultSessionId;
+    if (sessionId == null) return null;
+    try {
+      final response = await _getGatewayJson(
+        '/sessions/${Uri.encodeComponent(sessionId)}/attachments/${Uri.encodeComponent(attachment.id)}/download-url',
+      );
+      final attachmentJson = _asMap(response['attachment']);
+      if (attachmentJson == null) return null;
+      return _ConsultAttachment.fromJson(attachmentJson);
+    } catch (error) {
+      _aiChatLog('attachment refresh failed: ${error.runtimeType} $error');
+      return null;
+    }
+  }
+
+  Future<void> _pickConsultMedia() async {
+    if (!_canSendConsultMedia) return;
+    final choice = await showModalBottomSheet<_ConsultMediaChoice>(
+      context: context,
+      backgroundColor: const Color(0xFF141417),
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading:
+                  const Icon(Icons.photo_library_rounded, color: Colors.white),
+              title:
+                  const Text('imágenes', style: TextStyle(color: Colors.white)),
+              onTap: () =>
+                  Navigator.of(context).pop(_ConsultMediaChoice.images),
+            ),
+            ListTile(
+              leading: const Icon(Icons.videocam_rounded, color: Colors.white),
+              title: const Text('video', style: TextStyle(color: Colors.white)),
+              onTap: () => Navigator.of(context).pop(_ConsultMediaChoice.video),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (choice == null) return;
+    try {
+      if (choice == _ConsultMediaChoice.images) {
+        final files = await _imagePicker.pickMultiImage(
+          imageQuality: 82,
+          maxWidth: 1800,
+          maxHeight: 1800,
+          limit: 6,
+        );
+        if (files.isEmpty) return;
+        final attachments = <_PendingConsultAttachment>[];
+        for (final file in files.take(6)) {
+          attachments.add(await _pendingAttachmentFromXFile(
+              file, _ConsultAttachmentKind.image));
+        }
+        await _sendConsultPayload(pendingAttachments: attachments);
+      } else {
+        final file = await _imagePicker.pickVideo(source: ImageSource.gallery);
+        if (file == null) return;
+        await _sendConsultPayload(
+          pendingAttachments: [
+            await _pendingAttachmentFromXFile(
+                file, _ConsultAttachmentKind.video)
+          ],
+        );
+      }
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo adjuntar: $error')),
+      );
+    }
+  }
+
+  Future<_PendingConsultAttachment> _pendingAttachmentFromXFile(
+      XFile file, _ConsultAttachmentKind kind) async {
+    final byteSize = await file.length();
+    final contentType = _contentTypeForFile(file.path, kind);
+    _validatePendingAttachment(kind, byteSize, null);
+    return _PendingConsultAttachment(
+      kind: kind,
+      path: file.path,
+      fileName: file.name,
+      contentType: contentType,
+      byteSize: byteSize,
+    );
+  }
+
+  bool get _canSendConsultMedia =>
+      _consultSessionId != null &&
+      !_isSending &&
+      !_consultClosed &&
+      !_endingConsult;
+
+  Future<void> _startVoiceRecording() async {
+    if (!_canSendConsultMedia || _recordingVoice) return;
+    try {
+      if (!await _audioRecorder.hasPermission()) {
+        throw const _ChatApiException(
+            'Activa el micrófono para enviar notas de voz.');
+      }
+      final dir = await getTemporaryDirectory();
+      final path =
+          '${dir.path}/consult-voice-${DateTime.now().microsecondsSinceEpoch}.m4a';
+      await _audioRecorder.start(
+        const RecordConfig(encoder: AudioEncoder.aacLc),
+        path: path,
+      );
+      if (!mounted) return;
+      setState(() {
+        _recordingVoice = true;
+        _recordingStartedAt = DateTime.now();
+      });
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No pude grabar: $error')),
+      );
+    }
+  }
+
+  Future<void> _stopVoiceRecording({bool send = true}) async {
+    if (!_recordingVoice) return;
+    final startedAt = _recordingStartedAt;
+    setState(() {
+      _recordingVoice = false;
+      _recordingStartedAt = null;
+    });
+    final path = await _audioRecorder.stop();
+    if (!send || path == null) return;
+    final durationMs = startedAt == null
+        ? null
+        : DateTime.now().difference(startedAt).inMilliseconds;
+    if (durationMs != null && durationMs < 650) return;
+    try {
+      final file = File(path);
+      final byteSize = await file.length();
+      _validatePendingAttachment(
+          _ConsultAttachmentKind.voice, byteSize, durationMs);
+      await _sendConsultPayload(
+        pendingAttachments: [
+          _PendingConsultAttachment(
+            kind: _ConsultAttachmentKind.voice,
+            path: path,
+            fileName: path.split('/').last,
+            contentType: 'audio/mp4',
+            byteSize: byteSize,
+            durationMs: durationMs,
+          ),
+        ],
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo enviar la nota de voz: $error')),
+      );
     }
   }
 
@@ -1807,6 +2048,7 @@ class _ChatScreenState extends State<ChatScreen> {
             onPlanUpgradeConfirmed: _confirmSubscriptionUpgrade,
             onRejoinVideo: _openVideoFromChat,
             onSurveyAction: _handleSurveyAction,
+            onRefreshAttachment: _refreshConsultAttachmentDownloadUrl,
           ),
         );
       },
@@ -1854,8 +2096,13 @@ class _ChatScreenState extends State<ChatScreen> {
             sending: _isSending ||
                 _endingConsult ||
                 (_consultLoading && _messages.isEmpty),
+            mediaEnabled: _canSendConsultMedia,
+            recording: _recordingVoice,
             includeBottomInset: true,
             onSend: _sendComposerMessage,
+            onPickMedia: _pickConsultMedia,
+            onMicStart: _startVoiceRecording,
+            onMicStop: _stopVoiceRecording,
           ),
         ),
       ],
@@ -2071,6 +2318,7 @@ class _MessageBubble extends StatelessWidget {
     required this.onPlanUpgradeConfirmed,
     required this.onRejoinVideo,
     required this.onSurveyAction,
+    this.onRefreshAttachment,
   });
 
   final _ChatMessage message;
@@ -2086,6 +2334,8 @@ class _MessageBubble extends StatelessWidget {
       onPlanUpgradeConfirmed;
   final ValueChanged<String> onRejoinVideo;
   final ValueChanged<_SurveyActionChoice> onSurveyAction;
+  final Future<_ConsultAttachment?> Function(_ConsultAttachment attachment)?
+      onRefreshAttachment;
 
   @override
   Widget build(BuildContext context) {
@@ -2128,13 +2378,28 @@ class _MessageBubble extends StatelessWidget {
                 child: Padding(
                   padding:
                       const EdgeInsets.symmetric(horizontal: 18, vertical: 13),
-                  child: isUser
-                      ? Text(message.text, style: messageTextStyle)
-                      : _AssistantMessageContent(
-                          text: message.text,
-                          payload: message.result?.payload,
-                          style: messageTextStyle,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (message.text.trim().isNotEmpty)
+                        isUser
+                            ? Text(message.text, style: messageTextStyle)
+                            : _AssistantMessageContent(
+                                text: message.text,
+                                payload: message.result?.payload,
+                                style: messageTextStyle,
+                              ),
+                      if (message.hasAttachments) ...[
+                        if (message.text.trim().isNotEmpty)
+                          const SizedBox(height: 10),
+                        _ConsultAttachmentStrip(
+                          attachments: message.attachments,
+                          onRefreshAttachment: onRefreshAttachment,
                         ),
+                      ],
+                    ],
+                  ),
                 ),
               ),
               if (message.consultLabel(vetName: vetName) != null) ...[
@@ -2184,6 +2449,648 @@ class _MessageBubble extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _ConsultAttachmentStrip extends StatelessWidget {
+  const _ConsultAttachmentStrip({
+    required this.attachments,
+    this.onRefreshAttachment,
+  });
+
+  final List<_ConsultAttachment> attachments;
+  final Future<_ConsultAttachment?> Function(_ConsultAttachment attachment)?
+      onRefreshAttachment;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: attachments
+          .map((attachment) => Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: _ConsultAttachmentPreview(
+                  attachment: attachment,
+                  onRefreshAttachment: onRefreshAttachment,
+                ),
+              ))
+          .toList(growable: false),
+    );
+  }
+}
+
+class _ConsultAttachmentPreview extends StatelessWidget {
+  const _ConsultAttachmentPreview({
+    required this.attachment,
+    this.onRefreshAttachment,
+  });
+
+  final _ConsultAttachment attachment;
+  final Future<_ConsultAttachment?> Function(_ConsultAttachment attachment)?
+      onRefreshAttachment;
+
+  @override
+  Widget build(BuildContext context) {
+    final url = attachment.downloadUrl;
+    final localPath = attachment.localPath;
+    final label = switch (attachment.kind) {
+      _ConsultAttachmentKind.image => 'Imagen',
+      _ConsultAttachmentKind.video => 'Video',
+      _ConsultAttachmentKind.voice => 'Nota de voz',
+    };
+    if (attachment.kind == _ConsultAttachmentKind.image &&
+        (url != null || localPath != null)) {
+      final image = localPath != null
+          ? Image.file(File(localPath), fit: BoxFit.cover)
+          : Image.network(url!, fit: BoxFit.cover);
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(14),
+        child: SizedBox(width: 220, height: 160, child: image),
+      );
+    }
+    if (attachment.kind == _ConsultAttachmentKind.voice) {
+      return _ConsultVoiceNoteBubble(
+        attachment: attachment,
+        onRefreshAttachment: onRefreshAttachment,
+      );
+    }
+    if (attachment.kind == _ConsultAttachmentKind.video) {
+      return _ConsultVideoBubble(
+        attachment: attachment,
+        onRefreshAttachment: onRefreshAttachment,
+      );
+    }
+    return Container(
+      constraints: const BoxConstraints(minWidth: 180),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            attachment.kind == _ConsultAttachmentKind.voice
+                ? Icons.mic_rounded
+                : Icons.play_arrow_rounded,
+            color: Colors.white,
+            size: 19,
+          ),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              attachment.isUploading
+                  ? 'Subiendo $label...'
+                  : _attachmentLabel(label, attachment),
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+                height: 1.2,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ConsultVoiceNoteBubble extends StatefulWidget {
+  const _ConsultVoiceNoteBubble({
+    required this.attachment,
+    this.onRefreshAttachment,
+  });
+
+  final _ConsultAttachment attachment;
+  final Future<_ConsultAttachment?> Function(_ConsultAttachment attachment)?
+      onRefreshAttachment;
+
+  @override
+  State<_ConsultVoiceNoteBubble> createState() =>
+      _ConsultVoiceNoteBubbleState();
+}
+
+class _ConsultVoiceNoteBubbleState extends State<_ConsultVoiceNoteBubble> {
+  final AudioPlayer _player = AudioPlayer();
+  StreamSubscription<Duration>? _positionSub;
+  StreamSubscription<Duration?>? _durationSub;
+  StreamSubscription<PlayerState>? _stateSub;
+  bool _loading = false;
+  bool _loaded = false;
+  bool _failed = false;
+  bool _playing = false;
+  Duration _position = Duration.zero;
+  Duration _duration = Duration.zero;
+  String? _downloadUrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _downloadUrl = widget.attachment.downloadUrl;
+    _activeConsultVoiceNoteId.addListener(_handleActiveVoiceChanged);
+    _positionSub = _player.positionStream.listen((position) {
+      if (!mounted) return;
+      setState(() => _position = position);
+    });
+    _durationSub = _player.durationStream.listen((duration) {
+      if (!mounted || duration == null) return;
+      setState(() => _duration = duration);
+    });
+    _stateSub = _player.playerStateStream.listen((state) {
+      if (!mounted) return;
+      if (state.processingState == ProcessingState.completed) {
+        if (_activeConsultVoiceNoteId.value == widget.attachment.id) {
+          _activeConsultVoiceNoteId.value = null;
+        }
+        unawaited(_player.seek(Duration.zero));
+      }
+      setState(() {
+        _playing =
+            state.playing && state.processingState != ProcessingState.completed;
+      });
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant _ConsultVoiceNoteBubble oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.attachment.id != widget.attachment.id ||
+        oldWidget.attachment.downloadUrl != widget.attachment.downloadUrl ||
+        oldWidget.attachment.localPath != widget.attachment.localPath) {
+      _downloadUrl = widget.attachment.downloadUrl;
+      _loaded = false;
+      _failed = false;
+      _position = Duration.zero;
+      _duration = Duration.zero;
+      unawaited(_player.stop());
+    }
+  }
+
+  @override
+  void dispose() {
+    _activeConsultVoiceNoteId.removeListener(_handleActiveVoiceChanged);
+    _positionSub?.cancel();
+    _durationSub?.cancel();
+    _stateSub?.cancel();
+    _player.dispose();
+    super.dispose();
+  }
+
+  void _handleActiveVoiceChanged() {
+    if (_activeConsultVoiceNoteId.value != widget.attachment.id &&
+        _player.playing) {
+      unawaited(_player.pause());
+    }
+  }
+
+  Future<void> _togglePlayback() async {
+    if (_loading || widget.attachment.isUploading) return;
+    if (_player.playing) {
+      await _player.pause();
+      return;
+    }
+    final source = widget.attachment.localPath ?? _downloadUrl;
+    if (source == null || source.isEmpty) return;
+    _activeConsultVoiceNoteId.value = widget.attachment.id;
+    if (!_loaded || _failed) {
+      setState(() {
+        _loading = true;
+        _failed = false;
+      });
+      try {
+        if (widget.attachment.localPath != null) {
+          await _player.setFilePath(widget.attachment.localPath!);
+        } else {
+          await _player.setUrl(_downloadUrl!);
+        }
+        if (!mounted) return;
+        setState(() => _loaded = true);
+      } catch (error) {
+        if (widget.attachment.localPath == null &&
+            await _refreshDownloadUrl()) {
+          try {
+            await _player.setUrl(_downloadUrl!);
+            if (!mounted) return;
+            setState(() => _loaded = true);
+          } catch (_) {
+            if (!mounted) return;
+            setState(() => _failed = true);
+            return;
+          }
+        } else {
+          if (!mounted) return;
+          setState(() => _failed = true);
+          return;
+        }
+      } finally {
+        if (mounted) setState(() => _loading = false);
+      }
+    }
+    if (_player.processingState == ProcessingState.completed) {
+      await _player.seek(Duration.zero);
+    }
+    await _player.play();
+  }
+
+  Future<bool> _refreshDownloadUrl() async {
+    final refresh = widget.onRefreshAttachment;
+    if (refresh == null) return false;
+    final refreshed = await refresh(widget.attachment);
+    final refreshedUrl = refreshed?.downloadUrl;
+    if (refreshedUrl == null || refreshedUrl.isEmpty) return false;
+    _downloadUrl = refreshedUrl;
+    return true;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final progress = _duration.inMilliseconds <= 0
+        ? 0.0
+        : (_position.inMilliseconds / _duration.inMilliseconds).clamp(0.0, 1.0);
+    final displayDuration = _duration.inMilliseconds > 0
+        ? _duration
+        : Duration(milliseconds: widget.attachment.durationMs ?? 0);
+    final durationText = _playing && _position.inMilliseconds > 0
+        ? _formatVoiceDuration(_position)
+        : _formatVoiceDuration(displayDuration);
+    final icon = _loading
+        ? null
+        : _failed
+            ? Icons.refresh_rounded
+            : _playing
+                ? Icons.pause_rounded
+                : Icons.play_arrow_rounded;
+
+    return Container(
+      width: 232,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+      ),
+      child: Row(
+        children: [
+          GestureDetector(
+            onTap: _togglePlayback,
+            child: Container(
+              width: 34,
+              height: 34,
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                shape: BoxShape.circle,
+              ),
+              child: _loading
+                  ? const Padding(
+                      padding: EdgeInsets.all(9),
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.black,
+                      ),
+                    )
+                  : Icon(icon, color: Colors.black, size: 21),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _VoiceWaveform(id: widget.attachment.id, progress: progress),
+                const SizedBox(height: 4),
+                Text(
+                  _failed
+                      ? 'Toca para reintentar'
+                      : widget.attachment.isUploading
+                          ? 'Subiendo nota de voz...'
+                          : durationText,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.7),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w500,
+                    height: 1,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ConsultVideoBubble extends StatefulWidget {
+  const _ConsultVideoBubble({
+    required this.attachment,
+    this.onRefreshAttachment,
+  });
+
+  final _ConsultAttachment attachment;
+  final Future<_ConsultAttachment?> Function(_ConsultAttachment attachment)?
+      onRefreshAttachment;
+
+  @override
+  State<_ConsultVideoBubble> createState() => _ConsultVideoBubbleState();
+}
+
+class _ConsultVideoBubbleState extends State<_ConsultVideoBubble> {
+  VideoPlayerController? _controller;
+  bool _loading = false;
+  bool _failed = false;
+  String? _downloadUrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _downloadUrl = widget.attachment.downloadUrl;
+    _activeConsultVideoId.addListener(_handleActiveVideoChanged);
+  }
+
+  @override
+  void didUpdateWidget(covariant _ConsultVideoBubble oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.attachment.id != widget.attachment.id ||
+        oldWidget.attachment.downloadUrl != widget.attachment.downloadUrl ||
+        oldWidget.attachment.localPath != widget.attachment.localPath) {
+      _downloadUrl = widget.attachment.downloadUrl;
+      _failed = false;
+      _disposeController();
+    }
+  }
+
+  @override
+  void dispose() {
+    _activeConsultVideoId.removeListener(_handleActiveVideoChanged);
+    if (_activeConsultVideoId.value == widget.attachment.id) {
+      _activeConsultVideoId.value = null;
+    }
+    _disposeController();
+    super.dispose();
+  }
+
+  void _handleActiveVideoChanged() {
+    if (_activeConsultVideoId.value != widget.attachment.id &&
+        _controller?.value.isPlaying == true) {
+      unawaited(_controller?.pause());
+    }
+  }
+
+  void _handleControllerChanged() {
+    if (!mounted) return;
+    final controller = _controller;
+    if (controller == null) return;
+    final value = controller.value;
+    if (!value.isPlaying &&
+        value.duration > Duration.zero &&
+        value.position >= value.duration &&
+        _activeConsultVideoId.value == widget.attachment.id) {
+      _activeConsultVideoId.value = null;
+    }
+    setState(() {});
+  }
+
+  void _disposeController() {
+    final controller = _controller;
+    if (controller == null) return;
+    controller.removeListener(_handleControllerChanged);
+    _controller = null;
+    unawaited(controller.dispose());
+  }
+
+  Future<void> _togglePlayback() async {
+    if (_loading ||
+        (widget.attachment.isUploading &&
+            widget.attachment.localPath == null)) {
+      return;
+    }
+    var controller = _controller;
+    if (controller == null || !controller.value.isInitialized || _failed) {
+      await _initializeVideo();
+      controller = _controller;
+      if (controller == null || !controller.value.isInitialized) return;
+    }
+    if (controller.value.isPlaying) {
+      await controller.pause();
+      if (_activeConsultVideoId.value == widget.attachment.id) {
+        _activeConsultVideoId.value = null;
+      }
+      return;
+    }
+    _activeConsultVideoId.value = widget.attachment.id;
+    await controller.play();
+  }
+
+  Future<void> _initializeVideo() async {
+    final source = widget.attachment.localPath ?? _downloadUrl;
+    if (source == null || source.isEmpty) return;
+    setState(() {
+      _loading = true;
+      _failed = false;
+    });
+    try {
+      await _openVideoSource(source);
+    } catch (_) {
+      if (widget.attachment.localPath == null && await _refreshDownloadUrl()) {
+        try {
+          await _openVideoSource(_downloadUrl!);
+        } catch (_) {
+          if (!mounted) return;
+          setState(() => _failed = true);
+        }
+      } else {
+        if (!mounted) return;
+        setState(() => _failed = true);
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _openVideoSource(String source) async {
+    final controller = widget.attachment.localPath != null
+        ? VideoPlayerController.file(File(widget.attachment.localPath!))
+        : VideoPlayerController.networkUrl(Uri.parse(source));
+    await controller.initialize();
+    await controller.setLooping(false);
+    controller.addListener(_handleControllerChanged);
+    _disposeController();
+    if (!mounted) {
+      unawaited(controller.dispose());
+      return;
+    }
+    setState(() {
+      _controller = controller;
+      _failed = false;
+    });
+  }
+
+  Future<bool> _refreshDownloadUrl() async {
+    final refresh = widget.onRefreshAttachment;
+    if (refresh == null) return false;
+    final refreshed = await refresh(widget.attachment);
+    final refreshedUrl = refreshed?.downloadUrl;
+    if (refreshedUrl == null || refreshedUrl.isEmpty) return false;
+    _downloadUrl = refreshedUrl;
+    return true;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = _controller;
+    final value = controller?.value;
+    final initialized = value?.isInitialized == true;
+    final rawAspect = initialized ? value!.aspectRatio : 16 / 9;
+    final aspectRatio = rawAspect.isFinite && rawAspect > 0
+        ? rawAspect.clamp(0.75, 1.78).toDouble()
+        : 16 / 9;
+    final position = initialized ? value!.position : Duration.zero;
+    final duration = initialized ? value!.duration : Duration.zero;
+    final progress = duration.inMilliseconds <= 0
+        ? 0.0
+        : (position.inMilliseconds / duration.inMilliseconds).clamp(0.0, 1.0);
+    final playing = value?.isPlaying == true;
+    final overlayVisible = _loading || _failed || !playing;
+    final icon = _loading
+        ? null
+        : _failed
+            ? Icons.refresh_rounded
+            : playing
+                ? Icons.pause_rounded
+                : Icons.play_arrow_rounded;
+    final label = _failed
+        ? 'Toca para reintentar'
+        : widget.attachment.isUploading
+            ? 'Subiendo video...'
+            : duration.inMilliseconds > 0
+                ? '${_formatVoiceDuration(position)} / ${_formatVoiceDuration(duration)}'
+                : _attachmentLabel('Video', widget.attachment);
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(14),
+      child: SizedBox(
+        width: 232,
+        child: AspectRatio(
+          aspectRatio: aspectRatio,
+          child: GestureDetector(
+            onTap: _togglePlayback,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                if (initialized && controller != null)
+                  VideoPlayer(controller)
+                else
+                  Container(color: Colors.white.withValues(alpha: 0.08)),
+                if (overlayVisible)
+                  Container(color: Colors.black.withValues(alpha: 0.34)),
+                Center(
+                  child: Container(
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.94),
+                      shape: BoxShape.circle,
+                    ),
+                    child: _loading
+                        ? const Padding(
+                            padding: EdgeInsets.all(12),
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.black,
+                            ),
+                          )
+                        : Icon(icon, color: Colors.black, size: 26),
+                  ),
+                ),
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          Colors.black.withValues(alpha: 0),
+                          Colors.black.withValues(alpha: 0.65),
+                        ],
+                      ),
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(999),
+                          child: LinearProgressIndicator(
+                            minHeight: 3,
+                            value: progress,
+                            backgroundColor:
+                                Colors.white.withValues(alpha: 0.24),
+                            valueColor: const AlwaysStoppedAnimation<Color>(
+                                Colors.white),
+                          ),
+                        ),
+                        const SizedBox(height: 5),
+                        Text(
+                          label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.86),
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            height: 1,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _VoiceWaveform extends StatelessWidget {
+  const _VoiceWaveform({required this.id, required this.progress});
+
+  final String id;
+  final double progress;
+
+  @override
+  Widget build(BuildContext context) {
+    final seed = id.codeUnits.fold<int>(0, (sum, value) => sum + value);
+    const count = 26;
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: List.generate(count, (index) {
+        final normalizedIndex = count == 1 ? 0.0 : index / (count - 1);
+        final height = 7.0 + ((seed + index * 11) % 17).toDouble();
+        final active = normalizedIndex <= progress;
+        return AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          width: 3,
+          height: height,
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: active ? 0.9 : 0.28),
+            borderRadius: BorderRadius.circular(999),
+          ),
+        );
+      }),
     );
   }
 }
@@ -2530,15 +3437,25 @@ class _ChatComposer extends StatelessWidget {
     required this.controller,
     required this.focusNode,
     required this.sending,
+    required this.mediaEnabled,
+    required this.recording,
     required this.includeBottomInset,
     required this.onSend,
+    required this.onPickMedia,
+    required this.onMicStart,
+    required this.onMicStop,
   });
 
   final TextEditingController controller;
   final FocusNode focusNode;
   final bool sending;
+  final bool mediaEnabled;
+  final bool recording;
   final bool includeBottomInset;
   final VoidCallback onSend;
+  final VoidCallback onPickMedia;
+  final VoidCallback onMicStart;
+  final Future<void> Function({bool send}) onMicStop;
 
   @override
   Widget build(BuildContext context) {
@@ -2594,6 +3511,54 @@ class _ChatComposer extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 8),
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 5),
+                  child: IconButton(
+                    onPressed: mediaEnabled ? onPickMedia : null,
+                    visualDensity: VisualDensity.compact,
+                    style: IconButton.styleFrom(
+                      fixedSize: const Size(32, 32),
+                      padding: EdgeInsets.zero,
+                    ),
+                    icon: SvgPicture.asset(
+                      'assets/icons/image-video.svg',
+                      width: 17,
+                      height: 17,
+                      colorFilter: ColorFilter.mode(
+                        Colors.white
+                            .withValues(alpha: mediaEnabled ? 0.72 : 0.24),
+                        BlendMode.srcIn,
+                      ),
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 5),
+                  child: GestureDetector(
+                    onTapDown: mediaEnabled ? (_) => onMicStart() : null,
+                    onTapUp: mediaEnabled ? (_) => onMicStop() : null,
+                    onTapCancel:
+                        mediaEnabled ? () => onMicStop(send: false) : null,
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 140),
+                      width: 32,
+                      height: 32,
+                      decoration: BoxDecoration(
+                        color: recording ? Colors.white : Colors.transparent,
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(
+                        Icons.mic_rounded,
+                        size: 18,
+                        color: recording
+                            ? Colors.black
+                            : Colors.white
+                                .withValues(alpha: mediaEnabled ? 0.72 : 0.24),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 4),
                 Padding(
                   padding: const EdgeInsets.only(bottom: 1),
                   child: IconButton.filled(
@@ -2744,6 +3709,97 @@ class _ComposerOutlinePainter extends CustomPainter {
 
 enum _ChatRole { user, vet, assistant }
 
+enum _ConsultAttachmentKind { image, video, voice }
+
+enum _ConsultMediaChoice { images, video }
+
+class _PendingConsultAttachment {
+  const _PendingConsultAttachment({
+    required this.kind,
+    required this.path,
+    required this.fileName,
+    required this.contentType,
+    required this.byteSize,
+    this.durationMs,
+  });
+
+  final _ConsultAttachmentKind kind;
+  final String path;
+  final String fileName;
+  final String contentType;
+  final int byteSize;
+  final int? durationMs;
+
+  Map<String, dynamic> toUploadBody() => {
+        'kind': kind.name,
+        'fileName': fileName,
+        'contentType': contentType,
+        'byteSize': byteSize,
+        if (durationMs != null) 'durationMs': durationMs,
+      };
+
+  _ConsultAttachment toPreviewAttachment() => _ConsultAttachment(
+        id: path,
+        kind: kind,
+        contentType: contentType,
+        byteSize: byteSize,
+        durationMs: durationMs,
+        localPath: path,
+        status: 'uploading',
+      );
+}
+
+class _ConsultAttachment {
+  const _ConsultAttachment({
+    required this.id,
+    required this.kind,
+    required this.contentType,
+    required this.byteSize,
+    this.width,
+    this.height,
+    this.durationMs,
+    this.downloadUrl,
+    this.localPath,
+    this.status,
+  });
+
+  factory _ConsultAttachment.fromJson(Map<String, dynamic> json) {
+    final kindRaw = json['kind']?.toString().toLowerCase();
+    final kind = switch (kindRaw) {
+      'video' => _ConsultAttachmentKind.video,
+      'voice' => _ConsultAttachmentKind.voice,
+      _ => _ConsultAttachmentKind.image,
+    };
+    return _ConsultAttachment(
+      id: json['id']?.toString() ?? _nextChatMessageId(),
+      kind: kind,
+      contentType: json['contentType']?.toString() ??
+          json['content_type']?.toString() ??
+          '',
+      byteSize: _asInt(json['byteSize'] ?? json['byte_size']) ?? 0,
+      width: _asInt(json['width']),
+      height: _asInt(json['height']),
+      durationMs: _asInt(json['durationMs'] ?? json['duration_ms']),
+      downloadUrl:
+          json['downloadUrl']?.toString() ?? json['download_url']?.toString(),
+      status: json['status']?.toString(),
+    );
+  }
+
+  final String id;
+  final _ConsultAttachmentKind kind;
+  final String contentType;
+  final int byteSize;
+  final int? width;
+  final int? height;
+  final int? durationMs;
+  final String? downloadUrl;
+  final String? localPath;
+  final String? status;
+
+  bool get isUploading => status == 'uploading';
+}
+
 class _ChatMessage {
   _ChatMessage({
     required this.id,
@@ -2759,14 +3815,20 @@ class _ChatMessage {
     this.rejoinSessionId,
     this.surveyAction,
     this.includeInHistory = true,
+    this.attachments = const [],
   });
 
-  factory _ChatMessage.user(String text, {bool includeInHistory = true}) {
+  factory _ChatMessage.user(
+    String text, {
+    bool includeInHistory = true,
+    List<_ConsultAttachment> attachments = const [],
+  }) {
     return _ChatMessage(
       id: _nextChatMessageId(),
       role: _ChatRole.user,
       text: text,
       includeInHistory: includeInHistory,
+      attachments: attachments,
     );
   }
 
@@ -2804,6 +3866,11 @@ class _ChatMessage {
       streamOrder: _asInt(json['stream_order']),
       createdAt: _parseDateTime(json['created_at']),
       includeInHistory: false,
+      attachments: (_asList(json['attachments']) ?? const [])
+          .map(_asMap)
+          .whereType<Map<String, dynamic>>()
+          .map(_ConsultAttachment.fromJson)
+          .toList(growable: false),
     );
   }
 
@@ -2820,28 +3887,28 @@ class _ChatMessage {
   final String? rejoinSessionId;
   final _SurveyAction? surveyAction;
   final bool includeInHistory;
+  final List<_ConsultAttachment> attachments;
 
   bool get isUser => role == _ChatRole.user;
+  bool get hasAttachments => attachments.isNotEmpty;
 
   String? consultLabel({required String vetName}) {
     if (streamOrder == null) return null;
     if (role == _ChatRole.assistant) return null;
-    final name = switch (role) {
-      _ChatRole.user => 'tú',
-      _ChatRole.vet => vetName.trim().isEmpty ? 'vet' : vetName.trim(),
-      _ChatRole.assistant => 'asistente',
-    };
     final time = createdAt == null
         ? null
         : '${createdAt!.hour.toString().padLeft(2, '0')}:${createdAt!.minute.toString().padLeft(2, '0')}';
-    final receipt = isUser
-        ? readByOther
-            ? ' · leído'
-            : deliveredByOther
-                ? ' · entregado'
-                : ''
-        : '';
-    return time == null ? '$name$receipt' : '$name · $time$receipt';
+    if (isUser) {
+      final receipt = readByOther
+          ? 'Read'
+          : deliveredByOther
+              ? 'Delivered'
+              : null;
+      if (time == null) return receipt;
+      return receipt == null ? time : '$time · $receipt';
+    }
+    final name = vetName.trim().isEmpty ? 'vet' : vetName.trim();
+    return time == null ? name : '$name · $time';
   }
 
   _ChatMessage copyWith({
@@ -2862,6 +3929,7 @@ class _ChatMessage {
       rejoinSessionId: rejoinSessionId,
       surveyAction: surveyAction,
       includeInHistory: includeInHistory,
+      attachments: attachments,
     );
   }
 
@@ -3584,6 +4652,50 @@ int? _asInt(Object? value) {
 DateTime? _parseDateTime(Object? value) {
   if (value == null) return null;
   return DateTime.tryParse(value.toString())?.toLocal();
+}
+
+String _contentTypeForFile(String path, _ConsultAttachmentKind kind) {
+  final lower = path.toLowerCase();
+  if (kind == _ConsultAttachmentKind.voice) return 'audio/mp4';
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.heic') || lower.endsWith('.heif')) return 'image/heic';
+  if (lower.endsWith('.mov')) return 'video/quicktime';
+  if (lower.endsWith('.webm')) return 'video/webm';
+  if (kind == _ConsultAttachmentKind.video) return 'video/mp4';
+  return 'image/jpeg';
+}
+
+void _validatePendingAttachment(
+    _ConsultAttachmentKind kind, int byteSize, int? durationMs) {
+  final maxBytes = switch (kind) {
+    _ConsultAttachmentKind.image => 8 * 1024 * 1024,
+    _ConsultAttachmentKind.video => 50 * 1024 * 1024,
+    _ConsultAttachmentKind.voice => 15 * 1024 * 1024,
+  };
+  if (byteSize > maxBytes) {
+    throw const _ChatApiException(
+        'El archivo es demasiado grande para enviarlo.');
+  }
+  if (kind == _ConsultAttachmentKind.voice &&
+      durationMs != null &&
+      durationMs > 300000) {
+    throw const _ChatApiException(
+        'La nota de voz no puede pasar de 5 minutos.');
+  }
+}
+
+String _attachmentLabel(String label, _ConsultAttachment attachment) {
+  final duration = attachment.durationMs;
+  if (duration == null || duration <= 0) return label;
+  return '$label · ${_formatVoiceDuration(Duration(milliseconds: duration))}';
+}
+
+String _formatVoiceDuration(Duration duration) {
+  final seconds = duration.inSeconds;
+  final minutes = seconds ~/ 60;
+  final rest = (seconds % 60).toString().padLeft(2, '0');
+  return '$minutes:$rest';
 }
 
 _ChatSubscriptionPlan? _findPlanByCode(

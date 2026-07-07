@@ -1538,8 +1538,11 @@ paths:
           name: sort
           schema:
             type: string
-            enum: [created_at.asc, created_at.desc]
-            default: created_at.asc
+            enum: [created_at.asc, created_at.desc, stream_order.asc, stream_order.desc]
+            default: stream_order.asc
+        - in: query
+          name: afterStreamOrder
+          schema: { type: integer, minimum: 0 }
         - in: query
           name: includeDeleted
           schema: { type: boolean }
@@ -1552,6 +1555,54 @@ paths:
       parameters: [ { $ref: "#/components/parameters/sessionId" } ]
       requestBody: { $ref: "#/components/requestBodies/MessageCreate" }
       responses: { "201": { $ref: "#/components/responses/Message" } }
+
+  /sessions/{sessionId}/attachments/upload-url:
+    post:
+      tags: [Messages, Files]
+      summary: Create signed upload URL for a chat message attachment
+      description: |
+        Creates a pending chat attachment and returns a private Supabase Storage signed upload URL.
+        Launch limits are 6 images per message, 1 video per message, or 1 voice note per message.
+        Hard server limits: images 8 MB, videos 50 MB, voice notes 15 MB and 5 minutes.
+      security: [{ bearerAuth: [] }]
+      parameters: [ { $ref: "#/components/parameters/sessionId" } ]
+      requestBody: { $ref: "#/components/requestBodies/MessageAttachmentUploadUrlCreate" }
+      responses:
+        "201": { $ref: "#/components/responses/MessageAttachmentUploadUrl" }
+
+  /sessions/{sessionId}/attachments/{attachmentId}/download-url:
+    get:
+      tags: [Messages, Files]
+      summary: Refresh signed download URL for a chat message attachment
+      description: Returns a fresh private signed download URL for a ready, non-deleted attachment visible to the authenticated session participant.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/sessionId" }
+        - { $ref: "#/components/parameters/attachmentId" }
+      responses:
+        "200": { $ref: "#/components/responses/MessageAttachmentDownloadUrl" }
+
+  /sessions/{sessionId}/attachments/{attachmentId}/remove:
+    post:
+      tags: [Messages, Files]
+      summary: Soft-remove a pending or sent chat message attachment
+      description: Sender/admin-only attachment soft delete used for cleanup and failed-upload recovery surfaces.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/sessionId" }
+        - { $ref: "#/components/parameters/attachmentId" }
+      responses:
+        "200":
+          description: Attachment removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  sessionId: { type: string, format: uuid }
+                  attachmentId: { type: string, format: uuid }
+                  removed: { type: boolean }
 
   /sessions/{sessionId}/transcript:
     get:
@@ -2843,6 +2894,39 @@ paths:
                       type: object
                       additionalProperties: true
 
+  /admin/export/chat-transcripts/{sessionId}:
+    get:
+      tags: [Admin]
+      summary: Export a chat transcript with attachment metadata
+      security: [{ bearerAuth: [] }, { adminSecret: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/sessionId" }
+        - in: query
+          name: includeDeleted
+          schema: { type: boolean }
+      responses:
+        "200":
+          description: Admin-safe chat transcript export
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  exportedAt: { type: string, format: date-time }
+                  sessionId: { type: string, format: uuid }
+                  includeDeleted: { type: boolean }
+                  transcript:
+                    type: array
+                    items:
+                      allOf:
+                        - { $ref: "#/components/schemas/Message" }
+                        - type: object
+                          properties:
+                            attachments:
+                              type: array
+                              items: { $ref: "#/components/schemas/MessageAttachment" }
+
   /admin/video/sessions:
     get:
       tags: [Admin]
@@ -2935,6 +3019,63 @@ paths:
                         value: { type: integer }
                         threshold: { type: integer }
 
+  /admin/ops/chat-media:
+    get:
+      tags: [Admin]
+      summary: Chat media attachment metrics and alerts
+      security: [{ bearerAuth: [] }, { adminSecret: [] }]
+      responses:
+        "200":
+          description: Chat media metrics and alert state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  generatedAt: { type: string, format: date-time }
+                  metrics:
+                    type: object
+                    additionalProperties: true
+                  alerts:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+
+  /admin/ops/chat-media/cleanup-pending:
+    post:
+      tags: [Admin]
+      summary: Mark orphaned pending chat media uploads as failed
+      security: [{ bearerAuth: [] }, { adminSecret: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                olderThanHours: { type: integer, minimum: 1, maximum: 720, default: 24 }
+                limit: { type: integer, minimum: 1, maximum: 1000, default: 250 }
+                dryRun: { type: boolean, default: true }
+      responses:
+        "200":
+          description: Cleanup result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  dryRun: { type: boolean }
+                  olderThanHours: { type: integer }
+                  matched: { type: integer }
+                  cleaned: { type: integer }
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+
   /webhooks/stripe:
     post:
       tags: [Webhooks]
@@ -2997,6 +3138,7 @@ components:
     petId: { in: path, name: petId, required: true, schema: { type: string, format: uuid } }
     vetId: { in: path, name: vetId, required: true, schema: { type: string, format: uuid } }
     sessionId: { in: path, name: sessionId, required: true, schema: { type: string, format: uuid } }
+    attachmentId: { in: path, name: attachmentId, required: true, schema: { type: string, format: uuid } }
     pagingLimit: { in: query, name: limit, schema: { type: integer, default: 20, maximum: 100 } }
     pagingCursor: { in: query, name: cursor, schema: { type: string } }
 
@@ -3165,9 +3307,39 @@ components:
           schema:
             type: object
             properties:
-              role: { type: string, enum: [user, vet, ai] }
-              content: { type: string }
-            required: [role, content]
+              content: { type: string, maxLength: 4000 }
+              clientKey: { type: string, maxLength: 128 }
+              attachments:
+                type: array
+                description: Pending attachment references returned by /sessions/{sessionId}/attachments/upload-url after the client uploads the file.
+                maxItems: 6
+                items:
+                  type: object
+                  properties:
+                    id: { type: string, format: uuid }
+                    attachmentId: { type: string, format: uuid }
+                    attachment_id: { type: string, format: uuid }
+            anyOf:
+              - required: [content]
+              - required: [attachments]
+    MessageAttachmentUploadUrlCreate:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              kind: { type: string, enum: [image, video, voice] }
+              contentType:
+                type: string
+                enum: [image/jpeg, image/png, image/webp, image/heic, image/heif, video/mp4, video/quicktime, audio/aac, audio/mp4, audio/mpeg, audio/wav, audio/webm, audio/x-m4a]
+              byteSize: { type: integer, minimum: 1, maximum: 52428800 }
+              fileName: { type: string, maxLength: 240 }
+              width: { type: integer, minimum: 1 }
+              height: { type: integer, minimum: 1 }
+              durationMs: { type: integer, minimum: 1, maximum: 300000 }
+              waveform: { type: array, items: { type: number } }
+              metadata: { type: object, additionalProperties: true }
+            required: [kind, contentType, byteSize]
     VideoRoomCreate:
       content:
         application/json:
@@ -3555,10 +3727,47 @@ components:
       content: { application/json: { schema: { type: object, additionalProperties: true } } }
     ListMessages:
       description: Messages
-      content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/Message" } } } } } }
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              ok: { type: boolean }
+              sessionId: { type: string, format: uuid }
+              cursor: { type: integer }
+              items: { type: array, items: { $ref: "#/components/schemas/Message" } }
+              receipts: { type: array, items: { $ref: "#/components/schemas/MessageReceipt" } }
     Message:
       description: Message
       content: { application/json: { schema: { $ref: "#/components/schemas/Message" } } }
+    MessageAttachmentUploadUrl:
+      description: Signed upload URL for a pending chat attachment
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              ok: { type: boolean }
+              sessionId: { type: string, format: uuid }
+              attachment: { $ref: "#/components/schemas/MessageAttachment" }
+              upload:
+                type: object
+                properties:
+                  bucket: { type: string }
+                  path: { type: string }
+                  signedUrl: { type: string, nullable: true }
+                  token: { type: string, nullable: true }
+                  expiresIn: { type: integer }
+    MessageAttachmentDownloadUrl:
+      description: Refreshed signed download URL for a ready chat attachment
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              ok: { type: boolean }
+              sessionId: { type: string, format: uuid }
+              attachment: { $ref: "#/components/schemas/MessageAttachment" }
     Transcript:
       description: Transcript
       content: { application/json: { schema: { type: object, properties: { text: { type: string } } } } }
@@ -3910,7 +4119,42 @@ components:
         sender_id: { type: string, format: uuid }
         role: { type: string, enum: [user, vet, ai] }
         content: { type: string }
+        client_key: { type: string, nullable: true }
+        stream_order: { type: integer }
         created_at: { type: string, format: date-time }
+        edited_at: { type: string, format: date-time, nullable: true }
+        deleted_at: { type: string, format: date-time, nullable: true }
+        redacted_at: { type: string, format: date-time, nullable: true }
+        redaction_reason: { type: string, nullable: true }
+        attachments: { type: array, items: { $ref: "#/components/schemas/MessageAttachment" } }
+    MessageAttachment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        message_id: { type: string, format: uuid, nullable: true }
+        session_id: { type: string, format: uuid }
+        kind: { type: string, enum: [image, video, voice] }
+        content_type: { type: string }
+        byte_size: { type: integer }
+        width: { type: integer, nullable: true }
+        height: { type: integer, nullable: true }
+        duration_ms: { type: integer, nullable: true }
+        thumbnail_path: { type: string, nullable: true }
+        waveform: { nullable: true }
+        status: { type: string, enum: [pending, ready, failed, removed] }
+        transcript_text: { type: string, nullable: true }
+        transcript_status: { type: string, enum: [not_requested, pending, ready, failed] }
+        metadata: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+        downloadUrl: { type: string, nullable: true }
+        downloadExpiresIn: { type: integer, nullable: true }
+    MessageReceipt:
+      type: object
+      properties:
+        message_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        delivered_at: { type: string, format: date-time }
+        read_at: { type: string, format: date-time, nullable: true }
     Notes:
       type: object
       properties:

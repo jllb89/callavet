@@ -999,7 +999,9 @@ class _ActiveConsultEventList extends StatelessWidget {
             onOpenChat: consult.canOpenChat
                 ? () => onOpenChat(consult.sessionId)
                 : null,
-            onEndConsult: isEnding ? null : () => onEndConsult(consult),
+            onEndConsult: isEnding || !consult.canEnd
+                ? null
+                : () => onEndConsult(consult),
           ),
         );
       }).toList(),
@@ -2687,6 +2689,7 @@ class _ActiveConsult {
 
   bool get canJoinVideo => mode == 'video' && sessionId.trim().isNotEmpty;
   bool get canOpenChat => mode == 'chat' && sessionId.trim().isNotEmpty;
+  bool get canEnd => status.toLowerCase() == 'active';
   String get startedLabel => startedAt == null
       ? 'inicio por confirmar'
       : 'inició ${_formatShortDateTime(startedAt!)}';

@@ -1,5 +1,8 @@
-import { Body, Controller, Get, Headers, HttpException, HttpStatus, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpCode, HttpException, HttpStatus, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import WebSocket from 'ws';
 import { AuthGuard } from '../auth/auth.guard';
+import { RequestContext } from '../auth/request-context.service';
 import { DbService } from '../db/db.service';
 import { EndpointRateLimitGuard } from '../rate-limit/endpoint-rate-limit.guard';
 import { RateLimit } from '../rate-limit/rate-limit.decorator';
@@ -11,6 +14,29 @@ type SessionMessageBody = {
   content?: string;
   clientKey?: string;
   client_key?: string;
+  attachments?: SessionMessageAttachmentRef[];
+};
+
+type SessionMessageAttachmentRef = {
+  id?: string;
+  attachmentId?: string;
+  attachment_id?: string;
+};
+
+type SessionAttachmentUploadBody = {
+  kind?: string;
+  contentType?: string;
+  content_type?: string;
+  byteSize?: string | number;
+  byte_size?: string | number;
+  fileName?: string;
+  file_name?: string;
+  width?: string | number;
+  height?: string | number;
+  durationMs?: string | number;
+  duration_ms?: string | number;
+  waveform?: unknown;
+  metadata?: unknown;
 };
 
 type SessionMessageReadBody = {
@@ -41,12 +67,103 @@ type SessionMessageRow = {
   deleted_at: string | null;
   redacted_at: string | null;
   redaction_reason: string | null;
+  attachments?: MessageAttachmentResponse[];
+};
+
+type MessageAttachmentKind = 'image' | 'video' | 'voice';
+
+type MessageAttachmentRow = {
+  id: string;
+  message_id: string | null;
+  session_id: string;
+  uploaded_by: string | null;
+  kind: MessageAttachmentKind;
+  storage_bucket: string;
+  storage_path: string;
+  content_type: string;
+  byte_size: string | number;
+  width: number | null;
+  height: number | null;
+  duration_ms: number | null;
+  thumbnail_path: string | null;
+  waveform: unknown;
+  status: string;
+  transcript_text: string | null;
+  transcript_status: string;
+  metadata: Record<string, any> | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type MessageAttachmentResponse = {
+  id: string;
+  message_id: string | null;
+  session_id: string;
+  kind: MessageAttachmentKind;
+  content_type: string;
+  byte_size: number;
+  width: number | null;
+  height: number | null;
+  duration_ms: number | null;
+  thumbnail_path: string | null;
+  waveform: unknown;
+  status: string;
+  transcript_text: string | null;
+  transcript_status: string;
+  metadata: Record<string, any>;
+  created_at: string;
+  downloadUrl?: string | null;
+  downloadExpiresIn?: number;
 };
 
 @Controller('sessions')
 @UseGuards(AuthGuard)
 export class SessionMessagesController {
-  constructor(private readonly db: DbService) {}
+  constructor(private readonly db: DbService, private readonly rc: RequestContext) {}
+  private supabase?: SupabaseClient;
+  private readonly uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  private readonly attachmentDownloadExpiresIn = 3600;
+  private readonly attachmentContentTypes: Record<MessageAttachmentKind, Set<string>> = {
+    image: new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']),
+    video: new Set(['video/mp4', 'video/quicktime']),
+    voice: new Set(['audio/aac', 'audio/mp4', 'audio/mpeg', 'audio/wav', 'audio/webm', 'audio/x-m4a']),
+  };
+  private readonly attachmentExtensions: Record<string, string> = {
+    'image/jpeg': '.jpg',
+    'image/png': '.png',
+    'image/webp': '.webp',
+    'image/heic': '.heic',
+    'image/heif': '.heif',
+    'video/mp4': '.mp4',
+    'video/quicktime': '.mov',
+    'audio/aac': '.aac',
+    'audio/mp4': '.m4a',
+    'audio/mpeg': '.mp3',
+    'audio/wav': '.wav',
+    'audio/webm': '.webm',
+    'audio/x-m4a': '.m4a',
+  };
+  private readonly attachmentCompatibleExtensions: Record<string, string[]> = {
+    'image/jpeg': ['.jpg', '.jpeg'],
+    'image/png': ['.png'],
+    'image/webp': ['.webp'],
+    'image/heic': ['.heic'],
+    'image/heif': ['.heif'],
+    'video/mp4': ['.mp4'],
+    'video/quicktime': ['.mov', '.qt'],
+    'audio/aac': ['.aac'],
+    'audio/mp4': ['.m4a', '.mp4'],
+    'audio/mpeg': ['.mp3', '.mpeg'],
+    'audio/wav': ['.wav'],
+    'audio/webm': ['.webm'],
+    'audio/x-m4a': ['.m4a'],
+  };
+  private readonly attachmentByteLimits: Record<MessageAttachmentKind, number> = {
+    image: 8 * 1024 * 1024,
+    video: 50 * 1024 * 1024,
+    voice: 15 * 1024 * 1024,
+  };
+  private readonly voiceDurationLimitMs = 5 * 60 * 1000;
 
   private normalizeActorHint(value?: string | string[]) {
     const raw = Array.isArray(value) ? value[0] : value;
@@ -62,6 +179,259 @@ export class SessionMessagesController {
       at: new Date().toISOString(),
       ...metadata,
     }));
+  }
+
+  private getStorageClient() {
+    if (this.supabase) return this.supabase;
+    const url = process.env.SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!url || !key) throw new HttpException('storage_env_missing', HttpStatus.BAD_REQUEST);
+    this.supabase = createClient(url, key, { realtime: { transport: WebSocket as any } });
+    return this.supabase;
+  }
+
+  private chatMediaBucket() {
+    return process.env.CHAT_MEDIA_STORAGE_BUCKET || 'chat-media';
+  }
+
+  private async logAttachmentAudit(action: string, targetId: string | null, metadata: Record<string, any> = {}) {
+    try {
+      await this.db.query(
+        `insert into admin_audit_logs (
+           id,
+           actor_user_id,
+           action,
+           target_type,
+           target_id,
+           metadata,
+           created_at
+         ) values (
+           gen_random_uuid(),
+           $1::uuid,
+           $2::text,
+           'message_attachments',
+           $3::text,
+           $4::jsonb,
+           now()
+         )`,
+        [this.rc.userId || null, action, targetId, JSON.stringify(metadata)]
+      );
+    } catch {
+      // Audit logging should never block chat delivery.
+    }
+  }
+
+  private normalizeKind(value?: string): MessageAttachmentKind {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (normalized === 'image' || normalized === 'video' || normalized === 'voice') return normalized;
+    throw new HttpException('unsupported_attachment_kind', HttpStatus.BAD_REQUEST);
+  }
+
+  private normalizeContentType(value?: string) {
+    return String(value || '').trim().toLowerCase();
+  }
+
+  private parsePositiveInt(value: unknown, field: string, options: { required?: boolean; max?: number } = {}) {
+    if (value == null || value === '') {
+      if (options.required) throw new HttpException(`${field}_required`, HttpStatus.BAD_REQUEST);
+      return null;
+    }
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed) || parsed <= 0) throw new HttpException(`${field}_invalid`, HttpStatus.BAD_REQUEST);
+    if (options.max != null && parsed > options.max) throw new HttpException(`${field}_too_large`, HttpStatus.BAD_REQUEST);
+    return parsed;
+  }
+
+  private validateAttachmentUpload(body: SessionAttachmentUploadBody) {
+    const kind = this.normalizeKind(body?.kind);
+    const contentType = this.normalizeContentType(body?.contentType || body?.content_type);
+    if (!this.attachmentContentTypes[kind].has(contentType)) {
+      throw new HttpException('unsupported_media_type', HttpStatus.BAD_REQUEST);
+    }
+    const byteSize = this.parsePositiveInt(body?.byteSize ?? body?.byte_size, 'byte_size', { required: true })!;
+    if (byteSize > this.attachmentByteLimits[kind]) throw new HttpException('attachment_too_large', HttpStatus.BAD_REQUEST);
+    const durationMs = this.parsePositiveInt(body?.durationMs ?? body?.duration_ms, 'duration_ms', {
+      max: kind === 'voice' ? this.voiceDurationLimitMs : undefined,
+    });
+    if (kind === 'voice' && durationMs != null && durationMs > this.voiceDurationLimitMs) {
+      throw new HttpException('voice_note_too_long', HttpStatus.BAD_REQUEST);
+    }
+    const fileName = String(body?.fileName || body?.file_name || '').trim().slice(0, 240) || null;
+    if (fileName) {
+      const lowerFileName = fileName.toLowerCase();
+      const compatibleExtensions = this.attachmentCompatibleExtensions[contentType] || [];
+      if (compatibleExtensions.length && !compatibleExtensions.some((extension) => lowerFileName.endsWith(extension))) {
+        throw new HttpException('attachment_extension_mismatch', HttpStatus.BAD_REQUEST);
+      }
+    }
+    return {
+      kind,
+      contentType,
+      byteSize,
+      fileName,
+      width: this.parsePositiveInt(body?.width, 'width'),
+      height: this.parsePositiveInt(body?.height, 'height'),
+      durationMs,
+      waveform: kind === 'voice' ? body?.waveform ?? null : null,
+      metadata: this.asRecord(body?.metadata),
+    };
+  }
+
+  private asRecord(value: unknown): Record<string, any> {
+    return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : {};
+  }
+
+  private normalizeAttachmentIds(value: unknown) {
+    if (value == null) return [];
+    if (!Array.isArray(value)) throw new HttpException('attachments_must_be_array', HttpStatus.BAD_REQUEST);
+    const ids: string[] = [];
+    for (const item of value) {
+      const ref = (item || {}) as SessionMessageAttachmentRef;
+      const id = String(ref.id || ref.attachmentId || ref.attachment_id || '').trim();
+      if (!this.uuidRegex.test(id)) throw new HttpException('attachment_id_invalid', HttpStatus.BAD_REQUEST);
+      if (!ids.includes(id)) ids.push(id);
+    }
+    return ids;
+  }
+
+  private validateAttachmentBatch(rows: MessageAttachmentRow[]) {
+    if (!rows.length) return;
+    const kinds = new Set(rows.map((row) => row.kind));
+    if (kinds.size > 1) throw new HttpException('mixed_attachment_kind_not_supported', HttpStatus.BAD_REQUEST);
+    const kind = rows[0].kind;
+    if (kind === 'image' && rows.length > 6) throw new HttpException('too_many_attachments', HttpStatus.BAD_REQUEST);
+    if ((kind === 'video' || kind === 'voice') && rows.length > 1) throw new HttpException('too_many_attachments', HttpStatus.BAD_REQUEST);
+    for (const row of rows) {
+      const byteSize = Number(row.byte_size || 0);
+      if (!Number.isFinite(byteSize) || byteSize <= 0 || byteSize > this.attachmentByteLimits[row.kind]) {
+        throw new HttpException('attachment_too_large', HttpStatus.BAD_REQUEST);
+      }
+      if (row.kind === 'voice' && row.duration_ms != null && row.duration_ms > this.voiceDurationLimitMs) {
+        throw new HttpException('voice_note_too_long', HttpStatus.BAD_REQUEST);
+      }
+    }
+  }
+
+  private async createSignedUploadUrl(bucket: string, storagePath: string) {
+    const storage = this.getStorageClient().storage.from(bucket) as any;
+    if (typeof storage.createSignedUploadUrl !== 'function') {
+      throw new HttpException('signed_upload_not_supported', HttpStatus.BAD_GATEWAY);
+    }
+    const { data, error } = await storage.createSignedUploadUrl(storagePath);
+    if (error) throw new HttpException(`signed_upload_failed: ${error.message}`, HttpStatus.BAD_GATEWAY);
+    return data || {};
+  }
+
+  private async signedDownloadUrl(row: MessageAttachmentRow) {
+    const { data, error } = await this.getStorageClient()
+      .storage
+      .from(row.storage_bucket)
+      .createSignedUrl(row.storage_path, this.attachmentDownloadExpiresIn);
+    if (error) return null;
+    return data?.signedUrl || null;
+  }
+
+  private async storageObjectByteSize(row: MessageAttachmentRow) {
+    const slash = row.storage_path.lastIndexOf('/');
+    const prefix = slash >= 0 ? row.storage_path.slice(0, slash) : '';
+    const name = slash >= 0 ? row.storage_path.slice(slash + 1) : row.storage_path;
+    const { data, error } = await this.getStorageClient()
+      .storage
+      .from(row.storage_bucket)
+      .list(prefix, { limit: 100, search: name });
+    if (error) throw new HttpException(`attachment_lookup_failed: ${error.message}`, HttpStatus.BAD_GATEWAY);
+    const found = (data || []).find((item: any) => item?.name === name);
+    if (!found) return null;
+    const size = Number((found as any).metadata?.size ?? (found as any).metadata?.contentLength ?? (found as any).size ?? 0);
+    return Number.isFinite(size) && size > 0 ? size : null;
+  }
+
+  private async verifyUploadedAttachments(rows: MessageAttachmentRow[]) {
+    const verified: Array<MessageAttachmentRow & { actual_byte_size: number }> = [];
+    for (const row of rows) {
+      const actualByteSize = await this.storageObjectByteSize(row);
+      if (!actualByteSize) throw new HttpException('attachment_not_ready', HttpStatus.CONFLICT);
+      if (actualByteSize > this.attachmentByteLimits[row.kind]) {
+        throw new HttpException('attachment_too_large', HttpStatus.BAD_REQUEST);
+      }
+      verified.push({ ...row, actual_byte_size: actualByteSize });
+    }
+    return verified;
+  }
+
+  private async shapeAttachment(row: MessageAttachmentRow): Promise<MessageAttachmentResponse> {
+    const downloadUrl = row.status === 'ready' ? await this.signedDownloadUrl(row) : null;
+    return {
+      id: row.id,
+      message_id: row.message_id,
+      session_id: row.session_id,
+      kind: row.kind,
+      content_type: row.content_type,
+      byte_size: Number(row.byte_size || 0),
+      width: row.width,
+      height: row.height,
+      duration_ms: row.duration_ms,
+      thumbnail_path: row.thumbnail_path,
+      waveform: row.waveform,
+      status: row.status,
+      transcript_text: row.transcript_text,
+      transcript_status: row.transcript_status,
+      metadata: row.metadata || {},
+      created_at: row.created_at,
+      downloadUrl,
+      downloadExpiresIn: downloadUrl ? this.attachmentDownloadExpiresIn : undefined,
+    };
+  }
+
+  private async attachmentsForMessages(q: TxQuery, messageIds: string[]) {
+    if (!messageIds.length) return new Map<string, MessageAttachmentResponse[]>();
+    const { rows } = await q<MessageAttachmentRow>(
+      `select id, message_id, session_id, uploaded_by, kind, storage_bucket, storage_path,
+              content_type, byte_size, width, height, duration_ms, thumbnail_path, waveform,
+              status, transcript_text, transcript_status, metadata, created_at, updated_at
+         from message_attachments
+        where message_id = any($1::uuid[])
+          and deleted_at is null
+          and status <> 'removed'
+        order by created_at asc`,
+      [messageIds]
+    );
+    const shaped = await Promise.all(rows.map((row) => this.shapeAttachment(row)));
+    const byMessage = new Map<string, MessageAttachmentResponse[]>();
+    for (const attachment of shaped) {
+      const messageId = attachment.message_id;
+      if (!messageId) continue;
+      const list = byMessage.get(messageId) || [];
+      list.push(attachment);
+      byMessage.set(messageId, list);
+    }
+    return byMessage;
+  }
+
+  private async attachRowsToMessage(q: TxQuery, sessionId: string, messageId: string, rows: Array<MessageAttachmentRow & { actual_byte_size: number }>) {
+    for (const row of rows) {
+      await q(
+        `update message_attachments
+            set message_id = $2::uuid,
+                status = 'ready',
+                byte_size = $3::bigint,
+                transcript_status = case when kind = 'voice' and transcript_status = 'not_requested' then 'pending' else transcript_status end,
+                metadata = coalesce(metadata, '{}'::jsonb) || $4::jsonb,
+                updated_at = now()
+          where id = $1::uuid
+            and session_id = $5::uuid
+            and uploaded_by = auth.uid()
+            and message_id is null
+            and deleted_at is null`,
+        [
+          row.id,
+          messageId,
+          row.actual_byte_size,
+          JSON.stringify({ verifiedAt: new Date().toISOString(), declaredByteSize: Number(row.byte_size || 0) }),
+          sessionId,
+        ]
+      );
+    }
   }
 
   private async getSessionAccess(q: TxQuery, sessionId: string, actorHint?: 'user' | 'vet' | null) {
@@ -104,10 +474,11 @@ export class SessionMessagesController {
     return rows[0] || null;
   }
 
-  private normalizeMessage(row: SessionMessageRow) {
+  private normalizeMessage(row: SessionMessageRow, attachments: MessageAttachmentResponse[] = []) {
     return {
       ...row,
       stream_order: Number(row.stream_order || 0),
+      attachments,
     };
   }
 
@@ -136,6 +507,234 @@ export class SessionMessagesController {
       [session.consumption_id]
     );
     return rows[0]?.ok === true;
+  }
+
+  @Post(':sessionId/attachments/upload-url')
+  @UseGuards(EndpointRateLimitGuard)
+  @RateLimit({ key: 'sessions.attachments.upload-url', limit: 30, windowMs: 60_000 })
+  async createAttachmentUploadUrl(
+    @Param('sessionId') sessionId: string,
+    @Headers('x-cav-actor-role') actorRoleHeader: string | string[] | undefined,
+    @Body() body: SessionAttachmentUploadBody,
+  ) {
+    try {
+      const upload = this.validateAttachmentUpload(body || {});
+      const actorHint = this.normalizeActorHint(actorRoleHeader);
+      if (this.db.isStub) {
+        return {
+          ok: true,
+          sessionId,
+          attachment: {
+            id: `att_${Date.now()}`,
+            kind: upload.kind,
+            content_type: upload.contentType,
+            byte_size: upload.byteSize,
+            status: 'pending',
+            stub: true,
+          },
+          upload: { signedUrl: 'stub', path: 'stub', expiresIn: 3600 },
+        } as any;
+      }
+      const bucket = this.chatMediaBucket();
+      const result = await this.db.runInTx(async (q) => {
+        const session = await this.getSessionAccess(q, sessionId, actorHint);
+        if (!session) throw new HttpException('not_found', HttpStatus.NOT_FOUND);
+        if (session.actor_role === 'admin') throw new HttpException('admin_upload_not_supported', HttpStatus.FORBIDDEN);
+        if (String(session.status || '').toLowerCase() !== 'active') {
+          throw new HttpException('session_not_active', HttpStatus.CONFLICT);
+        }
+        const extension = this.attachmentExtensions[upload.contentType] || '.bin';
+        const metadata = {
+          ...upload.metadata,
+          originalFileName: upload.fileName,
+          declaredByteSize: upload.byteSize,
+          uploadRequestedAt: new Date().toISOString(),
+        };
+        const { rows } = await q<MessageAttachmentRow>(
+          `with candidate as (
+             select gen_random_uuid() as id
+           )
+           insert into message_attachments (
+             id,
+             session_id,
+             uploaded_by,
+             kind,
+             storage_bucket,
+             storage_path,
+             content_type,
+             byte_size,
+             width,
+             height,
+             duration_ms,
+             waveform,
+             transcript_status,
+             metadata,
+             status,
+             created_at,
+             updated_at
+           )
+           select candidate.id,
+                  $1::uuid,
+                  auth.uid(),
+                  $2::text,
+                  $3::text,
+                  'chat-consults/' || $1::text || '/' || candidate.id::text || $4::text,
+                  $5::text,
+                  $6::bigint,
+                  $7::int,
+                  $8::int,
+                  $9::int,
+                  $10::jsonb,
+                  case when $2::text = 'voice' then 'pending' else 'not_requested' end,
+                  $11::jsonb,
+                  'pending',
+                  now(),
+                  now()
+             from candidate
+           returning id, message_id, session_id, uploaded_by, kind, storage_bucket, storage_path,
+                     content_type, byte_size, width, height, duration_ms, thumbnail_path, waveform,
+                     status, transcript_text, transcript_status, metadata, created_at, updated_at`,
+          [
+            sessionId,
+            upload.kind,
+            bucket,
+            extension,
+            upload.contentType,
+            upload.byteSize,
+            upload.width,
+            upload.height,
+            upload.durationMs,
+            JSON.stringify(upload.waveform),
+            JSON.stringify(metadata),
+          ]
+        );
+        return rows[0];
+      });
+      if (!result) throw new HttpException('attachment_create_failed', HttpStatus.BAD_REQUEST);
+      const signed = await this.createSignedUploadUrl(result.storage_bucket, result.storage_path);
+      this.realtimeLog('attachment.upload_url.created', {
+        sessionId,
+        attachmentId: result.id,
+        kind: result.kind,
+        byteSize: Number(result.byte_size || 0),
+      });
+      await this.logAttachmentAudit('chat.attachments.upload_url.created', result.id, {
+        sessionId,
+        kind: result.kind,
+        contentType: result.content_type,
+        byteSize: Number(result.byte_size || 0),
+      });
+      return {
+        ok: true,
+        sessionId,
+        attachment: await this.shapeAttachment(result),
+        upload: {
+          bucket: result.storage_bucket,
+          path: result.storage_path,
+          signedUrl: signed.signedUrl || signed.signedURL || null,
+          token: signed.token || null,
+          expiresIn: 7200,
+        },
+      };
+    } catch (e: any) {
+      await this.logAttachmentAudit('chat.attachments.upload_url.failed', null, {
+        sessionId,
+        kind: body?.kind || null,
+        contentType: body?.contentType || body?.content_type || null,
+        byteSize: body?.byteSize || body?.byte_size || null,
+        error: e?.message || 'attachment_upload_url_failed',
+      });
+      this.realtimeLog('attachment.upload_url.failed', {
+        sessionId,
+        error: e?.message || 'attachment_upload_url_failed',
+      });
+      if (e instanceof HttpException) throw e;
+      throw new HttpException(e?.message || 'attachment_upload_url_failed', HttpStatus.BAD_REQUEST);
+    }
+  }
+
+  @Get(':sessionId/attachments/:attachmentId/download-url')
+  async refreshAttachmentDownloadUrl(
+    @Param('sessionId') sessionId: string,
+    @Param('attachmentId') attachmentId: string,
+    @Headers('x-cav-actor-role') actorRoleHeader?: string | string[],
+  ) {
+    try {
+      if (!this.uuidRegex.test(attachmentId)) throw new HttpException('attachment_id_invalid', HttpStatus.BAD_REQUEST);
+      if (this.db.isStub) return { ok: true, sessionId, attachment: null, mode: 'stub' } as any;
+      const actorHint = this.normalizeActorHint(actorRoleHeader);
+      const result = await this.db.runInTx(async (q) => {
+        const session = await this.getSessionAccess(q, sessionId, actorHint);
+        if (!session) throw new HttpException('not_found', HttpStatus.NOT_FOUND);
+        const { rows } = await q<MessageAttachmentRow>(
+          `select id, message_id, session_id, uploaded_by, kind, storage_bucket, storage_path,
+                  content_type, byte_size, width, height, duration_ms, thumbnail_path, waveform,
+                  status, transcript_text, transcript_status, metadata, created_at, updated_at
+             from message_attachments
+            where id = $2::uuid
+              and session_id = $1::uuid
+              and deleted_at is null
+              and status = 'ready'
+            limit 1`,
+          [sessionId, attachmentId]
+        );
+        if (!rows[0]) throw new HttpException('attachment_not_found', HttpStatus.NOT_FOUND);
+        return { session, attachment: rows[0] };
+      });
+      const attachment = await this.shapeAttachment(result.attachment);
+      await this.logAttachmentAudit('chat.attachments.download_url.refreshed', attachmentId, {
+        sessionId,
+        role: result.session.actor_role,
+        kind: result.attachment.kind,
+      });
+      return { ok: true, sessionId, attachment };
+    } catch (e: any) {
+      if (e instanceof HttpException) throw e;
+      throw new HttpException(e?.message || 'attachment_download_url_failed', HttpStatus.BAD_REQUEST);
+    }
+  }
+
+  @Post(':sessionId/attachments/:attachmentId/remove')
+  @HttpCode(HttpStatus.OK)
+  async removeAttachment(
+    @Param('sessionId') sessionId: string,
+    @Param('attachmentId') attachmentId: string,
+    @Headers('x-cav-actor-role') actorRoleHeader: string | string[] | undefined,
+  ) {
+    try {
+      if (!this.uuidRegex.test(attachmentId)) throw new HttpException('attachment_id_invalid', HttpStatus.BAD_REQUEST);
+      if (this.db.isStub) return { ok: true, sessionId, attachmentId, removed: true, mode: 'stub' } as any;
+      const actorHint = this.normalizeActorHint(actorRoleHeader);
+      const result = await this.db.runInTx(async (q) => {
+        const session = await this.getSessionAccess(q, sessionId, actorHint);
+        if (!session) throw new HttpException('not_found', HttpStatus.NOT_FOUND);
+        const { rows } = await q<{ id: string; kind: string }>(
+          `update message_attachments
+              set status = 'removed',
+                  deleted_at = now(),
+                  deleted_by = auth.uid(),
+                  metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object('removedAt', now(), 'removedByRole', $3::text),
+                  updated_at = now()
+            where id = $2::uuid
+              and session_id = $1::uuid
+              and deleted_at is null
+              and (uploaded_by = auth.uid() or is_admin())
+          returning id, kind`,
+          [sessionId, attachmentId, session.actor_role]
+        );
+        if (!rows[0]) throw new HttpException('attachment_remove_forbidden', HttpStatus.FORBIDDEN);
+        return { session, attachment: rows[0] };
+      });
+      await this.logAttachmentAudit('chat.attachments.removed', attachmentId, {
+        sessionId,
+        role: result.session.actor_role,
+        kind: result.attachment.kind,
+      });
+      return { ok: true, sessionId, attachmentId, removed: true };
+    } catch (e: any) {
+      if (e instanceof HttpException) throw e;
+      throw new HttpException(e?.message || 'attachment_remove_failed', HttpStatus.BAD_REQUEST);
+    }
   }
 
   @Get(':sessionId/messages')
@@ -204,8 +803,10 @@ export class SessionMessagesController {
             )).rows
           : [];
         const items = rows.map((row) => this.normalizeMessage(row));
+        const attachments = await this.attachmentsForMessages(q, messageIds);
+        const hydratedItems = rows.map((row) => this.normalizeMessage(row, attachments.get(row.id) || []));
         const cursor = items.length ? items[items.length - 1].stream_order : 0;
-        return { session, items, receipts, cursor };
+        return { session, items: hydratedItems, receipts, cursor };
       });
       this.realtimeLog('messages.sync.completed', {
         sessionId,
@@ -257,9 +858,10 @@ export class SessionMessagesController {
     try {
       const content = (body?.content || '').toString().trim();
       const clientKey = (body?.clientKey || body?.client_key || '').toString().trim() || null;
+      const attachmentIds = this.normalizeAttachmentIds(body?.attachments);
       const actorHint = this.normalizeActorHint(actorRoleHeader);
-      if (!content) {
-        throw new HttpException('content_required', HttpStatus.BAD_REQUEST);
+      if (!content && attachmentIds.length === 0) {
+        throw new HttpException('message_content_or_attachment_required', HttpStatus.BAD_REQUEST);
       }
       if (content.length > 4000) {
         throw new HttpException('content_too_long', HttpStatus.BAD_REQUEST);
@@ -273,7 +875,7 @@ export class SessionMessagesController {
           sessionId,
           duplicate: false,
           committed: false,
-          message: { id: `msg_${Date.now()}`, role: 'user', content, client_key: clientKey, stream_order: Date.now(), created_at: new Date().toISOString(), stub: true }
+          message: { id: `msg_${Date.now()}`, role: 'user', content, client_key: clientKey, stream_order: Date.now(), created_at: new Date().toISOString(), attachments: [], stub: true }
         } as any;
       }
       const result = await this.db.runInTx(async (q) => {
@@ -296,8 +898,31 @@ export class SessionMessagesController {
           if (existingRows[0]) {
             await this.markSenderRead(q, existingRows[0].id);
             const committed = await this.commitConsumptionIfNeeded(q, session);
-            return { message: this.normalizeMessage(existingRows[0]), duplicate: true, committed };
+            const attachments = await this.attachmentsForMessages(q, [existingRows[0].id]);
+            return { message: this.normalizeMessage(existingRows[0], attachments.get(existingRows[0].id) || []), duplicate: true, committed };
           }
+        }
+
+        let verifiedAttachments: Array<MessageAttachmentRow & { actual_byte_size: number }> = [];
+        if (attachmentIds.length) {
+          const { rows: attachmentRows } = await q<MessageAttachmentRow>(
+            `select id, message_id, session_id, uploaded_by, kind, storage_bucket, storage_path,
+                    content_type, byte_size, width, height, duration_ms, thumbnail_path, waveform,
+                    status, transcript_text, transcript_status, metadata, created_at, updated_at
+               from message_attachments
+              where id = any($1::uuid[])
+                and session_id = $2::uuid
+                and uploaded_by = auth.uid()
+                and message_id is null
+                and deleted_at is null
+              for update`,
+            [attachmentIds, sessionId]
+          );
+          if (attachmentRows.length !== attachmentIds.length) {
+            throw new HttpException('attachment_not_owned', HttpStatus.BAD_REQUEST);
+          }
+          this.validateAttachmentBatch(attachmentRows);
+          verifiedAttachments = await this.verifyUploadedAttachments(attachmentRows);
         }
 
         const { rows } = await q<SessionMessageRow>(
@@ -308,6 +933,9 @@ export class SessionMessagesController {
         );
         const inserted = rows[0];
         if (!inserted) throw new HttpException('create_failed', HttpStatus.BAD_REQUEST);
+        if (verifiedAttachments.length) {
+          await this.attachRowsToMessage(q, sessionId, inserted.id, verifiedAttachments);
+        }
         await q(
           `update chat_sessions
               set updated_at = now()
@@ -316,7 +944,8 @@ export class SessionMessagesController {
         );
         const committed = await this.commitConsumptionIfNeeded(q, session);
         await this.markSenderRead(q, inserted.id);
-        const message = this.normalizeMessage(inserted);
+        const attachments = await this.attachmentsForMessages(q, [inserted.id]);
+        const message = this.normalizeMessage(inserted, attachments.get(inserted.id) || []);
         await this.emitRoomBroadcast(q, sessionId, 'messages', { sessionId, message });
         return { message, duplicate: false, committed };
       });
@@ -325,16 +954,35 @@ export class SessionMessagesController {
         messageId: result.message?.id || null,
         role: result.message?.role || null,
         streamOrder: result.message?.stream_order || null,
+        attachmentCount: result.message?.attachments?.length || 0,
         clientKeyPresent: !!clientKey,
         duplicate: result.duplicate === true,
         committed: result.committed === true,
       });
+      if ((result.message?.attachments?.length || 0) > 0) {
+        await this.logAttachmentAudit('chat.attachments.message.attached', result.message.id, {
+          sessionId,
+          messageId: result.message.id,
+          attachmentIds: result.message.attachments.map((attachment: MessageAttachmentResponse) => attachment.id),
+          attachmentCount: result.message.attachments.length,
+          kinds: Array.from(new Set(result.message.attachments.map((attachment: MessageAttachmentResponse) => attachment.kind))),
+          duplicate: result.duplicate === true,
+        });
+      }
       return { ok: true, sessionId, ...result };
     } catch (e: any) {
+      if (Array.isArray(body?.attachments) && body.attachments.length > 0) {
+        await this.logAttachmentAudit('chat.attachments.message.failed', null, {
+          sessionId,
+          attachmentCount: body.attachments.length,
+          error: e?.message || 'create_failed',
+        });
+      }
       this.realtimeLog('messages.send.failed', {
         sessionId,
         clientKeyPresent: !!(body?.clientKey || body?.client_key),
         contentLength: (body?.content || '').toString().trim().length,
+        attachmentCount: Array.isArray(body?.attachments) ? body.attachments.length : 0,
         error: e?.message || 'create_failed',
       });
       if (e instanceof HttpException) throw e;

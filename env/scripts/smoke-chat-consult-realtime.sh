@@ -213,8 +213,15 @@ if [[ -n "$admin_secret" ]]; then
   ops_code=$(cat "$ops_code_tmp")
   ops_ok=$("$JQ" -r '.ok // false' "$ops_tmp" 2>/dev/null || print -- false)
   assert_ok $(is_2xx "$ops_code" && [[ "$ops_ok" == 'true' ]] && echo 0 || echo 1) 'admin chat consultation metrics endpoint'
+
+  media_ops_tmp=$(mktemp)
+  media_ops_code_tmp=$(mktemp)
+  admin_get_json /admin/ops/chat-media "$media_ops_tmp" "$media_ops_code_tmp"
+  media_ops_code=$(cat "$media_ops_code_tmp")
+  media_ops_ok=$("$JQ" -r '.ok // false' "$media_ops_tmp" 2>/dev/null || print -- false)
+  assert_ok $(is_2xx "$media_ops_code" && [[ "$media_ops_ok" == 'true' ]] && echo 0 || echo 1) 'admin chat media metrics endpoint'
 else
-  print -- 'SKIP: admin chat consultation metrics endpoint (set ADMIN_SECRET or ADMIN_PRICING_SYNC_SECRET)'
+  print -- 'SKIP: admin chat consultation/media metrics endpoints (set ADMIN_SECRET or ADMIN_PRICING_SYNC_SECRET)'
 fi
 
 print -- "SUMMARY: pass=$pass fail=$fail"

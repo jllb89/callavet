@@ -4,13 +4,21 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:just_audio/just_audio.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:record/record.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:video_player/video_player.dart';
 
 import '../../../core/config/environment.dart';
 
 const _vetAssistantSessionId = 'assistant';
 int _vetAssistantMessageSequence = 0;
+final _activeVetVoiceNoteId = ValueNotifier<String?>(null);
+final _activeVetVideoId = ValueNotifier<String?>(null);
 
 String _nextVetAssistantMessageId() {
   _vetAssistantMessageSequence += 1;
@@ -39,10 +47,13 @@ class _VetChatScreenState extends State<VetChatScreen> {
   final ScrollController _scrollController = ScrollController();
   final List<_VetChatMessage> _assistantMessages = <_VetChatMessage>[];
   final List<_VetChatMessage> _consultMessages = <_VetChatMessage>[];
+  final ImagePicker _imagePicker = ImagePicker();
+  final AudioRecorder _audioRecorder = AudioRecorder();
   RealtimeChannel? _messagesChannel;
   RealtimeChannel? _sessionChannel;
   RealtimeChannel? _roomChannel;
   Timer? _refreshDebounce;
+  Timer? _handoffRetryTimer;
   Timer? _typingDebounce;
   Timer? _remoteTypingClearTimer;
   _VetHandoffBrief? _handoffBrief;
@@ -52,11 +63,16 @@ class _VetChatScreenState extends State<VetChatScreen> {
   bool _consultLoading = false;
   bool _consultClosed = false;
   bool _endingConsult = false;
+  bool _recordingVoice = false;
+  DateTime? _recordingStartedAt;
   bool _ownerOnline = false;
   bool _ownerTyping = false;
+  bool _handoffPending = false;
+  int _handoffRetryAttempts = 0;
   String _ownerName = 'tutor';
 
   static const _returnDashboardFadeDuration = Duration(milliseconds: 260);
+  static const _maxHandoffRetryAttempts = 8;
 
   bool get _isAssistant => widget.sessionId == _vetAssistantSessionId;
 
@@ -92,6 +108,7 @@ class _VetChatScreenState extends State<VetChatScreen> {
   @override
   void dispose() {
     _refreshDebounce?.cancel();
+    _handoffRetryTimer?.cancel();
     final channel = _messagesChannel;
     if (channel != null) {
       Supabase.instance.client.removeChannel(channel);
@@ -107,6 +124,7 @@ class _VetChatScreenState extends State<VetChatScreen> {
     }
     _typingDebounce?.cancel();
     _remoteTypingClearTimer?.cancel();
+    _audioRecorder.dispose();
     _composerController.dispose();
     _composerFocusNode.dispose();
     _scrollController.dispose();
@@ -126,6 +144,9 @@ class _VetChatScreenState extends State<VetChatScreen> {
       ]);
       final messagesResponse = responses[0];
       final handoffResponse = responses[1];
+      final handoffBrief = _VetHandoffBrief.fromJson(handoffResponse);
+      final handoffReady = handoffResponse['ready'] == true;
+      final hasUsableHandoff = handoffReady && !handoffBrief.isEmpty;
       final messages = _asList(messagesResponse['items'])
               ?.map(_asMap)
               .whereType<Map<String, dynamic>>()
@@ -142,13 +163,24 @@ class _VetChatScreenState extends State<VetChatScreen> {
         _consultMessages
           ..clear()
           ..addAll(_messagesWithReceipts(messages, receipts));
-        _handoffBrief = _VetHandoffBrief.fromJson(handoffResponse);
+        if (hasUsableHandoff) {
+          _handoffBrief = handoffBrief;
+          _handoffPending = false;
+          _handoffRetryAttempts = 0;
+        } else if (_handoffBrief == null && !_isClosedStatus(status)) {
+          _handoffPending = true;
+        }
         _consultClosed = _isClosedStatus(status);
         if (ownerName != null && ownerName.isNotEmpty) {
           _ownerName = ownerName;
         }
         _consultLoadError = null;
       });
+      if (hasUsableHandoff) {
+        _handoffRetryTimer?.cancel();
+      } else if (!_isClosedStatus(status)) {
+        _scheduleHandoffRetry();
+      }
       _markVisibleMessagesRead();
       _scrollToBottom();
     } catch (error) {
@@ -316,6 +348,42 @@ class _VetChatScreenState extends State<VetChatScreen> {
         Timer(const Duration(milliseconds: 450), _refreshMessages);
   }
 
+  void _scheduleHandoffRetry() {
+    if (_isAssistant || _handoffBrief != null || _consultClosed) return;
+    if (_handoffRetryAttempts >= _maxHandoffRetryAttempts) return;
+    _handoffRetryTimer?.cancel();
+    final attempt = _handoffRetryAttempts++;
+    final delayMs = math.min(3600, 650 + (attempt * 450));
+    _handoffRetryTimer = Timer(Duration(milliseconds: delayMs), () {
+      if (!mounted || _handoffBrief != null || _consultClosed) return;
+      unawaited(_refreshHandoffBrief());
+    });
+  }
+
+  Future<void> _refreshHandoffBrief() async {
+    try {
+      final response = await _getGatewayJson(
+        '/sessions/${Uri.encodeComponent(widget.sessionId)}/handoff',
+      );
+      final brief = _VetHandoffBrief.fromJson(response);
+      final ready = response['ready'] == true;
+      if (!mounted) return;
+      if (ready && !brief.isEmpty) {
+        setState(() {
+          _handoffBrief = brief;
+          _handoffPending = false;
+          _handoffRetryAttempts = 0;
+        });
+        _handoffRetryTimer?.cancel();
+      } else {
+        setState(() => _handoffPending = true);
+        _scheduleHandoffRetry();
+      }
+    } catch (_) {
+      _scheduleHandoffRetry();
+    }
+  }
+
   void _refreshMessages() {
     if (!mounted) return;
     unawaited(_loadConsultThread());
@@ -412,16 +480,33 @@ class _VetChatScreenState extends State<VetChatScreen> {
     }
     final text = _composerController.text.trim();
     if (text.isEmpty || _sending || _consultClosed) return;
+    await _sendConsultPayload(text: text, clearComposer: true);
+  }
+
+  Future<void> _sendConsultPayload({
+    String text = '',
+    bool clearComposer = false,
+    List<_PendingVetAttachment> pendingAttachments = const [],
+  }) async {
+    if (_isAssistant || _sending || _consultClosed) return;
+    final trimmedText = text.trim();
+    if (trimmedText.isEmpty && pendingAttachments.isEmpty) return;
     final clientKey =
         'vet-${DateTime.now().microsecondsSinceEpoch}-${_nextVetAssistantMessageId()}';
     setState(() => _sending = true);
     try {
+      final attachmentRefs = <Map<String, String>>[];
+      for (final attachment in pendingAttachments) {
+        final uploaded = await _uploadConsultAttachment(attachment);
+        attachmentRefs.add({'id': uploaded.id});
+      }
       final response = await _postGatewayJson(
           '/sessions/${Uri.encodeComponent(widget.sessionId)}/messages', {
-        'content': text,
+        'content': trimmedText,
         'clientKey': clientKey,
+        if (attachmentRefs.isNotEmpty) 'attachments': attachmentRefs,
       });
-      _composerController.clear();
+      if (clearComposer) _composerController.clear();
       final message = _asMap(response['message']);
       if (message != null) {
         _upsertConsultMessage(_VetChatMessage.fromJson(message));
@@ -429,10 +514,202 @@ class _VetChatScreenState extends State<VetChatScreen> {
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('No se pudo enviar: $error')),
+        SnackBar(
+          content: Text('No se pudo enviar: $error'),
+          action: _consultClosed
+              ? null
+              : SnackBarAction(
+                  label: 'Reintentar',
+                  onPressed: () => unawaited(_sendConsultPayload(
+                    text: trimmedText,
+                    clearComposer: clearComposer,
+                    pendingAttachments: pendingAttachments,
+                  )),
+                ),
+        ),
       );
     } finally {
       if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  Future<_VetAttachment> _uploadConsultAttachment(
+      _PendingVetAttachment attachment) async {
+    final response = await _postGatewayJson(
+      '/sessions/${Uri.encodeComponent(widget.sessionId)}/attachments/upload-url',
+      attachment.toUploadBody(),
+    );
+    final attachmentJson = _asMap(response['attachment']);
+    final uploadJson = _asMap(response['upload']);
+    final bucket = uploadJson?['bucket']?.toString();
+    final path = uploadJson?['path']?.toString();
+    final token = uploadJson?['token']?.toString();
+    if (attachmentJson == null ||
+        bucket == null ||
+        path == null ||
+        token == null) {
+      throw const _VetChatException(
+          'No pude preparar el archivo para subirlo.');
+    }
+    await Supabase.instance.client.storage.from(bucket).uploadToSignedUrl(
+          path,
+          token,
+          File(attachment.path),
+          FileOptions(contentType: attachment.contentType),
+        );
+    return _VetAttachment.fromJson(attachmentJson);
+  }
+
+  Future<_VetAttachment?> _refreshVetAttachmentDownloadUrl(
+      _VetAttachment attachment) async {
+    try {
+      final response = await _getGatewayJson(
+        '/sessions/${Uri.encodeComponent(widget.sessionId)}/attachments/${Uri.encodeComponent(attachment.id)}/download-url',
+      );
+      final attachmentJson = _asMap(response['attachment']);
+      if (attachmentJson == null) return null;
+      return _VetAttachment.fromJson(attachmentJson);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  bool get _canSendConsultMedia =>
+      !_isAssistant && !_sending && !_consultClosed && !_endingConsult;
+
+  Future<void> _pickConsultMedia() async {
+    if (!_canSendConsultMedia) return;
+    final choice = await showModalBottomSheet<_VetMediaChoice>(
+      context: context,
+      backgroundColor: const Color(0xFF141417),
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading:
+                  const Icon(Icons.photo_library_rounded, color: Colors.white),
+              title:
+                  const Text('imágenes', style: TextStyle(color: Colors.white)),
+              onTap: () => Navigator.of(context).pop(_VetMediaChoice.images),
+            ),
+            ListTile(
+              leading: const Icon(Icons.videocam_rounded, color: Colors.white),
+              title: const Text('video', style: TextStyle(color: Colors.white)),
+              onTap: () => Navigator.of(context).pop(_VetMediaChoice.video),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (choice == null) return;
+    try {
+      if (choice == _VetMediaChoice.images) {
+        final files = await _imagePicker.pickMultiImage(
+          imageQuality: 82,
+          maxWidth: 1800,
+          maxHeight: 1800,
+          limit: 6,
+        );
+        if (files.isEmpty) return;
+        final attachments = <_PendingVetAttachment>[];
+        for (final file in files.take(6)) {
+          attachments.add(await _pendingAttachmentFromXFile(
+              file, _VetAttachmentKind.image));
+        }
+        await _sendConsultPayload(pendingAttachments: attachments);
+      } else {
+        final file = await _imagePicker.pickVideo(source: ImageSource.gallery);
+        if (file == null) return;
+        await _sendConsultPayload(
+          pendingAttachments: [
+            await _pendingAttachmentFromXFile(file, _VetAttachmentKind.video)
+          ],
+        );
+      }
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo adjuntar: $error')),
+      );
+    }
+  }
+
+  Future<_PendingVetAttachment> _pendingAttachmentFromXFile(
+      XFile file, _VetAttachmentKind kind) async {
+    final byteSize = await file.length();
+    final contentType = _vetContentTypeForFile(file.path, kind);
+    _validateVetAttachment(kind, byteSize, null);
+    return _PendingVetAttachment(
+      kind: kind,
+      path: file.path,
+      fileName: file.name,
+      contentType: contentType,
+      byteSize: byteSize,
+    );
+  }
+
+  Future<void> _startVoiceRecording() async {
+    if (!_canSendConsultMedia || _recordingVoice) return;
+    try {
+      if (!await _audioRecorder.hasPermission()) {
+        throw const _VetChatException(
+            'Activa el micrófono para enviar notas de voz.');
+      }
+      final dir = await getTemporaryDirectory();
+      final path =
+          '${dir.path}/consult-voice-${DateTime.now().microsecondsSinceEpoch}.m4a';
+      await _audioRecorder.start(
+        const RecordConfig(encoder: AudioEncoder.aacLc),
+        path: path,
+      );
+      if (!mounted) return;
+      setState(() {
+        _recordingVoice = true;
+        _recordingStartedAt = DateTime.now();
+      });
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No pude grabar: $error')),
+      );
+    }
+  }
+
+  Future<void> _stopVoiceRecording({bool send = true}) async {
+    if (!_recordingVoice) return;
+    final startedAt = _recordingStartedAt;
+    setState(() {
+      _recordingVoice = false;
+      _recordingStartedAt = null;
+    });
+    final path = await _audioRecorder.stop();
+    if (!send || path == null) return;
+    final durationMs = startedAt == null
+        ? null
+        : DateTime.now().difference(startedAt).inMilliseconds;
+    if (durationMs != null && durationMs < 650) return;
+    try {
+      final file = File(path);
+      final byteSize = await file.length();
+      _validateVetAttachment(_VetAttachmentKind.voice, byteSize, durationMs);
+      await _sendConsultPayload(
+        pendingAttachments: [
+          _PendingVetAttachment(
+            kind: _VetAttachmentKind.voice,
+            path: path,
+            fileName: path.split('/').last,
+            contentType: 'audio/mp4',
+            byteSize: byteSize,
+            durationMs: durationMs,
+          ),
+        ],
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo enviar la nota de voz: $error')),
+      );
     }
   }
 
@@ -595,7 +872,7 @@ class _VetChatScreenState extends State<VetChatScreen> {
     final topChromeHeight = topInset + 90;
     final topFadeHeight = topInset + 132;
     final bottomFadeHeight = bottomInset + 150;
-    final hasHandoff = _handoffBrief != null;
+    final hasHandoff = _handoffBrief != null || _handoffPending;
     final itemCount = (hasHandoff ? 1 : 0) + _consultMessages.length;
     final messageList = _consultLoading && itemCount == 0
         ? const Center(child: CircularProgressIndicator(color: Colors.white))
@@ -629,12 +906,16 @@ class _VetChatScreenState extends State<VetChatScreen> {
                     itemCount: itemCount,
                     itemBuilder: (context, index) {
                       if (hasHandoff && index == 0) {
-                        return _HandoffBriefCard(handoff: _handoffBrief!);
+                        return _HandoffBriefCard(
+                          handoff: _handoffBrief,
+                          pending: _handoffPending,
+                        );
                       }
                       final messageIndex = index - (hasHandoff ? 1 : 0);
                       return _ChatBubble(
                         message: _consultMessages[messageIndex],
                         ownerName: _ownerName,
+                        onRefreshAttachment: _refreshVetAttachmentDownloadUrl,
                       );
                     },
                   );
@@ -672,8 +953,13 @@ class _VetChatScreenState extends State<VetChatScreen> {
             controller: _composerController,
             focusNode: _composerFocusNode,
             sending: _sending || _endingConsult || _consultClosed,
+            mediaEnabled: _canSendConsultMedia,
+            recording: _recordingVoice,
             includeBottomInset: true,
             onSend: _sendMessage,
+            onPickMedia: _pickConsultMedia,
+            onMicStart: _startVoiceRecording,
+            onMicStop: _stopVoiceRecording,
           ),
         ),
       ],
@@ -730,8 +1016,13 @@ class _VetChatScreenState extends State<VetChatScreen> {
             controller: _composerController,
             focusNode: _composerFocusNode,
             sending: _sending,
+            mediaEnabled: false,
+            recording: false,
             includeBottomInset: true,
             onSend: _sendMessage,
+            onPickMedia: () {},
+            onMicStart: () {},
+            onMicStop: ({bool send = true}) async {},
           ),
         ),
       ],
@@ -949,16 +1240,18 @@ class _ChatTopBar extends StatelessWidget {
 }
 
 class _HandoffBriefCard extends StatelessWidget {
-  const _HandoffBriefCard({required this.handoff});
+  const _HandoffBriefCard({required this.handoff, required this.pending});
 
-  final _VetHandoffBrief handoff;
+  final _VetHandoffBrief? handoff;
+  final bool pending;
 
   @override
   Widget build(BuildContext context) {
+    final brief = handoff;
     final sections = <Widget>[
-      if (handoff.summaryText.isNotEmpty)
+      if (brief != null && brief.summaryText.isNotEmpty)
         Text(
-          handoff.summaryText,
+          brief.summaryText,
           style: const TextStyle(
             color: Colors.white,
             fontSize: 14,
@@ -966,26 +1259,30 @@ class _HandoffBriefCard extends StatelessWidget {
             height: 1.32,
           ),
         ),
-      if (handoff.redFlags.isNotEmpty)
-        _HandoffList(label: 'alertas', items: handoff.redFlags),
-      if (handoff.reportedSigns.isNotEmpty)
-        _HandoffList(label: 'signos reportados', items: handoff.reportedSigns),
-      if (handoff.recommendedFirstChecks.isNotEmpty)
+      if (brief != null && brief.redFlags.isNotEmpty)
+        _HandoffList(label: 'alertas', items: brief.redFlags),
+      if (brief != null && brief.reportedSigns.isNotEmpty)
+        _HandoffList(label: 'signos reportados', items: brief.reportedSigns),
+      if (brief != null && brief.recommendedFirstChecks.isNotEmpty)
         _HandoffList(
           label: 'primeras revisiones',
-          items: handoff.recommendedFirstChecks,
+          items: brief.recommendedFirstChecks,
+        ),
+      if (pending && brief == null)
+        Text(
+          'preparando brief...',
+          style: TextStyle(
+            color: Colors.white.withValues(alpha: 0.56),
+            fontSize: 13,
+            fontFamily: 'ABC Diatype',
+            height: 1.28,
+          ),
         ),
     ];
 
-    return Container(
-      width: double.infinity,
+    return _HandoffBriefFrame(
+      active: pending || brief != null,
       margin: const EdgeInsets.only(bottom: 14),
-      padding: const EdgeInsets.fromLTRB(15, 13, 15, 14),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
-      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -1003,10 +1300,10 @@ class _HandoffBriefCard extends StatelessWidget {
                   fontWeight: FontWeight.w500,
                 ),
               ),
-              if (handoff.urgency.isNotEmpty) ...[
+              if (brief != null && brief.urgency.isNotEmpty) ...[
                 const SizedBox(width: 8),
                 Text(
-                  handoff.urgency,
+                  brief.urgency,
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.52),
                     fontSize: 11,
@@ -1023,6 +1320,138 @@ class _HandoffBriefCard extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+class _HandoffBriefFrame extends StatefulWidget {
+  const _HandoffBriefFrame({
+    required this.child,
+    required this.active,
+    required this.margin,
+  });
+
+  final Widget child;
+  final bool active;
+  final EdgeInsetsGeometry margin;
+
+  @override
+  State<_HandoffBriefFrame> createState() => _HandoffBriefFrameState();
+}
+
+class _HandoffBriefFrameState extends State<_HandoffBriefFrame>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 14000),
+    );
+    if (widget.active) _controller.repeat();
+  }
+
+  @override
+  void didUpdateWidget(covariant _HandoffBriefFrame oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.active && !_controller.isAnimating) {
+      _controller.repeat();
+    } else if (!widget.active && _controller.isAnimating) {
+      _controller.stop();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) {
+        final phase = _controller.value * math.pi * 2;
+        final pulse =
+            widget.active ? 0.74 + (math.sin(phase * 0.82) + 1) * 0.11 : 1.0;
+        final drift = widget.active
+            ? math.sin(phase) * 6.0 + math.sin(phase * 2.15) * 1.5
+            : 0.0;
+        return Container(
+          width: double.infinity,
+          margin: widget.margin,
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(18),
+            boxShadow: widget.active
+                ? [
+                    BoxShadow(
+                      color: const Color(0xFF57546F)
+                          .withValues(alpha: 0.12 * pulse),
+                      blurRadius: 22,
+                      spreadRadius: -8,
+                      offset: Offset(drift, 0),
+                    ),
+                  ]
+                : null,
+          ),
+          child: CustomPaint(
+            foregroundPainter: _HandoffBriefOutlinePainter(
+              progress: _controller.value,
+              active: widget.active,
+            ),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(15, 13, 15, 14),
+              child: child,
+            ),
+          ),
+        );
+      },
+      child: widget.child,
+    );
+  }
+}
+
+class _HandoffBriefOutlinePainter extends CustomPainter {
+  const _HandoffBriefOutlinePainter({
+    required this.progress,
+    required this.active,
+  });
+
+  final double progress;
+  final bool active;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    final rrect =
+        RRect.fromRectAndRadius(rect.deflate(0.7), const Radius.circular(18));
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = active ? 1.15 : 1;
+
+    if (active) {
+      paint.shader = SweepGradient(
+        transform: GradientRotation(progress * math.pi * 2),
+        colors: const [
+          Color(0xCCFFFFFF),
+          Color(0x88648FD8),
+          Color(0x995A5578),
+          Color(0xCCFFFFFF),
+        ],
+      ).createShader(rect);
+    } else {
+      paint.color = Colors.white.withValues(alpha: 0.10);
+    }
+
+    canvas.drawRRect(rrect, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _HandoffBriefOutlinePainter oldDelegate) {
+    return oldDelegate.progress != progress || oldDelegate.active != active;
   }
 }
 
@@ -1065,10 +1494,16 @@ class _HandoffList extends StatelessWidget {
 }
 
 class _ChatBubble extends StatelessWidget {
-  const _ChatBubble({required this.message, this.ownerName = 'tutor'});
+  const _ChatBubble({
+    required this.message,
+    this.ownerName = 'tutor',
+    this.onRefreshAttachment,
+  });
 
   final _VetChatMessage message;
   final String ownerName;
+  final Future<_VetAttachment?> Function(_VetAttachment attachment)?
+      onRefreshAttachment;
 
   @override
   Widget build(BuildContext context) {
@@ -1106,10 +1541,25 @@ class _ChatBubble extends StatelessWidget {
               child: Padding(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 18, vertical: 13),
-                child: isAi
-                    ? _AiMessageContent(
-                        content: message.content, style: messageStyle)
-                    : Text(message.content, style: messageStyle),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (message.content.trim().isNotEmpty)
+                      isAi
+                          ? _AiMessageContent(
+                              content: message.content, style: messageStyle)
+                          : Text(message.content, style: messageStyle),
+                    if (message.attachments.isNotEmpty) ...[
+                      if (message.content.trim().isNotEmpty)
+                        const SizedBox(height: 10),
+                      _VetAttachmentStrip(
+                        attachments: message.attachments,
+                        onRefreshAttachment: onRefreshAttachment,
+                      ),
+                    ],
+                  ],
+                ),
               ),
             ),
             const SizedBox(height: 4),
@@ -1124,6 +1574,625 @@ class _ChatBubble extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _VetAttachmentStrip extends StatelessWidget {
+  const _VetAttachmentStrip({
+    required this.attachments,
+    this.onRefreshAttachment,
+  });
+
+  final List<_VetAttachment> attachments;
+  final Future<_VetAttachment?> Function(_VetAttachment attachment)?
+      onRefreshAttachment;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: attachments
+          .map((attachment) => Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: _VetAttachmentPreview(
+                  attachment: attachment,
+                  onRefreshAttachment: onRefreshAttachment,
+                ),
+              ))
+          .toList(growable: false),
+    );
+  }
+}
+
+class _VetAttachmentPreview extends StatelessWidget {
+  const _VetAttachmentPreview({
+    required this.attachment,
+    this.onRefreshAttachment,
+  });
+
+  final _VetAttachment attachment;
+  final Future<_VetAttachment?> Function(_VetAttachment attachment)?
+      onRefreshAttachment;
+
+  @override
+  Widget build(BuildContext context) {
+    final url = attachment.downloadUrl;
+    final label = switch (attachment.kind) {
+      _VetAttachmentKind.image => 'Imagen',
+      _VetAttachmentKind.video => 'Video',
+      _VetAttachmentKind.voice => 'Nota de voz',
+    };
+    if (attachment.kind == _VetAttachmentKind.image && url != null) {
+      final image = Image.network(url, fit: BoxFit.cover);
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(14),
+        child: SizedBox(width: 220, height: 160, child: image),
+      );
+    }
+    if (attachment.kind == _VetAttachmentKind.voice) {
+      return _VetVoiceNoteBubble(
+        attachment: attachment,
+        onRefreshAttachment: onRefreshAttachment,
+      );
+    }
+    if (attachment.kind == _VetAttachmentKind.video) {
+      return _VetVideoBubble(
+        attachment: attachment,
+        onRefreshAttachment: onRefreshAttachment,
+      );
+    }
+    return Container(
+      constraints: const BoxConstraints(minWidth: 180),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            attachment.kind == _VetAttachmentKind.voice
+                ? Icons.mic_rounded
+                : Icons.play_arrow_rounded,
+            color: Colors.white,
+            size: 19,
+          ),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              _vetAttachmentLabel(label, attachment),
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 13,
+                fontFamily: 'ABC Diatype',
+                fontWeight: FontWeight.w500,
+                height: 1.2,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _VetVoiceNoteBubble extends StatefulWidget {
+  const _VetVoiceNoteBubble({
+    required this.attachment,
+    this.onRefreshAttachment,
+  });
+
+  final _VetAttachment attachment;
+  final Future<_VetAttachment?> Function(_VetAttachment attachment)?
+      onRefreshAttachment;
+
+  @override
+  State<_VetVoiceNoteBubble> createState() => _VetVoiceNoteBubbleState();
+}
+
+class _VetVoiceNoteBubbleState extends State<_VetVoiceNoteBubble> {
+  final AudioPlayer _player = AudioPlayer();
+  StreamSubscription<Duration>? _positionSub;
+  StreamSubscription<Duration?>? _durationSub;
+  StreamSubscription<PlayerState>? _stateSub;
+  bool _loading = false;
+  bool _loaded = false;
+  bool _failed = false;
+  bool _playing = false;
+  Duration _position = Duration.zero;
+  Duration _duration = Duration.zero;
+  String? _downloadUrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _downloadUrl = widget.attachment.downloadUrl;
+    _activeVetVoiceNoteId.addListener(_handleActiveVoiceChanged);
+    _positionSub = _player.positionStream.listen((position) {
+      if (!mounted) return;
+      setState(() => _position = position);
+    });
+    _durationSub = _player.durationStream.listen((duration) {
+      if (!mounted || duration == null) return;
+      setState(() => _duration = duration);
+    });
+    _stateSub = _player.playerStateStream.listen((state) {
+      if (!mounted) return;
+      if (state.processingState == ProcessingState.completed) {
+        if (_activeVetVoiceNoteId.value == widget.attachment.id) {
+          _activeVetVoiceNoteId.value = null;
+        }
+        unawaited(_player.seek(Duration.zero));
+      }
+      setState(() {
+        _playing =
+            state.playing && state.processingState != ProcessingState.completed;
+      });
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant _VetVoiceNoteBubble oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.attachment.id != widget.attachment.id ||
+        oldWidget.attachment.downloadUrl != widget.attachment.downloadUrl) {
+      _downloadUrl = widget.attachment.downloadUrl;
+      _loaded = false;
+      _failed = false;
+      _position = Duration.zero;
+      _duration = Duration.zero;
+      unawaited(_player.stop());
+    }
+  }
+
+  @override
+  void dispose() {
+    _activeVetVoiceNoteId.removeListener(_handleActiveVoiceChanged);
+    _positionSub?.cancel();
+    _durationSub?.cancel();
+    _stateSub?.cancel();
+    _player.dispose();
+    super.dispose();
+  }
+
+  void _handleActiveVoiceChanged() {
+    if (_activeVetVoiceNoteId.value != widget.attachment.id &&
+        _player.playing) {
+      unawaited(_player.pause());
+    }
+  }
+
+  Future<void> _togglePlayback() async {
+    if (_loading) return;
+    if (_player.playing) {
+      await _player.pause();
+      return;
+    }
+    final source = _downloadUrl;
+    if (source == null || source.isEmpty) return;
+    _activeVetVoiceNoteId.value = widget.attachment.id;
+    if (!_loaded || _failed) {
+      setState(() {
+        _loading = true;
+        _failed = false;
+      });
+      try {
+        await _player.setUrl(source);
+        if (!mounted) return;
+        setState(() => _loaded = true);
+      } catch (error) {
+        if (await _refreshDownloadUrl()) {
+          try {
+            await _player.setUrl(_downloadUrl!);
+            if (!mounted) return;
+            setState(() => _loaded = true);
+          } catch (_) {
+            if (!mounted) return;
+            setState(() => _failed = true);
+            return;
+          }
+        } else {
+          if (!mounted) return;
+          setState(() => _failed = true);
+          return;
+        }
+      } finally {
+        if (mounted) setState(() => _loading = false);
+      }
+    }
+    if (_player.processingState == ProcessingState.completed) {
+      await _player.seek(Duration.zero);
+    }
+    await _player.play();
+  }
+
+  Future<bool> _refreshDownloadUrl() async {
+    final refresh = widget.onRefreshAttachment;
+    if (refresh == null) return false;
+    final refreshed = await refresh(widget.attachment);
+    final refreshedUrl = refreshed?.downloadUrl;
+    if (refreshedUrl == null || refreshedUrl.isEmpty) return false;
+    _downloadUrl = refreshedUrl;
+    return true;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final progress = _duration.inMilliseconds <= 0
+        ? 0.0
+        : (_position.inMilliseconds / _duration.inMilliseconds).clamp(0.0, 1.0);
+    final displayDuration = _duration.inMilliseconds > 0
+        ? _duration
+        : Duration(milliseconds: widget.attachment.durationMs ?? 0);
+    final durationText = _playing && _position.inMilliseconds > 0
+        ? _formatVetVoiceDuration(_position)
+        : _formatVetVoiceDuration(displayDuration);
+    final icon = _loading
+        ? null
+        : _failed
+            ? Icons.refresh_rounded
+            : _playing
+                ? Icons.pause_rounded
+                : Icons.play_arrow_rounded;
+
+    return Container(
+      width: 232,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+      ),
+      child: Row(
+        children: [
+          GestureDetector(
+            onTap: _togglePlayback,
+            child: Container(
+              width: 34,
+              height: 34,
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                shape: BoxShape.circle,
+              ),
+              child: _loading
+                  ? const Padding(
+                      padding: EdgeInsets.all(9),
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.black,
+                      ),
+                    )
+                  : Icon(icon, color: Colors.black, size: 21),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _VetVoiceWaveform(id: widget.attachment.id, progress: progress),
+                const SizedBox(height: 4),
+                Text(
+                  _failed ? 'Toca para reintentar' : durationText,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.7),
+                    fontSize: 11,
+                    fontFamily: 'ABC Diatype',
+                    fontWeight: FontWeight.w500,
+                    height: 1,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _VetVideoBubble extends StatefulWidget {
+  const _VetVideoBubble({
+    required this.attachment,
+    this.onRefreshAttachment,
+  });
+
+  final _VetAttachment attachment;
+  final Future<_VetAttachment?> Function(_VetAttachment attachment)?
+      onRefreshAttachment;
+
+  @override
+  State<_VetVideoBubble> createState() => _VetVideoBubbleState();
+}
+
+class _VetVideoBubbleState extends State<_VetVideoBubble> {
+  VideoPlayerController? _controller;
+  bool _loading = false;
+  bool _failed = false;
+  String? _downloadUrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _downloadUrl = widget.attachment.downloadUrl;
+    _activeVetVideoId.addListener(_handleActiveVideoChanged);
+  }
+
+  @override
+  void didUpdateWidget(covariant _VetVideoBubble oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.attachment.id != widget.attachment.id ||
+        oldWidget.attachment.downloadUrl != widget.attachment.downloadUrl) {
+      _downloadUrl = widget.attachment.downloadUrl;
+      _failed = false;
+      _disposeController();
+    }
+  }
+
+  @override
+  void dispose() {
+    _activeVetVideoId.removeListener(_handleActiveVideoChanged);
+    if (_activeVetVideoId.value == widget.attachment.id) {
+      _activeVetVideoId.value = null;
+    }
+    _disposeController();
+    super.dispose();
+  }
+
+  void _handleActiveVideoChanged() {
+    if (_activeVetVideoId.value != widget.attachment.id &&
+        _controller?.value.isPlaying == true) {
+      unawaited(_controller?.pause());
+    }
+  }
+
+  void _handleControllerChanged() {
+    if (!mounted) return;
+    final controller = _controller;
+    if (controller == null) return;
+    final value = controller.value;
+    if (!value.isPlaying &&
+        value.duration > Duration.zero &&
+        value.position >= value.duration &&
+        _activeVetVideoId.value == widget.attachment.id) {
+      _activeVetVideoId.value = null;
+    }
+    setState(() {});
+  }
+
+  void _disposeController() {
+    final controller = _controller;
+    if (controller == null) return;
+    controller.removeListener(_handleControllerChanged);
+    _controller = null;
+    unawaited(controller.dispose());
+  }
+
+  Future<void> _togglePlayback() async {
+    if (_loading) return;
+    var controller = _controller;
+    if (controller == null || !controller.value.isInitialized || _failed) {
+      await _initializeVideo();
+      controller = _controller;
+      if (controller == null || !controller.value.isInitialized) return;
+    }
+    if (controller.value.isPlaying) {
+      await controller.pause();
+      if (_activeVetVideoId.value == widget.attachment.id) {
+        _activeVetVideoId.value = null;
+      }
+      return;
+    }
+    _activeVetVideoId.value = widget.attachment.id;
+    await controller.play();
+  }
+
+  Future<void> _initializeVideo() async {
+    final source = _downloadUrl;
+    if (source == null || source.isEmpty) return;
+    setState(() {
+      _loading = true;
+      _failed = false;
+    });
+    try {
+      await _openVideoSource(source);
+    } catch (_) {
+      if (await _refreshDownloadUrl()) {
+        try {
+          await _openVideoSource(_downloadUrl!);
+        } catch (_) {
+          if (!mounted) return;
+          setState(() => _failed = true);
+        }
+      } else {
+        if (!mounted) return;
+        setState(() => _failed = true);
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _openVideoSource(String source) async {
+    final controller = VideoPlayerController.networkUrl(Uri.parse(source));
+    await controller.initialize();
+    await controller.setLooping(false);
+    controller.addListener(_handleControllerChanged);
+    _disposeController();
+    if (!mounted) {
+      unawaited(controller.dispose());
+      return;
+    }
+    setState(() {
+      _controller = controller;
+      _failed = false;
+    });
+  }
+
+  Future<bool> _refreshDownloadUrl() async {
+    final refresh = widget.onRefreshAttachment;
+    if (refresh == null) return false;
+    final refreshed = await refresh(widget.attachment);
+    final refreshedUrl = refreshed?.downloadUrl;
+    if (refreshedUrl == null || refreshedUrl.isEmpty) return false;
+    _downloadUrl = refreshedUrl;
+    return true;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = _controller;
+    final value = controller?.value;
+    final initialized = value?.isInitialized == true;
+    final rawAspect = initialized ? value!.aspectRatio : 16 / 9;
+    final aspectRatio = rawAspect.isFinite && rawAspect > 0
+        ? rawAspect.clamp(0.75, 1.78).toDouble()
+        : 16 / 9;
+    final position = initialized ? value!.position : Duration.zero;
+    final duration = initialized ? value!.duration : Duration.zero;
+    final progress = duration.inMilliseconds <= 0
+        ? 0.0
+        : (position.inMilliseconds / duration.inMilliseconds).clamp(0.0, 1.0);
+    final playing = value?.isPlaying == true;
+    final overlayVisible = _loading || _failed || !playing;
+    final icon = _loading
+        ? null
+        : _failed
+            ? Icons.refresh_rounded
+            : playing
+                ? Icons.pause_rounded
+                : Icons.play_arrow_rounded;
+    final label = _failed
+        ? 'Toca para reintentar'
+        : duration.inMilliseconds > 0
+            ? '${_formatVetVoiceDuration(position)} / ${_formatVetVoiceDuration(duration)}'
+            : _vetAttachmentLabel('Video', widget.attachment);
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(14),
+      child: SizedBox(
+        width: 232,
+        child: AspectRatio(
+          aspectRatio: aspectRatio,
+          child: GestureDetector(
+            onTap: _togglePlayback,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                if (initialized && controller != null)
+                  VideoPlayer(controller)
+                else
+                  Container(color: Colors.white.withValues(alpha: 0.08)),
+                if (overlayVisible)
+                  Container(color: Colors.black.withValues(alpha: 0.34)),
+                Center(
+                  child: Container(
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.94),
+                      shape: BoxShape.circle,
+                    ),
+                    child: _loading
+                        ? const Padding(
+                            padding: EdgeInsets.all(12),
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.black,
+                            ),
+                          )
+                        : Icon(icon, color: Colors.black, size: 26),
+                  ),
+                ),
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          Colors.black.withValues(alpha: 0),
+                          Colors.black.withValues(alpha: 0.65),
+                        ],
+                      ),
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(999),
+                          child: LinearProgressIndicator(
+                            minHeight: 3,
+                            value: progress,
+                            backgroundColor:
+                                Colors.white.withValues(alpha: 0.24),
+                            valueColor: const AlwaysStoppedAnimation<Color>(
+                                Colors.white),
+                          ),
+                        ),
+                        const SizedBox(height: 5),
+                        Text(
+                          label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.86),
+                            fontSize: 11,
+                            fontFamily: 'ABC Diatype',
+                            fontWeight: FontWeight.w600,
+                            height: 1,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _VetVoiceWaveform extends StatelessWidget {
+  const _VetVoiceWaveform({required this.id, required this.progress});
+
+  final String id;
+  final double progress;
+
+  @override
+  Widget build(BuildContext context) {
+    final seed = id.codeUnits.fold<int>(0, (sum, value) => sum + value);
+    const count = 26;
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: List.generate(count, (index) {
+        final normalizedIndex = count == 1 ? 0.0 : index / (count - 1);
+        final height = 7.0 + ((seed + index * 11) % 17).toDouble();
+        final active = normalizedIndex <= progress;
+        return AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          width: 3,
+          height: height,
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: active ? 0.9 : 0.28),
+            borderRadius: BorderRadius.circular(999),
+          ),
+        );
+      }),
     );
   }
 }
@@ -1367,15 +2436,25 @@ class _ChatComposer extends StatelessWidget {
     required this.controller,
     required this.focusNode,
     required this.sending,
+    required this.mediaEnabled,
+    required this.recording,
     required this.includeBottomInset,
     required this.onSend,
+    required this.onPickMedia,
+    required this.onMicStart,
+    required this.onMicStop,
   });
 
   final TextEditingController controller;
   final FocusNode focusNode;
   final bool sending;
+  final bool mediaEnabled;
+  final bool recording;
   final bool includeBottomInset;
   final VoidCallback onSend;
+  final VoidCallback onPickMedia;
+  final VoidCallback onMicStart;
+  final Future<void> Function({bool send}) onMicStop;
 
   @override
   Widget build(BuildContext context) {
@@ -1431,6 +2510,54 @@ class _ChatComposer extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 8),
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 5),
+                  child: IconButton(
+                    onPressed: mediaEnabled ? onPickMedia : null,
+                    visualDensity: VisualDensity.compact,
+                    style: IconButton.styleFrom(
+                      fixedSize: const Size(32, 32),
+                      padding: EdgeInsets.zero,
+                    ),
+                    icon: SvgPicture.asset(
+                      'assets/icons/image-video.svg',
+                      width: 17,
+                      height: 17,
+                      colorFilter: ColorFilter.mode(
+                        Colors.white
+                            .withValues(alpha: mediaEnabled ? 0.72 : 0.24),
+                        BlendMode.srcIn,
+                      ),
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 5),
+                  child: GestureDetector(
+                    onTapDown: mediaEnabled ? (_) => onMicStart() : null,
+                    onTapUp: mediaEnabled ? (_) => onMicStop() : null,
+                    onTapCancel:
+                        mediaEnabled ? () => onMicStop(send: false) : null,
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 140),
+                      width: 32,
+                      height: 32,
+                      decoration: BoxDecoration(
+                        color: recording ? Colors.white : Colors.transparent,
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(
+                        Icons.mic_rounded,
+                        size: 18,
+                        color: recording
+                            ? Colors.black
+                            : Colors.white
+                                .withValues(alpha: mediaEnabled ? 0.72 : 0.24),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 4),
                 Padding(
                   padding: const EdgeInsets.only(bottom: 1),
                   child: IconButton.filled(
@@ -1517,6 +2644,7 @@ class _VetChatMessage {
       required this.createdAt,
       this.clientKey,
       this.streamOrder,
+      this.attachments = const [],
       this.deliveredByOther = false,
       this.readByOther = false});
 
@@ -1529,6 +2657,11 @@ class _VetChatMessage {
       createdAt: _parseDateTime(json['created_at']),
       clientKey: json['client_key']?.toString(),
       streamOrder: _asInt(json['stream_order']),
+      attachments: (_asList(json['attachments']) ?? const [])
+          .map(_asMap)
+          .whereType<Map<String, dynamic>>()
+          .map(_VetAttachment.fromJson)
+          .toList(growable: false),
     );
   }
 
@@ -1551,6 +2684,7 @@ class _VetChatMessage {
   final DateTime? createdAt;
   final String? clientKey;
   final int? streamOrder;
+  final List<_VetAttachment> attachments;
   final bool deliveredByOther;
   final bool readByOther;
 
@@ -1566,6 +2700,7 @@ class _VetChatMessage {
       createdAt: createdAt,
       clientKey: clientKey,
       streamOrder: streamOrder,
+      attachments: attachments,
       deliveredByOther: deliveredByOther ?? this.deliveredByOther,
       readByOther: readByOther ?? this.readByOther,
     );
@@ -1580,23 +2715,91 @@ class _VetChatMessage {
 
   String label({String ownerName = 'tutor'}) {
     final ownerLabel = ownerName.trim().isEmpty ? 'tutor' : ownerName.trim();
-    final who = role == 'vet'
-        ? 'tú'
-        : role == 'ai'
-            ? 'asistente'
-            : ownerLabel;
-    final receipt = role == 'vet'
-        ? readByOther
-            ? ' · leído'
-            : deliveredByOther
-                ? ' · entregado'
-                : ''
-        : '';
-    if (createdAt == null) return '$who$receipt';
+    if (role == 'vet') {
+      final receipt = readByOther
+          ? 'Read'
+          : deliveredByOther
+              ? 'Delivered'
+              : null;
+      if (createdAt == null) return receipt ?? '';
+      final hour = createdAt!.hour.toString().padLeft(2, '0');
+      final minute = createdAt!.minute.toString().padLeft(2, '0');
+      return receipt == null ? '$hour:$minute' : '$hour:$minute · $receipt';
+    }
+    final who = role == 'ai' ? 'asistente' : ownerLabel;
+    if (createdAt == null) return who;
     final hour = createdAt!.hour.toString().padLeft(2, '0');
     final minute = createdAt!.minute.toString().padLeft(2, '0');
-    return '$who · $hour:$minute$receipt';
+    return '$who · $hour:$minute';
   }
+}
+
+enum _VetAttachmentKind { image, video, voice }
+
+enum _VetMediaChoice { images, video }
+
+class _PendingVetAttachment {
+  const _PendingVetAttachment({
+    required this.kind,
+    required this.path,
+    required this.fileName,
+    required this.contentType,
+    required this.byteSize,
+    this.durationMs,
+  });
+
+  final _VetAttachmentKind kind;
+  final String path;
+  final String fileName;
+  final String contentType;
+  final int byteSize;
+  final int? durationMs;
+
+  Map<String, dynamic> toUploadBody() => {
+        'kind': kind.name,
+        'fileName': fileName,
+        'contentType': contentType,
+        'byteSize': byteSize,
+        if (durationMs != null) 'durationMs': durationMs,
+      };
+}
+
+class _VetAttachment {
+  const _VetAttachment({
+    required this.id,
+    required this.kind,
+    required this.contentType,
+    required this.byteSize,
+    this.durationMs,
+    this.downloadUrl,
+  });
+
+  factory _VetAttachment.fromJson(Map<String, dynamic> json) {
+    final kindRaw = json['kind']?.toString().toLowerCase();
+    final kind = switch (kindRaw) {
+      'video' => _VetAttachmentKind.video,
+      'voice' => _VetAttachmentKind.voice,
+      _ => _VetAttachmentKind.image,
+    };
+    return _VetAttachment(
+      id: json['id']?.toString() ?? _nextVetAssistantMessageId(),
+      kind: kind,
+      contentType: json['contentType']?.toString() ??
+          json['content_type']?.toString() ??
+          '',
+      byteSize: _asInt(json['byteSize'] ?? json['byte_size']) ?? 0,
+      durationMs: _asInt(json['durationMs'] ?? json['duration_ms']),
+      downloadUrl:
+          json['downloadUrl']?.toString() ?? json['download_url']?.toString(),
+    );
+  }
+
+  final String id;
+  final _VetAttachmentKind kind;
+  final String contentType;
+  final int byteSize;
+  final int? durationMs;
+  final String? downloadUrl;
 }
 
 class _VetHandoffBrief {
@@ -1678,6 +2881,50 @@ int? _toInt(Object? value) {
 DateTime? _parseDateTime(Object? value) {
   if (value == null) return null;
   return DateTime.tryParse(value.toString())?.toLocal();
+}
+
+String _vetContentTypeForFile(String path, _VetAttachmentKind kind) {
+  final lower = path.toLowerCase();
+  if (kind == _VetAttachmentKind.voice) return 'audio/mp4';
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.heic') || lower.endsWith('.heif')) return 'image/heic';
+  if (lower.endsWith('.mov')) return 'video/quicktime';
+  if (lower.endsWith('.webm')) return 'video/webm';
+  if (kind == _VetAttachmentKind.video) return 'video/mp4';
+  return 'image/jpeg';
+}
+
+void _validateVetAttachment(
+    _VetAttachmentKind kind, int byteSize, int? durationMs) {
+  final maxBytes = switch (kind) {
+    _VetAttachmentKind.image => 8 * 1024 * 1024,
+    _VetAttachmentKind.video => 50 * 1024 * 1024,
+    _VetAttachmentKind.voice => 15 * 1024 * 1024,
+  };
+  if (byteSize > maxBytes) {
+    throw const _VetChatException(
+        'El archivo es demasiado grande para enviarlo.');
+  }
+  if (kind == _VetAttachmentKind.voice &&
+      durationMs != null &&
+      durationMs > 300000) {
+    throw const _VetChatException(
+        'La nota de voz no puede pasar de 5 minutos.');
+  }
+}
+
+String _vetAttachmentLabel(String label, _VetAttachment attachment) {
+  final duration = attachment.durationMs;
+  if (duration == null || duration <= 0) return label;
+  return '$label · ${_formatVetVoiceDuration(Duration(milliseconds: duration))}';
+}
+
+String _formatVetVoiceDuration(Duration duration) {
+  final seconds = duration.inSeconds;
+  final minutes = seconds ~/ 60;
+  final rest = (seconds % 60).toString().padLeft(2, '0');
+  return '$minutes:$rest';
 }
 
 String _errorMessage(Map<String, dynamic> data, int statusCode) {

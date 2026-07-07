@@ -230,6 +230,31 @@ components:
         deleted_at: { type: string, format: date-time }
         redacted_at: { type: string, format: date-time }
         redaction_reason: { type: string }
+        attachments:
+          type: array
+          items: { $ref: "#/components/schemas/MessageAttachment" }
+
+    MessageAttachment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        message_id: { type: string, format: uuid, nullable: true }
+        session_id: { type: string, format: uuid }
+        kind: { type: string, enum: [image, video, voice] }
+        content_type: { type: string }
+        byte_size: { type: integer }
+        width: { type: integer, nullable: true }
+        height: { type: integer, nullable: true }
+        duration_ms: { type: integer, nullable: true }
+        thumbnail_path: { type: string, nullable: true }
+        waveform: { nullable: true }
+        status: { type: string, enum: [pending, ready, failed, removed] }
+        transcript_text: { type: string, nullable: true }
+        transcript_status: { type: string, enum: [not_requested, pending, ready, failed] }
+        metadata: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+        downloadUrl: { type: string, nullable: true }
+        downloadExpiresIn: { type: integer, nullable: true }
 
     Receipt:
       type: object

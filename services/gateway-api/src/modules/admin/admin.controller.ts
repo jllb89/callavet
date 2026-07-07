@@ -1,4 +1,5 @@
-import { BadRequestException, Body, Controller, ForbiddenException, Get, Headers, Param, Post, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, ForbiddenException, Get, Headers, HttpCode, Param, Post, Query } from '@nestjs/common';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { DbService } from '../db/db.service';
 import { RequestContext } from '../auth/request-context.service';
 
@@ -11,10 +12,29 @@ function assertAdmin(secretHeader?: string) {
 
 @Controller('admin')
 export class AdminController {
+  private supabase?: SupabaseClient;
+
   constructor(
     private readonly db: DbService,
     private readonly rc: RequestContext,
   ) {}
+
+  private getStorageClient() {
+    if (this.supabase) return this.supabase;
+    const url = process.env.SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!url || !key) return null;
+    this.supabase = createClient(url, key);
+    return this.supabase;
+  }
+
+  private async signedAttachmentUrl(bucket: string, path: string) {
+    const client = this.getStorageClient();
+    if (!client) return null;
+    const { data, error } = await client.storage.from(bucket).createSignedUrl(path, 3600);
+    if (error) return null;
+    return data?.signedUrl || null;
+  }
 
   private async logAdminAction(action: string, targetType?: string | null, targetId?: string | null, metadata?: Record<string, any>) {
     try {
@@ -530,6 +550,76 @@ export class AdminController {
     return { ok: true, exportedAt: new Date().toISOString(), data: rows };
   }
 
+  @Get('export/chat-transcripts/:sessionId')
+  async exportChatTranscript(
+    @Headers('x-admin-secret') secret: string,
+    @Param('sessionId') sessionId: string,
+    @Query('includeDeleted') includeDeletedQ?: string,
+  ) {
+    assertAdmin(secret);
+    if (!sessionId) throw new BadRequestException('sessionId required');
+    const includeDeleted = ['1', 'true', 'yes'].includes(String(includeDeletedQ || '').toLowerCase());
+    const { rows: messages } = await this.db.query<any>(
+      `select id, session_id, sender_id, role, content, client_key, stream_order, created_at, edited_at, deleted_at, redacted_at, redaction_reason
+         from messages
+        where session_id = $1::uuid
+          and ($2::boolean = true or deleted_at is null)
+        order by stream_order asc, created_at asc`,
+      [sessionId, includeDeleted]
+    );
+    const messageIds = messages.map((message) => message.id);
+    const { rows: attachments } = messageIds.length
+      ? await this.db.query<any>(
+          `select id, message_id, session_id, uploaded_by, kind, storage_bucket, storage_path,
+                  content_type, byte_size, width, height, duration_ms, thumbnail_path, waveform,
+                  status, transcript_text, transcript_status, metadata, created_at, updated_at, deleted_at
+             from message_attachments
+            where message_id = any($1::uuid[])
+              and ($2::boolean = true or deleted_at is null)
+            order by created_at asc`,
+          [messageIds, includeDeleted]
+        )
+      : { rows: [] as any[] };
+    const shapedAttachments = await Promise.all(attachments.map(async (attachment) => ({
+      id: attachment.id,
+      messageId: attachment.message_id,
+      sessionId: attachment.session_id,
+      kind: attachment.kind,
+      contentType: attachment.content_type,
+      byteSize: Number(attachment.byte_size || 0),
+      width: attachment.width,
+      height: attachment.height,
+      durationMs: attachment.duration_ms,
+      status: attachment.status,
+      transcriptText: attachment.transcript_text,
+      transcriptStatus: attachment.transcript_status,
+      metadata: attachment.metadata || {},
+      createdAt: attachment.created_at,
+      deletedAt: attachment.deleted_at,
+      downloadUrl: attachment.status === 'ready' && !attachment.deleted_at
+        ? await this.signedAttachmentUrl(attachment.storage_bucket, attachment.storage_path)
+        : null,
+      downloadExpiresIn: attachment.status === 'ready' && !attachment.deleted_at ? 3600 : null,
+    })));
+    const byMessage = new Map<string, any[]>();
+    for (const attachment of shapedAttachments) {
+      const list = byMessage.get(attachment.messageId) || [];
+      list.push(attachment);
+      byMessage.set(attachment.messageId, list);
+    }
+    const transcript = messages.map((message) => ({
+      ...message,
+      stream_order: Number(message.stream_order || 0),
+      attachments: byMessage.get(message.id) || [],
+    }));
+    await this.logAdminAction('admin.export.chat_transcript', 'chat_sessions', sessionId, {
+      includeDeleted,
+      messageCount: transcript.length,
+      attachmentCount: shapedAttachments.length,
+    });
+    return { ok: true, exportedAt: new Date().toISOString(), sessionId, includeDeleted, transcript };
+  }
+
   @Get('video/sessions')
   async adminVideoSessions(
     @Headers('x-admin-secret') secret: string,
@@ -875,5 +965,117 @@ export class AdminController {
 
     await this.logAdminAction('admin.ops.chat_consultations.read', 'ops', null, { metrics, alerts });
     return { ok: true, generatedAt: new Date().toISOString(), metrics, alerts };
+  }
+
+  @Get('ops/chat-media')
+  async chatMediaOps(@Headers('x-admin-secret') secret: string) {
+    assertAdmin(secret);
+    const hasAttachments = await this.tableExists('public.message_attachments');
+    if (!hasAttachments) {
+      return {
+        ok: true,
+        generatedAt: new Date().toISOString(),
+        metrics: { messageAttachmentsTable: false },
+        alerts: [{ key: 'chat_media.table.missing', severity: 'critical', value: 0, threshold: 1 }],
+      };
+    }
+
+    const { rows } = await this.db.query<any>(
+      `select count(*)::int as total_count,
+              count(*) filter (where created_at >= now() - interval '24 hours')::int as created_24h,
+              count(*) filter (where status = 'pending')::int as pending_count,
+              count(*) filter (where status = 'ready')::int as ready_count,
+              count(*) filter (where status = 'failed')::int as failed_count,
+              count(*) filter (where status = 'removed' or deleted_at is not null)::int as removed_count,
+              coalesce(sum(byte_size), 0)::bigint as total_bytes,
+              round(avg(byte_size)::numeric, 2) as avg_byte_size,
+              count(*) filter (where message_id is null and status = 'pending' and created_at < now() - interval '24 hours')::int as orphaned_pending_24h
+         from message_attachments`
+    );
+    const { rows: byKind } = await this.db.query<any>(
+      `select kind,
+              count(*)::int as count,
+              coalesce(sum(byte_size), 0)::bigint as total_bytes,
+              round(avg(byte_size)::numeric, 2) as avg_byte_size
+         from message_attachments
+        group by kind
+        order by kind asc`
+    );
+    const summary = rows[0] || {};
+    const metrics = {
+      messageAttachmentsTable: true,
+      totalCount: Number(summary.total_count || 0),
+      created24h: Number(summary.created_24h || 0),
+      pendingCount: Number(summary.pending_count || 0),
+      readyCount: Number(summary.ready_count || 0),
+      failedCount: Number(summary.failed_count || 0),
+      removedCount: Number(summary.removed_count || 0),
+      totalBytes: Number(summary.total_bytes || 0),
+      avgByteSize: summary.avg_byte_size == null ? null : Number(summary.avg_byte_size),
+      orphanedPending24h: Number(summary.orphaned_pending_24h || 0),
+      byKind: byKind.map((row) => ({
+        kind: row.kind,
+        count: Number(row.count || 0),
+        totalBytes: Number(row.total_bytes || 0),
+        avgByteSize: row.avg_byte_size == null ? null : Number(row.avg_byte_size),
+      })),
+    };
+    const alerts = [
+      {
+        key: 'chat_media.orphaned_pending_24h',
+        severity: metrics.orphanedPending24h > 50 ? 'warning' : 'ok',
+        value: metrics.orphanedPending24h,
+        threshold: 50,
+      },
+      {
+        key: 'chat_media.failed_uploads',
+        severity: metrics.failedCount > 25 ? 'warning' : 'ok',
+        value: metrics.failedCount,
+        threshold: 25,
+      },
+    ];
+    await this.logAdminAction('admin.ops.chat_media.read', 'message_attachments', null, { metrics, alerts });
+    return { ok: true, generatedAt: new Date().toISOString(), metrics, alerts };
+  }
+
+  @Post('ops/chat-media/cleanup-pending')
+  @HttpCode(200)
+  async cleanupPendingChatMedia(
+    @Headers('x-admin-secret') secret: string,
+    @Body() body?: { olderThanHours?: number; limit?: number; dryRun?: boolean },
+  ) {
+    assertAdmin(secret);
+    const olderThanHours = Math.min(Math.max(Number(body?.olderThanHours || 24), 1), 720);
+    const limit = Math.min(Math.max(Number(body?.limit || 250), 1), 1000);
+    const dryRun = body?.dryRun !== false;
+    const { rows } = await this.db.query<any>(
+      `select id, session_id, uploaded_by, kind, storage_bucket, storage_path, byte_size, created_at
+         from message_attachments
+        where message_id is null
+          and status = 'pending'
+          and deleted_at is null
+          and created_at < now() - ($1::int * interval '1 hour')
+        order by created_at asc
+        limit $2`,
+      [olderThanHours, limit]
+    );
+    if (!dryRun && rows.length) {
+      await this.db.query(
+        `update message_attachments
+            set status = 'failed',
+                metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object('cleanupReason', 'orphaned_pending_upload', 'cleanupAt', now()),
+                updated_at = now()
+          where id = any($1::uuid[])`,
+        [rows.map((row) => row.id)]
+      );
+    }
+    await this.logAdminAction('admin.ops.chat_media.cleanup_pending', 'message_attachments', null, {
+      olderThanHours,
+      limit,
+      dryRun,
+      matched: rows.length,
+      attachmentIds: rows.map((row) => row.id),
+    });
+    return { ok: true, dryRun, olderThanHours, matched: rows.length, cleaned: dryRun ? 0 : rows.length, data: rows };
   }
 }

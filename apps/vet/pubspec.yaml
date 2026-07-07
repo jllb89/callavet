@@ -19,6 +19,12 @@ dependencies:
   supabase_flutter: ^2.5.4
   livekit_client: ^2.7.0
   device_info_plus: ^12.4.0
+  image_picker: ^1.2.3
+  record: ^6.2.1
+  path_provider: ^2.1.6
+  url_launcher: ^6.3.2
+  just_audio: ^0.10.6
+  video_player: ^2.11.1
 
 dev_dependencies:
   flutter_test:
@@ -34,6 +40,7 @@ flutter:
     - assets/icons/call a vet.svg
     - assets/icons/continue.svg
     - assets/icons/homelogo.svg
+    - assets/icons/image-video.svg
     - assets/icons/rightup.svg
     - assets/icons/user.svg
 
