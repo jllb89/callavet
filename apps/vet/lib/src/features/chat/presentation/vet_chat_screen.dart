@@ -54,6 +54,7 @@ class _VetChatScreenState extends State<VetChatScreen> {
   bool _endingConsult = false;
   bool _ownerOnline = false;
   bool _ownerTyping = false;
+  String _ownerName = 'tutor';
 
   static const _returnDashboardFadeDuration = Duration(milliseconds: 260);
 
@@ -134,6 +135,7 @@ class _VetChatScreenState extends State<VetChatScreen> {
       messages.sort(_compareMessages);
       final session = _asMap(messagesResponse['session']);
       final status = session?['status']?.toString().toLowerCase();
+      final ownerName = session?['ownerName']?.toString().trim();
       final receipts = _asList(messagesResponse['receipts']) ?? const [];
       if (!mounted) return;
       setState(() {
@@ -142,6 +144,9 @@ class _VetChatScreenState extends State<VetChatScreen> {
           ..addAll(_messagesWithReceipts(messages, receipts));
         _handoffBrief = _VetHandoffBrief.fromJson(handoffResponse);
         _consultClosed = _isClosedStatus(status);
+        if (ownerName != null && ownerName.isNotEmpty) {
+          _ownerName = ownerName;
+        }
         _consultLoadError = null;
       });
       _markVisibleMessagesRead();
@@ -628,7 +633,9 @@ class _VetChatScreenState extends State<VetChatScreen> {
                       }
                       final messageIndex = index - (hasHandoff ? 1 : 0);
                       return _ChatBubble(
-                          message: _consultMessages[messageIndex]);
+                        message: _consultMessages[messageIndex],
+                        ownerName: _ownerName,
+                      );
                     },
                   );
 
@@ -1058,9 +1065,10 @@ class _HandoffList extends StatelessWidget {
 }
 
 class _ChatBubble extends StatelessWidget {
-  const _ChatBubble({required this.message});
+  const _ChatBubble({required this.message, this.ownerName = 'tutor'});
 
   final _VetChatMessage message;
+  final String ownerName;
 
   @override
   Widget build(BuildContext context) {
@@ -1106,7 +1114,7 @@ class _ChatBubble extends StatelessWidget {
             ),
             const SizedBox(height: 4),
             Text(
-              message.label,
+              message.label(ownerName: ownerName),
               style: TextStyle(
                 color: Colors.white.withValues(alpha: 0.38),
                 fontSize: 10,
@@ -1570,12 +1578,13 @@ class _VetChatMessage {
     );
   }
 
-  String get label {
+  String label({String ownerName = 'tutor'}) {
+    final ownerLabel = ownerName.trim().isEmpty ? 'tutor' : ownerName.trim();
     final who = role == 'vet'
         ? 'tú'
         : role == 'ai'
             ? 'asistente'
-            : 'tutor';
+            : ownerLabel;
     final receipt = role == 'vet'
         ? readByOther
             ? ' · leído'

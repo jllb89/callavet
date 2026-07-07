@@ -89,6 +89,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _vetTyping = false;
   bool _vetEnteredAnnounced = false;
   String? _inlineConsultSessionId;
+  String _consultVetName = 'vet';
   _ActiveSurveyFeedback? _activeSurveyFeedback;
 
   static const _surveyReturnHomeDelay = Duration(seconds: 5);
@@ -277,6 +278,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final receipts = _asList(response['receipts']) ?? const [];
       final session = _asMap(response['session']);
       final status = session?['status']?.toString().toLowerCase();
+      final vetName = session?['vetName']?.toString().trim();
       if (!mounted) return;
       setState(() {
         final hydratedMessages = _messagesWithReceipts(messages, receipts);
@@ -288,6 +290,9 @@ class _ChatScreenState extends State<ChatScreen> {
           _messages.removeWhere((message) => message.streamOrder != null);
           _messages.addAll(hydratedMessages);
           _messages.sort(_compareInlineMessages);
+        }
+        if (vetName != null && vetName.isNotEmpty) {
+          _consultVetName = vetName;
         }
         _consultClosed = _isClosedConsultStatus(status);
       });
@@ -1793,6 +1798,7 @@ class _ChatScreenState extends State<ChatScreen> {
           isFirstUserMessage: isFirstUserMessage,
           child: _MessageBubble(
             message: message,
+            vetName: _consultVetName,
             sending: _isSending,
             canShowActions: userTurnsBeforeOrAtMessage >= 2,
             onServiceSelected: _activateService,
@@ -2056,6 +2062,7 @@ class _AnimatedMessageEntry extends StatelessWidget {
 class _MessageBubble extends StatelessWidget {
   const _MessageBubble({
     required this.message,
+    required this.vetName,
     required this.sending,
     required this.canShowActions,
     required this.onServiceSelected,
@@ -2067,6 +2074,7 @@ class _MessageBubble extends StatelessWidget {
   });
 
   final _ChatMessage message;
+  final String vetName;
   final bool sending;
   final bool canShowActions;
   final void Function(String service, _AiChatTurnResult result)
@@ -2129,10 +2137,10 @@ class _MessageBubble extends StatelessWidget {
                         ),
                 ),
               ),
-              if (message.receiptLabel != null) ...[
+              if (message.consultLabel(vetName: vetName) != null) ...[
                 const SizedBox(height: 4),
                 Text(
-                  message.receiptLabel!,
+                  message.consultLabel(vetName: vetName)!,
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.38),
                     fontSize: 10,
@@ -2744,6 +2752,7 @@ class _ChatMessage {
     this.senderId,
     this.clientKey,
     this.streamOrder,
+    this.createdAt,
     this.deliveredByOther = false,
     this.readByOther = false,
     this.result,
@@ -2793,6 +2802,7 @@ class _ChatMessage {
       senderId: json['sender_id']?.toString(),
       clientKey: json['client_key']?.toString(),
       streamOrder: _asInt(json['stream_order']),
+      createdAt: _parseDateTime(json['created_at']),
       includeInHistory: false,
     );
   }
@@ -2803,6 +2813,7 @@ class _ChatMessage {
   final String? senderId;
   final String? clientKey;
   final int? streamOrder;
+  final DateTime? createdAt;
   final bool deliveredByOther;
   final bool readByOther;
   final _AiChatTurnResult? result;
@@ -2812,11 +2823,25 @@ class _ChatMessage {
 
   bool get isUser => role == _ChatRole.user;
 
-  String? get receiptLabel {
-    if (!isUser || streamOrder == null) return null;
-    if (readByOther) return 'leído';
-    if (deliveredByOther) return 'entregado';
-    return null;
+  String? consultLabel({required String vetName}) {
+    if (streamOrder == null) return null;
+    if (role == _ChatRole.assistant) return null;
+    final name = switch (role) {
+      _ChatRole.user => 'tú',
+      _ChatRole.vet => vetName.trim().isEmpty ? 'vet' : vetName.trim(),
+      _ChatRole.assistant => 'asistente',
+    };
+    final time = createdAt == null
+        ? null
+        : '${createdAt!.hour.toString().padLeft(2, '0')}:${createdAt!.minute.toString().padLeft(2, '0')}';
+    final receipt = isUser
+        ? readByOther
+            ? ' · leído'
+            : deliveredByOther
+                ? ' · entregado'
+                : ''
+        : '';
+    return time == null ? '$name$receipt' : '$name · $time$receipt';
   }
 
   _ChatMessage copyWith({
@@ -2830,6 +2855,7 @@ class _ChatMessage {
       senderId: senderId,
       clientKey: clientKey,
       streamOrder: streamOrder,
+      createdAt: createdAt,
       deliveredByOther: deliveredByOther ?? this.deliveredByOther,
       readByOther: readByOther ?? this.readByOther,
       result: result,
@@ -3553,6 +3579,11 @@ int? _asInt(Object? value) {
   if (value is int) return value;
   if (value is num) return value.toInt();
   return int.tryParse(value?.toString() ?? '');
+}
+
+DateTime? _parseDateTime(Object? value) {
+  if (value == null) return null;
+  return DateTime.tryParse(value.toString())?.toLocal();
 }
 
 _ChatSubscriptionPlan? _findPlanByCode(

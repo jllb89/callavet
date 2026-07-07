@@ -122,11 +122,13 @@ post_json owner /sessions/start "$start_body" "$start_tmp" "$start_code_tmp"
 start_code=$(cat "$start_code_tmp")
 session_id=$("$JQ" -r '.sessionId // empty' "$start_tmp" 2>/dev/null || true)
 overage=$("$JQ" -r '.overage // false' "$start_tmp" 2>/dev/null || print -- false)
+consumption_committed=$("$JQ" -r '.consumptionCommitted // false' "$start_tmp" 2>/dev/null || print -- false)
 assert_ok $(is_2xx "$start_code" && [[ -n "$session_id" && "$overage" != 'true' ]] && echo 0 || echo 1) 'owner starts assigned chat consult'
 if [[ -z "$session_id" || "$overage" == 'true' ]]; then
   print -- "start status=$start_code body=$(cat "$start_tmp")"
   exit 1
 fi
+assert_ok $([[ "$consumption_committed" == 'true' ]] && echo 0 || echo 1) 'chat consumption is committed on start'
 created_session="$session_id"
 print -- "[chat-realtime] Session under test: $session_id"
 

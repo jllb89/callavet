@@ -400,7 +400,35 @@ export class SessionsController {
           if (!specialtyRows[0]) throw new HttpException('specialty_not_found', HttpStatus.BAD_REQUEST);
         }
 
-        if (vetId) {
+        let assignedVetId = vetId;
+        if (!assignedVetId && kind === 'chat') {
+          const { rows: candidateRows } = await q<{ id: string }>(
+            `select v.id
+               from vets v
+          left join vet_consult_locks l
+                 on l.vet_id = v.id
+                and l.released_at is null
+                and l.expires_at > now()
+              where v.is_approved = true
+                and ($1::uuid is null or array_position(coalesce(v.specialties, '{}'::uuid[]), $1::uuid) is not null)
+                and l.vet_id is null
+              order by v.rating_average desc nulls last, v.rating_count desc nulls last, v.created_at asc
+              limit 1`,
+            [specialtyId]
+          );
+          assignedVetId = candidateRows[0]?.id || null;
+          this.roadmapLog('vet_assignment.resolved', {
+            requestedVetId: vetId,
+            assignedVetId,
+            specialtyId,
+            kind,
+          });
+        }
+        if (kind === 'chat' && !assignedVetId) {
+          throw new HttpException('no_available_vet', HttpStatus.CONFLICT);
+        }
+
+        if (assignedVetId) {
           const { rows: vetRows } = await q<{ id: string; is_approved: boolean; specialty_ok: boolean }>(
             `select id,
                     is_approved,
@@ -408,13 +436,13 @@ export class SessionsController {
                from vets
               where id = $1::uuid
               limit 1`,
-            [vetId, specialtyId]
+            [assignedVetId, specialtyId]
           );
           const vet = vetRows[0];
           if (!vet) throw new HttpException('vet_not_found', HttpStatus.BAD_REQUEST);
           if (!vet.is_approved) throw new HttpException('vet_not_approved', HttpStatus.BAD_REQUEST);
           if (!vet.specialty_ok) throw new HttpException('vet_missing_specialty', HttpStatus.BAD_REQUEST);
-          this.roadmapLog('vet_lock.check', { vetId, specialtyId, kind });
+          this.roadmapLog('vet_lock.check', { vetId: assignedVetId, specialtyId, kind });
           const { rows: lockRows } = await q<{ session_id: string; expires_at: string }>(
             `select session_id, expires_at::text
                from vet_consult_locks
@@ -423,11 +451,11 @@ export class SessionsController {
                 and expires_at > now()
               limit 1
               for update`,
-            [vetId]
+            [assignedVetId]
           );
           if (lockRows[0]) {
             this.roadmapLog('vet_lock.busy', {
-              vetId,
+              vetId: assignedVetId,
               blockingSessionId: lockRows[0].session_id,
               expiresAt: lockRows[0].expires_at,
             });
@@ -440,7 +468,7 @@ export class SessionsController {
           `insert into chat_sessions (id, user_id, vet_id, pet_id, specialty_id, priority, status, mode, started_at)
            values (gen_random_uuid(), auth.uid(), $1::uuid, $2::uuid, $3::uuid, $4, $5, $6, now())
            returning id, pet_id, vet_id, specialty_id, priority`,
-          [vetId, petId, specialtyId, priority, 'active', kind]
+          [assignedVetId, petId, specialtyId, priority, 'active', kind]
         );
         const dbSessionId = r2?.[0]?.id as string;
         const routedPetId = r2?.[0]?.pet_id || null;
@@ -588,7 +616,16 @@ export class SessionsController {
             }
           }
         }
-        return { dbSessionId, petId: routedPetId, vetId: routedVetId, specialtyId: routedSpecialtyId, priority: routedPriority, consumptionId, overage, msg, creditConsumptionId, creditUsedCode, creditRemaining, checkout };
+        const finalConsumptionId = consumptionId || creditConsumptionId;
+        let chatCommitted = false;
+        if (!overage && kind === 'chat' && finalConsumptionId) {
+          const { rows: committedRows } = await q<{ ok: boolean }>(
+            `select fn_commit_consumption($1::uuid) as ok`,
+            [finalConsumptionId]
+          );
+          chatCommitted = committedRows[0]?.ok === true;
+        }
+        return { dbSessionId, petId: routedPetId, vetId: routedVetId, specialtyId: routedSpecialtyId, priority: routedPriority, consumptionId, overage, msg, creditConsumptionId, creditUsedCode, creditRemaining, checkout, chatCommitted };
       });
       if (result.overage) {
         this.roadmapLog('session.start.pending_payment', {
@@ -635,6 +672,7 @@ export class SessionsController {
         hasHandoff: !!handoff?.handoff,
         handoffId: handoff?.handoff?.id || null,
         consumptionId: finalConsumption || null,
+        consumptionCommitted: kind === 'chat' ? result.chatCommitted === true : false,
       });
       return {
         ok: true,
@@ -644,6 +682,7 @@ export class SessionsController {
         specialtyId: result.specialtyId,
         priority: result.priority,
         consumptionId: finalConsumption,
+        consumptionCommitted: kind === 'chat' ? result.chatCommitted === true : false,
         kind,
         overage: false,
         handoff: handoff ? { id: handoff.handoff?.id || null, ready: !!handoff.handoff } : undefined,

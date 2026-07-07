@@ -22,6 +22,8 @@ type SessionMessageAccess = {
   status: string | null;
   mode: string | null;
   actor_role: 'user' | 'vet' | 'admin';
+  owner_name: string | null;
+  vet_name: string | null;
   consumption_id: string | null;
   consumption_finalized: boolean | null;
 };
@@ -67,6 +69,8 @@ export class SessionMessagesController {
       `select s.id,
               s.status,
               s.mode,
+              ou.full_name as owner_name,
+              vu.full_name as vet_name,
               case
                 when s.user_id = auth.uid() and s.vet_id = auth.uid() and $2::text = 'vet' then 'vet'
                 when s.user_id = auth.uid() then 'user'
@@ -90,6 +94,8 @@ export class SessionMessagesController {
                  limit 1
               ) as consumption_finalized
          from chat_sessions s
+         left join users ou on ou.id = s.user_id
+         left join users vu on vu.id = s.vet_id
         where s.id = $1::uuid
           and (s.user_id = auth.uid() or s.vet_id = auth.uid() or is_admin())
         limit 1`,
@@ -218,6 +224,8 @@ export class SessionMessagesController {
           status: result.session.status,
           mode: result.session.mode,
           role: result.session.actor_role,
+          ownerName: result.session.owner_name,
+          vetName: result.session.vet_name,
         },
         cursor: result.cursor,
         items: result.items,
