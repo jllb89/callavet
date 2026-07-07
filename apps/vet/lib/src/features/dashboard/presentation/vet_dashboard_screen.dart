@@ -11,6 +11,27 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../../core/config/environment.dart';
 import '../../../core/router/route_observer.dart';
 
+enum _VetAssistantPhase { home, fadingOut, prompt }
+
+const _vetAssistantSessionId = 'assistant';
+const _vetAssistantPlaceholderText = 'escribir mensaje...';
+const _vetAssistantTextStyle = TextStyle(
+  color: Colors.white,
+  fontSize: 14,
+  fontFamily: 'ABC Diatype',
+  fontWeight: FontWeight.w400,
+  height: 1.25,
+  letterSpacing: 0,
+);
+const _vetAssistantPlaceholderStyle = TextStyle(
+  color: Color(0x52FFFFFF),
+  fontSize: 14,
+  fontFamily: 'ABC Diatype',
+  fontWeight: FontWeight.w400,
+  height: 1.25,
+  letterSpacing: 0,
+);
+
 void _vetDashboardRoadmapLog(String message) {
   debugPrint('[VideoRoadmap][VetDashboard] $message');
 }
@@ -30,8 +51,11 @@ class _VetDashboardScreenState extends State<VetDashboardScreen>
     'video_session_lifecycle',
   ];
 
+  final _assistantComposerController = TextEditingController();
+  final _assistantComposerFocusNode = FocusNode();
   bool _showProfile = false;
   bool _availableNow = true;
+  _VetAssistantPhase _assistantPhase = _VetAssistantPhase.home;
   final Set<String> _endingConsultIds = <String>{};
   final List<RealtimeChannel> _dashboardRealtimeChannels = <RealtimeChannel>[];
   RealtimeChannel? _dashboardBroadcastChannel;
@@ -73,6 +97,8 @@ class _VetDashboardScreenState extends State<VetDashboardScreen>
     _dashboardRefreshDebounce?.cancel();
     _removeDashboardBroadcast();
     _removeDashboardRealtime();
+    _assistantComposerController.dispose();
+    _assistantComposerFocusNode.dispose();
     super.dispose();
   }
 
@@ -294,15 +320,71 @@ class _VetDashboardScreenState extends State<VetDashboardScreen>
   }
 
   void _showHome() {
-    setState(() => _showProfile = false);
+    _assistantComposerFocusNode.unfocus();
+    setState(() {
+      _showProfile = false;
+      _assistantPhase = _VetAssistantPhase.home;
+    });
     _playDashboardFade();
   }
 
   void _showProfileScreen() {
+    _assistantComposerFocusNode.unfocus();
     setState(() {
       _profileBundleFuture = _loadProfileBundle();
       _showProfile = true;
+      _assistantPhase = _VetAssistantPhase.home;
     });
+  }
+
+  Future<void> _enterAssistantMode() async {
+    if (_assistantPhase == _VetAssistantPhase.prompt) {
+      _assistantComposerFocusNode.requestFocus();
+      return;
+    }
+    setState(() => _assistantPhase = _VetAssistantPhase.fadingOut);
+    await Future<void>.delayed(const Duration(milliseconds: 260));
+    if (!mounted || _assistantPhase != _VetAssistantPhase.fadingOut) return;
+    setState(() => _assistantPhase = _VetAssistantPhase.prompt);
+    _assistantComposerFocusNode.requestFocus();
+  }
+
+  void _exitAssistantMode() {
+    _assistantComposerFocusNode.unfocus();
+    setState(() => _assistantPhase = _VetAssistantPhase.home);
+    _playDashboardFade();
+  }
+
+  Future<void> _openAssistantChat() async {
+    final text = _assistantComposerController.text.trim();
+    if (text.isEmpty) {
+      await _enterAssistantMode();
+      return;
+    }
+    await _openAssistantChatWithText(text);
+  }
+
+  Future<void> _openAssistantChatWithText(String rawText) async {
+    final text = rawText.trim();
+    if (text.isEmpty) return;
+    _assistantComposerFocusNode.unfocus();
+    _assistantComposerController.clear();
+    final displayName = await _assistantDisplayName();
+    if (!mounted) return;
+    final query = Uri(queryParameters: {
+      'message': text,
+      'displayName': displayName,
+    }).query;
+    context.go('/chat/$_vetAssistantSessionId?$query');
+  }
+
+  Future<String> _assistantDisplayName() async {
+    try {
+      final bundle = await _profileBundleFuture;
+      return _firstNameFrom(bundle.profile.fullName) ?? 'Doctor';
+    } catch (_) {
+      return 'Doctor';
+    }
   }
 
   void _openVideoCall(String sessionId) {
@@ -428,6 +510,11 @@ class _VetDashboardScreenState extends State<VetDashboardScreen>
         : _DashboardPage(
             availableNow: _availableNow,
             profileBundleFuture: _profileBundleFuture,
+            assistantPhase: _assistantPhase,
+            assistantController: _assistantComposerController,
+            assistantFocusNode: _assistantComposerFocusNode,
+            onAssistantTap: () => unawaited(_enterAssistantMode()),
+            onAssistantSend: () => unawaited(_openAssistantChat()),
             onJoinVideo: _openVideoHandoff,
             onOpenChat: _openChat,
             onEndConsult: _endActiveConsult,
@@ -444,32 +531,30 @@ class _VetDashboardScreenState extends State<VetDashboardScreen>
           ),
         ),
         child: SafeArea(
+          bottom: false,
           child: AnimatedOpacity(
             duration: const Duration(milliseconds: 320),
             curve: Curves.easeOutCubic,
             opacity: _dashboardVisible ? 1 : 0,
-            child: AnimatedSlide(
-              duration: const Duration(milliseconds: 320),
-              curve: Curves.easeOutCubic,
-              offset: _dashboardVisible ? Offset.zero : const Offset(0, 0.018),
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(32, 24, 32, 22),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (_showProfile)
-                      _ProfileTopBar(onBack: _showHome)
-                    else
-                      _VetTopBar(
-                        availableNow: _availableNow,
-                        onHomeTap: _showHome,
-                        onProfileTap: _showProfileScreen,
-                        onAvailabilityChanged: (value) =>
-                            setState(() => _availableNow = value),
-                      ),
-                    Expanded(child: content),
-                  ],
-                ),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(18, 24, 18, 0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (_showProfile)
+                    _ProfileTopBar(onBack: _showHome)
+                  else if (_assistantPhase != _VetAssistantPhase.home)
+                    _ProfileTopBar(onBack: _exitAssistantMode)
+                  else
+                    _VetTopBar(
+                      availableNow: _availableNow,
+                      onHomeTap: _showHome,
+                      onProfileTap: _showProfileScreen,
+                      onAvailabilityChanged: (value) =>
+                          setState(() => _availableNow = value),
+                    ),
+                  Expanded(child: content),
+                ],
               ),
             ),
           ),
@@ -615,6 +700,11 @@ class _DashboardPage extends StatelessWidget {
   const _DashboardPage({
     required this.availableNow,
     required this.profileBundleFuture,
+    required this.assistantPhase,
+    required this.assistantController,
+    required this.assistantFocusNode,
+    required this.onAssistantTap,
+    required this.onAssistantSend,
     required this.onJoinVideo,
     required this.onOpenChat,
     required this.onEndConsult,
@@ -623,6 +713,11 @@ class _DashboardPage extends StatelessWidget {
 
   final bool availableNow;
   final Future<_VetProfileBundle> profileBundleFuture;
+  final _VetAssistantPhase assistantPhase;
+  final TextEditingController assistantController;
+  final FocusNode assistantFocusNode;
+  final VoidCallback onAssistantTap;
+  final VoidCallback onAssistantSend;
   final ValueChanged<_VideoJoinTarget> onJoinVideo;
   final ValueChanged<String> onOpenChat;
   final ValueChanged<_ActiveConsult> onEndConsult;
@@ -630,6 +725,7 @@ class _DashboardPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isPrompt = assistantPhase == _VetAssistantPhase.prompt;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -640,43 +736,97 @@ class _DashboardPage extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const SizedBox(height: 96),
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 560),
+                      curve: Curves.easeOutCubic,
+                      height: isPrompt ? 24 : 96,
+                    ),
                     _DashboardGreeting(
                         profileBundleFuture: profileBundleFuture),
                     const SizedBox(height: 6),
-                    const SizedBox(
-                      width: 332,
-                      child: Text(
-                        'Esta es tu actividad:',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 28,
-                          fontFamily: 'ABC Diatype',
-                          fontWeight: FontWeight.w400,
-                          height: 1.10,
-                        ),
+                    _DashboardAssistantHeading(isPrompt: isPrompt),
+                    if (!isPrompt) ...[
+                      const SizedBox(height: 30),
+                      const _BoltMark(),
+                      const SizedBox(height: 42),
+                      _ActivitySections(
+                        availableNow: availableNow,
+                        profileBundleFuture: profileBundleFuture,
+                        onJoinVideo: onJoinVideo,
+                        onOpenChat: onOpenChat,
+                        onEndConsult: onEndConsult,
+                        endingConsultIds: endingConsultIds,
                       ),
-                    ),
-                    const SizedBox(height: 30),
-                    const _BoltMark(),
-                    const SizedBox(height: 42),
-                    _ActivitySections(
-                      availableNow: availableNow,
-                      profileBundleFuture: profileBundleFuture,
-                      onJoinVideo: onJoinVideo,
-                      onOpenChat: onOpenChat,
-                      onEndConsult: onEndConsult,
-                      endingConsultIds: endingConsultIds,
-                    ),
+                    ],
                   ],
                 ),
               ),
             ],
           ),
         ),
-        const SizedBox(height: 14),
-        const _VetMessageComposer(),
+        _VetAssistantComposer(
+          controller: assistantController,
+          focusNode: assistantFocusNode,
+          isPrompt: isPrompt,
+          onTap: onAssistantTap,
+          onSend: onAssistantSend,
+        ),
       ],
+    );
+  }
+}
+
+class _DashboardAssistantHeading extends StatelessWidget {
+  const _DashboardAssistantHeading({required this.isPrompt});
+
+  final bool isPrompt;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 332,
+      child: AnimatedSize(
+        duration: const Duration(milliseconds: 340),
+        curve: Curves.easeOutCubic,
+        alignment: Alignment.topLeft,
+        child: AnimatedSwitcher(
+          duration: const Duration(milliseconds: 320),
+          reverseDuration: const Duration(milliseconds: 260),
+          switchInCurve: Curves.easeOutCubic,
+          switchOutCurve: Curves.easeInCubic,
+          transitionBuilder: (child, animation) {
+            final slide = Tween<Offset>(
+              begin: const Offset(0, 0.16),
+              end: Offset.zero,
+            ).animate(animation);
+            return FadeTransition(
+              opacity: animation,
+              child: SlideTransition(position: slide, child: child),
+            );
+          },
+          layoutBuilder: (currentChild, previousChildren) {
+            return Stack(
+              alignment: Alignment.topLeft,
+              clipBehavior: Clip.none,
+              children: [
+                ...previousChildren,
+                if (currentChild != null) currentChild,
+              ],
+            );
+          },
+          child: Text(
+            isPrompt ? '¿Qué necesitas revisar hoy?' : 'Esta es tu actividad:',
+            key: ValueKey<bool>(isPrompt),
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 28,
+              fontFamily: 'ABC Diatype',
+              fontWeight: FontWeight.w400,
+              height: 1.10,
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -1795,39 +1945,121 @@ class _JoinVideoButton extends StatelessWidget {
   }
 }
 
-class _VetMessageComposer extends StatelessWidget {
-  const _VetMessageComposer();
+class _VetAssistantComposer extends StatelessWidget {
+  const _VetAssistantComposer({
+    required this.controller,
+    required this.focusNode,
+    required this.isPrompt,
+    required this.onTap,
+    required this.onSend,
+  });
+
+  final TextEditingController controller;
+  final FocusNode focusNode;
+  final bool isPrompt;
+  final VoidCallback onTap;
+  final VoidCallback onSend;
 
   @override
   Widget build(BuildContext context) {
-    return FractionallySizedBox(
-      widthFactor: 1.10,
-      child: Container(
-        height: 40,
-        padding: const EdgeInsets.only(left: 20, right: 14),
-        decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.05),
-          borderRadius: BorderRadius.circular(40),
-        ),
-        child: Row(
-          children: [
-            Text(
-              'escribir mensaje...',
-              style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.30),
-                fontSize: 13,
-                fontFamily: 'ABC Diatype',
-                fontWeight: FontWeight.w500,
+    final bottomInset = MediaQuery.paddingOf(context).bottom;
+    return GestureDetector(
+      onTap: onTap,
+      child: Padding(
+        padding: EdgeInsets.only(top: 8, bottom: 14 + bottomInset),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 46, maxHeight: 46),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(28),
+              border: Border.all(color: Colors.white.withValues(alpha: 0.055)),
+            ),
+            child: Padding(
+              padding:
+                  const EdgeInsets.only(left: 18, right: 6, top: 3, bottom: 3),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Expanded(
+                    child: isPrompt
+                        ? Align(
+                            alignment: Alignment.centerLeft,
+                            child: ValueListenableBuilder<TextEditingValue>(
+                              valueListenable: controller,
+                              builder: (context, value, child) {
+                                return Stack(
+                                  alignment: Alignment.centerLeft,
+                                  children: [
+                                    if (value.text.isEmpty)
+                                      const IgnorePointer(
+                                        child: _VetAssistantPlaceholder(),
+                                      ),
+                                    TextField(
+                                      controller: controller,
+                                      focusNode: focusNode,
+                                      cursorColor: Colors.white,
+                                      cursorHeight: 16,
+                                      keyboardType: TextInputType.multiline,
+                                      textCapitalization:
+                                          TextCapitalization.sentences,
+                                      minLines: 1,
+                                      maxLines: 1,
+                                      textInputAction: TextInputAction.send,
+                                      textAlignVertical:
+                                          TextAlignVertical.center,
+                                      onSubmitted: (_) => onSend(),
+                                      style: _vetAssistantTextStyle,
+                                      decoration: const InputDecoration(
+                                        isCollapsed: true,
+                                        isDense: true,
+                                        contentPadding: EdgeInsets.zero,
+                                        border: InputBorder.none,
+                                      ),
+                                    ),
+                                  ],
+                                );
+                              },
+                            ),
+                          )
+                        : const Align(
+                            alignment: Alignment.centerLeft,
+                            child: _VetAssistantPlaceholder(),
+                          ),
+                  ),
+                  const SizedBox(width: 8),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 1),
+                    child: IconButton.filled(
+                      onPressed: isPrompt ? onSend : onTap,
+                      style: IconButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        foregroundColor: Colors.black,
+                        fixedSize: const Size(38, 38),
+                      ),
+                      icon: const Icon(Icons.arrow_upward_rounded, size: 19),
+                    ),
+                  ),
+                ],
               ),
             ),
-            const Spacer(),
-            SvgPicture.asset(
-              'assets/icons/rightup.svg',
-              width: 17,
-              height: 17,
-            ),
-          ],
+          ),
         ),
+      ),
+    );
+  }
+}
+
+class _VetAssistantPlaceholder extends StatelessWidget {
+  const _VetAssistantPlaceholder();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Text(
+      _vetAssistantPlaceholderText,
+      style: _vetAssistantPlaceholderStyle,
+      textHeightBehavior: TextHeightBehavior(
+        applyHeightToFirstAscent: false,
+        applyHeightToLastDescent: false,
       ),
     );
   }

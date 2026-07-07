@@ -754,6 +754,20 @@ export class VetsController {
       entitlementAction: settlement.entitlementAction,
       providerError,
     }));
+    if (String(settlement.mode || '').toLowerCase() !== 'video') {
+      console.log(JSON.stringify({
+        scope: 'chat_consultation_realtime',
+        component: 'vets',
+        event: 'consult_end.completed',
+        at: new Date().toISOString(),
+        sessionId: normalizedSessionId,
+        actorId: actor.id,
+        actorRole: actor.role,
+        status: settlement.status,
+        engaged: settlement.engaged,
+        entitlementAction: settlement.entitlementAction,
+      }));
+    }
     return {
       ok: true,
       sessionId: normalizedSessionId,

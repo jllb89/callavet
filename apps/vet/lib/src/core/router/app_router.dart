@@ -26,7 +26,8 @@ class AppRouter {
       GoRoute(
         path: '/dashboard',
         name: 'dashboard',
-        builder: (context, state) => const VetDashboardScreen(),
+        pageBuilder: (context, state) =>
+            _noTransitionPage(state, const VetDashboardScreen()),
       ),
       GoRoute(
         path: '/video/:sessionId',
@@ -39,9 +40,17 @@ class AppRouter {
       GoRoute(
         path: '/chat/:sessionId',
         name: 'chat',
-        builder: (context, state) {
+        pageBuilder: (context, state) {
           final sessionId = state.pathParameters['sessionId'] ?? '';
-          return VetChatScreen(sessionId: sessionId);
+          final query = state.uri.queryParameters;
+          return _noTransitionPage(
+            state,
+            VetChatScreen(
+              sessionId: sessionId,
+              initialMessage: query['message'],
+              displayName: query['displayName'],
+            ),
+          );
         },
       ),
     ],
@@ -50,5 +59,16 @@ class AppRouter {
         child: Text('Not found: ${state.error?.toString() ?? 'unknown route'}'),
       ),
     ),
+  );
+}
+
+Page<void> _noTransitionPage(GoRouterState state, Widget child) {
+  return CustomTransitionPage<void>(
+    key: state.pageKey,
+    transitionDuration: Duration.zero,
+    reverseTransitionDuration: Duration.zero,
+    transitionsBuilder: (context, animation, secondaryAnimation, child) =>
+        child,
+    child: child,
   );
 }

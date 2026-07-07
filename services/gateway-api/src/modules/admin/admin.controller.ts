@@ -731,4 +731,149 @@ export class AdminController {
     await this.logAdminAction('admin.ops.dashboard.read', 'ops', null, { metrics, alerts });
     return { ok: true, generatedAt: new Date().toISOString(), metrics, alerts };
   }
+
+  @Get('ops/chat-consultations')
+  async chatConsultationOps(@Headers('x-admin-secret') secret: string) {
+    assertAdmin(secret);
+    const hasReceipts = await this.tableExists('public.message_receipts');
+    const hasSurveys = await this.tableExists('public.consult_surveys');
+    const hasEntitlements = await this.tableExists('public.entitlement_consumptions');
+
+    const { rows } = await this.db.query<any>(
+      `with recent_sessions as (
+         select s.id,
+                s.status,
+                s.created_at,
+                s.ended_at,
+                s.updated_at
+           from chat_sessions s
+          where coalesce(s.mode, 'chat') = 'chat'
+            and s.created_at >= now() - interval '24 hours'
+       ), first_owner_message as (
+         select m.session_id, min(m.created_at) as first_owner_at
+           from messages m
+           join recent_sessions rs on rs.id = m.session_id
+          where m.role = 'user'
+          group by m.session_id
+       ), first_vet_message as (
+         select m.session_id, min(m.created_at) as first_vet_at
+           from messages m
+           join recent_sessions rs on rs.id = m.session_id
+          where m.role = 'vet'
+          group by m.session_id
+       ), session_message_counts as (
+         select m.session_id, count(*)::int as message_count
+           from messages m
+           join recent_sessions rs on rs.id = m.session_id
+          where m.deleted_at is null
+          group by m.session_id
+       )
+       select count(*)::int as sessions_created_24h,
+              count(*) filter (where rs.status = 'active')::int as active_sessions_24h,
+              count(*) filter (where rs.status = 'completed')::int as completed_sessions_24h,
+              count(*) filter (where rs.status in ('canceled', 'no_show'))::int as not_completed_sessions_24h,
+              count(*) filter (where fom.first_owner_at is not null)::int as sessions_with_owner_message_24h,
+              count(*) filter (where fvm.first_vet_at is not null)::int as sessions_with_vet_response_24h,
+              count(*) filter (where coalesce(smc.message_count, 0) = 0 and rs.status <> 'active')::int as abandoned_without_messages_24h,
+              coalesce(sum(coalesce(smc.message_count, 0)), 0)::int as messages_in_recent_sessions_24h,
+              round(avg(extract(epoch from (fvm.first_vet_at - fom.first_owner_at))) filter (where fom.first_owner_at is not null and fvm.first_vet_at is not null)::numeric, 2) as avg_first_vet_response_seconds_24h
+         from recent_sessions rs
+         left join first_owner_message fom on fom.session_id = rs.id
+         left join first_vet_message fvm on fvm.session_id = rs.id
+         left join session_message_counts smc on smc.session_id = rs.id`
+    );
+    const realtime = rows[0] || {};
+
+    const [
+      receipts24h,
+      readReceipts24h,
+      finalizedChatEntitlements24h,
+      releasedChatEntitlements24h,
+      surveysPrompted24h,
+      surveysCompleted24h,
+    ] = await Promise.all([
+      hasReceipts
+        ? this.safeCount(`select count(*)::int as count from message_receipts where delivered_at >= now() - interval '24 hours'`)
+        : Promise.resolve(0),
+      hasReceipts
+        ? this.safeCount(`select count(*)::int as count from message_receipts where read_at >= now() - interval '24 hours'`)
+        : Promise.resolve(0),
+      hasEntitlements
+        ? this.safeCount(
+            `select count(*)::int as count
+               from entitlement_consumptions
+              where consumption_type = 'chat'
+                and finalized = true
+                and updated_at >= now() - interval '24 hours'`
+          )
+        : Promise.resolve(0),
+      hasEntitlements
+        ? this.safeCount(
+            `select count(*)::int as count
+               from entitlement_consumptions
+              where consumption_type = 'chat'
+                and canceled_at >= now() - interval '24 hours'`
+          )
+        : Promise.resolve(0),
+      hasSurveys
+        ? this.safeCount(`select count(*)::int as count from consult_surveys where prompted_at >= now() - interval '24 hours'`)
+        : Promise.resolve(0),
+      hasSurveys
+        ? this.safeCount(`select count(*)::int as count from consult_surveys where completed_at >= now() - interval '24 hours'`)
+        : Promise.resolve(0),
+    ]);
+
+    const metrics = {
+      sessionsCreated24h: Number(realtime.sessions_created_24h || 0),
+      activeSessions24h: Number(realtime.active_sessions_24h || 0),
+      completedSessions24h: Number(realtime.completed_sessions_24h || 0),
+      notCompletedSessions24h: Number(realtime.not_completed_sessions_24h || 0),
+      sessionsWithOwnerMessage24h: Number(realtime.sessions_with_owner_message_24h || 0),
+      sessionsWithVetResponse24h: Number(realtime.sessions_with_vet_response_24h || 0),
+      abandonedWithoutMessages24h: Number(realtime.abandoned_without_messages_24h || 0),
+      messagesInRecentSessions24h: Number(realtime.messages_in_recent_sessions_24h || 0),
+      avgFirstVetResponseSeconds24h: realtime.avg_first_vet_response_seconds_24h == null ? null : Number(realtime.avg_first_vet_response_seconds_24h),
+      receipts24h,
+      readReceipts24h,
+      finalizedChatEntitlements24h,
+      releasedChatEntitlements24h,
+      surveysPrompted24h,
+      surveysCompleted24h,
+      telemetry: {
+        messageReceiptsTable: hasReceipts,
+        consultSurveysTable: hasSurveys,
+        entitlementConsumptionsTable: hasEntitlements,
+      },
+    };
+
+    const alerts = [
+      {
+        key: 'chat_consultations.no_vet_response',
+        severity: metrics.sessionsWithOwnerMessage24h > 0 && metrics.sessionsWithVetResponse24h === 0 ? 'warning' : 'ok',
+        value: metrics.sessionsWithVetResponse24h,
+        threshold: 1,
+      },
+      {
+        key: 'chat_consultations.abandoned_without_messages',
+        severity: metrics.abandonedWithoutMessages24h > 10 ? 'warning' : 'ok',
+        value: metrics.abandonedWithoutMessages24h,
+        threshold: 10,
+      },
+      {
+        key: 'chat_consultations.receipts.missing',
+        severity: !hasReceipts ? 'critical' : 'ok',
+        value: hasReceipts ? 1 : 0,
+        threshold: 1,
+      },
+      {
+        key: 'chat_consultations.surveys.missing',
+        severity: !hasSurveys ? 'critical' : 'ok',
+        value: hasSurveys ? 1 : 0,
+        threshold: 1,
+      },
+    ];
+
+    await this.logAdminAction('admin.ops.chat_consultations.read', 'ops', null, { metrics, alerts });
+    return { ok: true, generatedAt: new Date().toISOString(), metrics, alerts };
+  }
 }

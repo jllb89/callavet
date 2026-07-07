@@ -72,10 +72,21 @@ class _ChatScreenState extends State<ChatScreen> {
   final _messages = <_ChatMessage>[];
 
   late final String _conversationId;
+  RealtimeChannel? _consultMessagesChannel;
+  RealtimeChannel? _consultSessionChannel;
+  RealtimeChannel? _consultRoomChannel;
+  Timer? _consultRefreshDebounce;
+  Timer? _typingDebounce;
+  Timer? _vetTypingClearTimer;
   Timer? _surveyReturnHomeTimer;
   bool _isSending = false;
   bool _isReturningHome = false;
   bool _surveyLoading = false;
+  bool _consultLoading = false;
+  bool _consultClosed = false;
+  bool _endingConsult = false;
+  bool _vetOnline = false;
+  bool _vetTyping = false;
   _ActiveSurveyFeedback? _activeSurveyFeedback;
 
   static const _surveyReturnHomeDelay = Duration(seconds: 5);
@@ -106,8 +117,15 @@ class _ChatScreenState extends State<ChatScreen> {
     final hasInitialAssistantMessage =
         initialAssistantMessage != null && initialAssistantMessage.isNotEmpty;
     final cachedSessionId = _uuidOrNull(widget.sessionId);
-    final cachedMessages =
-        cachedSessionId == null ? null : _sessionMessageCache[cachedSessionId];
+    if (_isConsultChatRoute && cachedSessionId != null) {
+      _inputCtrl.addListener(_handleComposerChanged);
+      unawaited(_loadConsultMessages());
+      _startConsultRealtime(cachedSessionId);
+      _startConsultRoomSignals(cachedSessionId);
+    }
+    final cachedMessages = cachedSessionId == null || _isConsultChatRoute
+        ? null
+        : _sessionMessageCache[cachedSessionId];
     if (cachedMessages != null && cachedMessages.isNotEmpty) {
       _messages.addAll(cachedMessages);
       _aiChatLog(
@@ -140,7 +158,25 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void dispose() {
     final sessionId = _uuidOrNull(widget.sessionId);
-    if (sessionId != null) _cacheSessionMessages(sessionId);
+    if (sessionId != null && !_isConsultChatRoute) {
+      _cacheSessionMessages(sessionId);
+    }
+    _consultRefreshDebounce?.cancel();
+    final messagesChannel = _consultMessagesChannel;
+    if (messagesChannel != null) {
+      Supabase.instance.client.removeChannel(messagesChannel);
+    }
+    final sessionChannel = _consultSessionChannel;
+    if (sessionChannel != null) {
+      Supabase.instance.client.removeChannel(sessionChannel);
+    }
+    final roomChannel = _consultRoomChannel;
+    if (roomChannel != null) {
+      unawaited(roomChannel.untrack());
+      Supabase.instance.client.removeChannel(roomChannel);
+    }
+    _typingDebounce?.cancel();
+    _vetTypingClearTimer?.cancel();
     _aiChatLog(
         'dispose conversationId=$_conversationId totalMessages=${_messages.length}');
     _inputCtrl.dispose();
@@ -178,6 +214,16 @@ class _ChatScreenState extends State<ChatScreen> {
 
   bool get _showsHomeIntro => widget.sessionId == 'ai';
 
+  bool get _isConsultChatRoute {
+    final sessionId = _uuidOrNull(widget.sessionId);
+    final hasAssistantMessage =
+        widget.initialAssistantMessage?.trim().isNotEmpty == true;
+    return sessionId != null &&
+        !widget.initialSurvey &&
+        !widget.initialRejoinVideo &&
+        !hasAssistantMessage;
+  }
+
   void _sendComposerMessage() {
     final text = _inputCtrl.text.trim();
     if (text.isEmpty) {
@@ -196,7 +242,331 @@ class _ChatScreenState extends State<ChatScreen> {
       _submitSurveyFeedback(activeSurveyFeedback, text);
       return;
     }
+    if (_isConsultChatRoute) {
+      unawaited(_sendConsultMessage(text));
+      return;
+    }
     _sendUserMessage(text);
+  }
+
+  Future<void> _loadConsultMessages() async {
+    final sessionId = _uuidOrNull(widget.sessionId);
+    if (sessionId == null) return;
+    _aiChatLog('consult load messages sessionId=$sessionId');
+    if (mounted) setState(() => _consultLoading = true);
+    try {
+      final response = await _getGatewayJson(
+        '/sessions/${Uri.encodeComponent(sessionId)}/messages?limit=100&sort=stream_order.asc',
+      );
+      final messages = (_asList(response['items']) ?? const [])
+          .map(_asMap)
+          .whereType<Map<String, dynamic>>()
+          .map(_ChatMessage.consultFromJson)
+          .toList(growable: false);
+      final receipts = _asList(response['receipts']) ?? const [];
+      final session = _asMap(response['session']);
+      final status = session?['status']?.toString().toLowerCase();
+      if (!mounted) return;
+      setState(() {
+        _messages
+          ..clear()
+          ..addAll(_messagesWithReceipts(messages, receipts));
+        _consultClosed = _isClosedConsultStatus(status);
+      });
+      _markVisibleConsultMessagesRead();
+      if (_consultClosed) unawaited(_startSurveyPrompt());
+      _scrollToBottom();
+    } catch (error) {
+      _aiChatLog('consult load failed: ${error.runtimeType} $error');
+      if (!mounted) return;
+      setState(() {
+        if (_messages.isEmpty) {
+          _messages.add(_ChatMessage.assistant(_friendlyError(error),
+              includeInHistory: false));
+        }
+      });
+    } finally {
+      if (mounted) setState(() => _consultLoading = false);
+    }
+  }
+
+  void _startConsultRealtime(String sessionId) {
+    final messagesChannel =
+        Supabase.instance.client.channel('owner-chat-messages:$sessionId');
+    messagesChannel
+        .onPostgresChanges(
+          event: PostgresChangeEvent.all,
+          schema: 'public',
+          table: 'messages',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'session_id',
+            value: sessionId,
+          ),
+          callback: (payload) {
+            final record = payload.newRecord.isNotEmpty
+                ? payload.newRecord
+                : payload.oldRecord;
+            final message = _ChatMessage.consultFromJson(record);
+            if (message.id.isEmpty) {
+              _scheduleConsultRefresh();
+              return;
+            }
+            _upsertConsultMessage(message);
+          },
+        )
+        .subscribe();
+    _consultMessagesChannel = messagesChannel;
+
+    final sessionChannel =
+        Supabase.instance.client.channel('owner-chat-session:$sessionId');
+    sessionChannel
+        .onPostgresChanges(
+          event: PostgresChangeEvent.update,
+          schema: 'public',
+          table: 'chat_sessions',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'id',
+            value: sessionId,
+          ),
+          callback: (payload) {
+            final status =
+                payload.newRecord['status']?.toString().toLowerCase();
+            if (_isClosedConsultStatus(status)) {
+              if (mounted) setState(() => _consultClosed = true);
+              unawaited(_startSurveyPrompt());
+            }
+          },
+        )
+        .subscribe();
+    _consultSessionChannel = sessionChannel;
+  }
+
+  void _startConsultRoomSignals(String sessionId) {
+    final userId = Supabase.instance.client.auth.currentUser?.id;
+    if (userId == null || userId.isEmpty) return;
+    final channel = Supabase.instance.client.channel(
+      'consult-room:$sessionId',
+      opts: RealtimeChannelConfig(private: true, key: userId),
+    );
+    channel
+        .onBroadcast(
+          event: 'typing',
+          callback: (payload) {
+            if (payload['role']?.toString() != 'vet') return;
+            final typing = payload['typing'] == true;
+            if (!mounted) return;
+            setState(() => _vetTyping = typing);
+            _vetTypingClearTimer?.cancel();
+            if (typing) {
+              _vetTypingClearTimer = Timer(const Duration(seconds: 3), () {
+                if (mounted) setState(() => _vetTyping = false);
+              });
+            }
+          },
+        )
+        .onBroadcast(
+          event: 'receipts',
+          callback: (payload) {
+            final receipts = _asList(payload['receipts']) ?? const [];
+            for (final receiptValue in receipts) {
+              final receipt = _asMap(receiptValue);
+              if (receipt != null) _applyReceipt(receipt);
+            }
+          },
+        )
+        .onPresenceSync((_) => _syncVetPresence(channel))
+        .subscribe((status, [_]) {
+      if (status == RealtimeSubscribeStatus.subscribed) {
+        unawaited(channel.track({
+          'role': 'user',
+          'userId': userId,
+          'onlineAt': DateTime.now().toIso8601String(),
+        }));
+      }
+    });
+    _consultRoomChannel = channel;
+  }
+
+  void _syncVetPresence(RealtimeChannel channel) {
+    final online = channel.presenceState().any((state) => state.presences.any(
+          (presence) => presence.payload['role']?.toString() == 'vet',
+        ));
+    if (mounted) setState(() => _vetOnline = online);
+  }
+
+  void _handleComposerChanged() {
+    if (!_isConsultChatRoute || _consultClosed || _consultRoomChannel == null) {
+      return;
+    }
+    _typingDebounce?.cancel();
+    final isTyping = _inputCtrl.text.trim().isNotEmpty;
+    _typingDebounce = Timer(const Duration(milliseconds: 300), () {
+      final channel = _consultRoomChannel;
+      if (channel == null) return;
+      unawaited(channel.sendBroadcastMessage(
+        event: 'typing',
+        payload: {
+          'role': 'user',
+          'typing': isTyping,
+          'at': DateTime.now().toIso8601String(),
+        },
+      ));
+    });
+  }
+
+  void _scheduleConsultRefresh() {
+    _consultRefreshDebounce?.cancel();
+    _consultRefreshDebounce =
+        Timer(const Duration(milliseconds: 350), _refreshConsultMessages);
+  }
+
+  void _refreshConsultMessages() {
+    if (!mounted) return;
+    unawaited(_loadConsultMessages());
+  }
+
+  void _upsertConsultMessage(_ChatMessage message) {
+    if (!mounted) return;
+    setState(() {
+      final index =
+          _messages.indexWhere((existing) => existing.id == message.id);
+      if (index >= 0) {
+        _messages[index] = message.withReceiptFrom(_messages[index]);
+      } else {
+        _messages.add(message);
+      }
+      _messages.sort(_compareConsultMessages);
+    });
+    if (!message.isUser) _markVisibleConsultMessagesRead();
+    _scrollToBottom();
+  }
+
+  int _compareConsultMessages(_ChatMessage a, _ChatMessage b) {
+    final aOrder = a.streamOrder;
+    final bOrder = b.streamOrder;
+    if (aOrder != null && bOrder != null && aOrder != bOrder) {
+      return aOrder.compareTo(bOrder);
+    }
+    return a.id.compareTo(b.id);
+  }
+
+  List<_ChatMessage> _messagesWithReceipts(
+    List<_ChatMessage> messages,
+    List<dynamic> receipts,
+  ) {
+    final currentUserId = Supabase.instance.client.auth.currentUser?.id;
+    return messages.map((message) {
+      if (!message.isUser) return message;
+      var delivered = message.deliveredByOther;
+      var read = message.readByOther;
+      for (final receiptValue in receipts) {
+        final receipt = _asMap(receiptValue);
+        if (receipt == null ||
+            receipt['message_id']?.toString() != message.id) {
+          continue;
+        }
+        if (receipt['user_id']?.toString() == currentUserId) continue;
+        delivered = delivered || receipt['delivered_at'] != null;
+        read = read || receipt['read_at'] != null;
+      }
+      return message.copyWith(deliveredByOther: delivered, readByOther: read);
+    }).toList(growable: false);
+  }
+
+  void _applyReceipt(Map<String, dynamic> receipt) {
+    final currentUserId = Supabase.instance.client.auth.currentUser?.id;
+    if (receipt['user_id']?.toString() == currentUserId) return;
+    final messageId = receipt['message_id']?.toString() ?? '';
+    if (messageId.isEmpty || !mounted) return;
+    setState(() {
+      final index = _messages.indexWhere((message) => message.id == messageId);
+      if (index < 0 || !_messages[index].isUser) return;
+      _messages[index] = _messages[index].copyWith(
+        deliveredByOther: receipt['delivered_at'] != null,
+        readByOther: receipt['read_at'] != null,
+      );
+    });
+  }
+
+  void _markVisibleConsultMessagesRead() {
+    final sessionId = _uuidOrNull(widget.sessionId);
+    if (sessionId == null) return;
+    final lastStreamOrder = _messages
+        .where((message) => !message.isUser)
+        .map((message) => message.streamOrder ?? 0)
+        .fold<int>(0, (max, value) => value > max ? value : max);
+    if (lastStreamOrder <= 0) return;
+    unawaited(_postGatewayJson(
+      '/sessions/${Uri.encodeComponent(sessionId)}/messages/read',
+      {'lastStreamOrder': lastStreamOrder},
+    ));
+  }
+
+  Future<void> _sendConsultMessage(String text) async {
+    final sessionId = _uuidOrNull(widget.sessionId);
+    if (sessionId == null || _isSending) return;
+    if (_consultClosed) {
+      setState(() {
+        _messages.add(_ChatMessage.assistant(
+          'Esta consulta ya terminó. Puedes completar la encuesta o volver al inicio.',
+          includeInHistory: false,
+        ));
+      });
+      _scrollToBottom();
+      return;
+    }
+    final clientKey =
+        'owner-${DateTime.now().microsecondsSinceEpoch}-${_nextChatMessageId()}';
+    setState(() {
+      _messages.add(_ChatMessage.user(text, includeInHistory: false));
+      _isSending = true;
+    });
+    _scrollToBottom();
+
+    try {
+      await _postGatewayJson(
+        '/sessions/${Uri.encodeComponent(sessionId)}/messages',
+        {
+          'content': text,
+          'clientKey': clientKey,
+        },
+      );
+      await _loadConsultMessages();
+    } catch (error) {
+      _aiChatLog('consult send failed: ${error.runtimeType} $error');
+      if (!mounted) return;
+      setState(() => _messages.add(_ChatMessage.assistant(_friendlyError(error),
+          includeInHistory: false)));
+      _scrollToBottom();
+    } finally {
+      if (mounted) setState(() => _isSending = false);
+    }
+  }
+
+  Future<void> _endConsultFromOwner() async {
+    final sessionId = _uuidOrNull(widget.sessionId);
+    if (sessionId == null || _endingConsult || _consultClosed) return;
+    setState(() => _endingConsult = true);
+    try {
+      await _postGatewayJson('/sessions/end', {'sessionId': sessionId});
+      if (!mounted) return;
+      setState(() => _consultClosed = true);
+      unawaited(_startSurveyPrompt());
+    } catch (error) {
+      _aiChatLog('owner consult end failed: ${error.runtimeType} $error');
+      if (!mounted) return;
+      setState(() => _messages.add(_ChatMessage.assistant(_friendlyError(error),
+          includeInHistory: false)));
+      _scrollToBottom();
+    } finally {
+      if (mounted) setState(() => _endingConsult = false);
+    }
+  }
+
+  bool _isClosedConsultStatus(String? status) {
+    return status == 'completed' || status == 'canceled' || status == 'no_show';
   }
 
   Future<void> _startSurveyPrompt() async {
@@ -1353,7 +1723,20 @@ class _ChatScreenState extends State<ChatScreen> {
           right: 0,
           child: SafeArea(
             bottom: false,
-            child: _ChatHeader(onBack: () => unawaited(_returnHome())),
+            child: _ChatHeader(
+              onBack: () => unawaited(_returnHome()),
+              onEnd: _isConsultChatRoute && !_consultClosed
+                  ? () => unawaited(_endConsultFromOwner())
+                  : null,
+              ending: _endingConsult,
+              statusText: _isConsultChatRoute
+                  ? _vetTyping
+                      ? 'veterinario escribiendo...'
+                      : _vetOnline
+                          ? 'veterinario en línea'
+                          : 'consulta activa'
+                  : null,
+            ),
           ),
         ),
         Positioned(
@@ -1363,7 +1746,9 @@ class _ChatScreenState extends State<ChatScreen> {
           child: _ChatComposer(
             controller: _inputCtrl,
             focusNode: _focusNode,
-            sending: _isSending,
+            sending: _isSending ||
+                _endingConsult ||
+                (_consultLoading && _messages.isEmpty),
             includeBottomInset: true,
             onSend: _sendComposerMessage,
           ),
@@ -1465,32 +1850,66 @@ class _HomeChatIntro extends StatelessWidget {
 }
 
 class _ChatHeader extends StatelessWidget {
-  const _ChatHeader({required this.onBack});
+  const _ChatHeader({
+    required this.onBack,
+    required this.onEnd,
+    required this.ending,
+    this.statusText,
+  });
 
   final VoidCallback onBack;
+  final VoidCallback? onEnd;
+  final bool ending;
+  final String? statusText;
 
   @override
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(18, 24, 18, 0),
-      child: Align(
-        alignment: Alignment.centerLeft,
-        child: GestureDetector(
-          onTap: onBack,
-          behavior: HitTestBehavior.opaque,
-          child: const SizedBox(
-            width: 24,
-            height: 42,
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Icon(
-                Icons.arrow_back_ios_new_rounded,
-                color: Colors.white,
-                size: 22,
+      child: Row(
+        children: [
+          GestureDetector(
+            onTap: onBack,
+            behavior: HitTestBehavior.opaque,
+            child: const SizedBox(
+              width: 24,
+              height: 42,
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Icon(
+                  Icons.arrow_back_ios_new_rounded,
+                  color: Colors.white,
+                  size: 22,
+                ),
               ),
             ),
           ),
-        ),
+          if (statusText != null) ...[
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                statusText!,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.62),
+                  fontSize: 12,
+                  fontFamily: 'ABCDiatype',
+                ),
+              ),
+            ),
+          ] else
+            const Spacer(),
+          if (onEnd != null)
+            TextButton(
+              onPressed: ending ? null : onEnd,
+              style: TextButton.styleFrom(
+                foregroundColor: Colors.white,
+                disabledForegroundColor: Colors.white.withValues(alpha: 0.35),
+              ),
+              child: Text(ending ? 'cerrando...' : 'cerrar'),
+            ),
+        ],
       ),
     );
   }
@@ -1611,6 +2030,17 @@ class _MessageBubble extends StatelessWidget {
                         ),
                 ),
               ),
+              if (message.receiptLabel != null) ...[
+                const SizedBox(height: 4),
+                Text(
+                  message.receiptLabel!,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.38),
+                    fontSize: 10,
+                    fontFamily: 'ABCDiatype',
+                  ),
+                ),
+              ],
               if (!isUser &&
                   canShowActions &&
                   message.result?.payload.canShowActions == true &&
@@ -2205,13 +2635,18 @@ class _ComposerOutlinePainter extends CustomPainter {
   }
 }
 
-enum _ChatRole { user, assistant }
+enum _ChatRole { user, vet, assistant }
 
 class _ChatMessage {
   _ChatMessage({
     required this.id,
     required this.role,
     required this.text,
+    this.senderId,
+    this.clientKey,
+    this.streamOrder,
+    this.deliveredByOther = false,
+    this.readByOther = false,
     this.result,
     this.rejoinSessionId,
     this.surveyAction,
@@ -2245,15 +2680,72 @@ class _ChatMessage {
     );
   }
 
+  factory _ChatMessage.consultFromJson(Map<String, dynamic> json) {
+    final roleRaw = json['role']?.toString().toLowerCase() ?? '';
+    final role = switch (roleRaw) {
+      'user' => _ChatRole.user,
+      'vet' => _ChatRole.vet,
+      _ => _ChatRole.assistant,
+    };
+    return _ChatMessage(
+      id: json['id']?.toString() ?? _nextChatMessageId(),
+      role: role,
+      text: json['content']?.toString() ?? '',
+      senderId: json['sender_id']?.toString(),
+      clientKey: json['client_key']?.toString(),
+      streamOrder: _asInt(json['stream_order']),
+      includeInHistory: false,
+    );
+  }
+
   final String id;
   final _ChatRole role;
   final String text;
+  final String? senderId;
+  final String? clientKey;
+  final int? streamOrder;
+  final bool deliveredByOther;
+  final bool readByOther;
   final _AiChatTurnResult? result;
   final String? rejoinSessionId;
   final _SurveyAction? surveyAction;
   final bool includeInHistory;
 
   bool get isUser => role == _ChatRole.user;
+
+  String? get receiptLabel {
+    if (!isUser || streamOrder == null) return null;
+    if (readByOther) return 'leído';
+    if (deliveredByOther) return 'entregado';
+    return null;
+  }
+
+  _ChatMessage copyWith({
+    bool? deliveredByOther,
+    bool? readByOther,
+  }) {
+    return _ChatMessage(
+      id: id,
+      role: role,
+      text: text,
+      senderId: senderId,
+      clientKey: clientKey,
+      streamOrder: streamOrder,
+      deliveredByOther: deliveredByOther ?? this.deliveredByOther,
+      readByOther: readByOther ?? this.readByOther,
+      result: result,
+      rejoinSessionId: rejoinSessionId,
+      surveyAction: surveyAction,
+      includeInHistory: includeInHistory,
+    );
+  }
+
+  _ChatMessage withReceiptFrom(_ChatMessage previous) {
+    return copyWith(
+      deliveredByOther: previous.deliveredByOther,
+      readByOther: previous.readByOther,
+    );
+  }
 }
 
 enum _SurveyStep { prompt, vetScore, appScore, feedback }
@@ -2956,6 +3448,12 @@ Map<String, dynamic>? _asMap(Object? value) {
 
 List<Object?>? _asList(Object? value) {
   return value is List ? value : null;
+}
+
+int? _asInt(Object? value) {
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  return int.tryParse(value?.toString() ?? '');
 }
 
 _ChatSubscriptionPlan? _findPlanByCode(

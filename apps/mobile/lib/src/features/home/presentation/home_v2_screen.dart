@@ -45,10 +45,14 @@ class HomeV2Screen extends StatefulWidget {
   State<HomeV2Screen> createState() => _HomeV2ScreenState();
 }
 
-class _HomeV2ScreenState extends State<HomeV2Screen> with RouteAware {
+class _HomeV2ScreenState extends State<HomeV2Screen>
+    with RouteAware, WidgetsBindingObserver {
   final _messageCtrl = TextEditingController();
   final _messageFocusNode = FocusNode();
   final _activeConsults = <_ActiveConsult>[];
+  RealtimeChannel? _homeSessionsChannel;
+  RealtimeChannel? _homeSurveysChannel;
+  Timer? _homeRefreshDebounce;
   _PendingSurvey? _pendingSurvey;
   String _firstName = '';
   _HomeAiPhase _aiPhase = _HomeAiPhase.home;
@@ -60,9 +64,11 @@ class _HomeV2ScreenState extends State<HomeV2Screen> with RouteAware {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadFirstName();
     unawaited(_loadActiveConsults());
     unawaited(_loadPendingSurveys());
+    _startHomeRealtime();
     WidgetsBinding.instance.addPostFrameCallback((_) => _playHomeFade());
   }
 
@@ -80,14 +86,84 @@ class _HomeV2ScreenState extends State<HomeV2Screen> with RouteAware {
   @override
   void didPopNext() {
     if (_aiPhase == _HomeAiPhase.home) _playHomeFade();
+    unawaited(_refreshHomeActivity());
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_refreshHomeActivity());
+    }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     mobileRouteObserver.unsubscribe(this);
+    _homeRefreshDebounce?.cancel();
+    final channel = _homeSessionsChannel;
+    if (channel != null) {
+      Supabase.instance.client.removeChannel(channel);
+    }
+    final surveysChannel = _homeSurveysChannel;
+    if (surveysChannel != null) {
+      Supabase.instance.client.removeChannel(surveysChannel);
+    }
     _messageCtrl.dispose();
     _messageFocusNode.dispose();
     super.dispose();
+  }
+
+  void _startHomeRealtime() {
+    final userId = Supabase.instance.client.auth.currentUser?.id;
+    if (userId == null || userId.isEmpty) return;
+
+    final channel = Supabase.instance.client.channel('owner-home:$userId');
+    channel
+        .onPostgresChanges(
+          event: PostgresChangeEvent.all,
+          schema: 'public',
+          table: 'chat_sessions',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'user_id',
+            value: userId,
+          ),
+          callback: (_) => _scheduleHomeRefresh(),
+        )
+        .subscribe();
+    _homeSessionsChannel = channel;
+
+    final surveysChannel =
+        Supabase.instance.client.channel('owner-home-surveys:$userId');
+    surveysChannel
+        .onPostgresChanges(
+          event: PostgresChangeEvent.all,
+          schema: 'public',
+          table: 'consult_surveys',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'user_id',
+            value: userId,
+          ),
+          callback: (_) => _scheduleHomeRefresh(),
+        )
+        .subscribe();
+    _homeSurveysChannel = surveysChannel;
+  }
+
+  void _scheduleHomeRefresh() {
+    _homeRefreshDebounce?.cancel();
+    _homeRefreshDebounce = Timer(const Duration(milliseconds: 350),
+        () => unawaited(_refreshHomeActivity()));
+  }
+
+  Future<void> _refreshHomeActivity() async {
+    if (!mounted) return;
+    await Future.wait([
+      _loadActiveConsults(),
+      _loadPendingSurveys(),
+    ]);
   }
 
   void _playHomeFade() {
