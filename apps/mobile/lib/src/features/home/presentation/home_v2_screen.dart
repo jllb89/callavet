@@ -9,9 +9,26 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../core/config/environment.dart';
 import '../../../core/router/route_observer.dart';
-import '../../chat/presentation/chat_screen.dart';
 
-enum _HomeAiPhase { home, fadingOut, prompt, conversation }
+enum _HomeAiPhase { home, fadingOut, prompt }
+
+const _composerPlaceholderText = 'escribir mensaje...';
+const _composerTextStyle = TextStyle(
+  color: Colors.white,
+  fontSize: 14,
+  fontFamily: 'ABCDiatype',
+  fontWeight: FontWeight.w400,
+  height: 1.25,
+  letterSpacing: 0,
+);
+const _composerPlaceholderStyle = TextStyle(
+  color: Color(0x52FFFFFF),
+  fontSize: 14,
+  fontFamily: 'ABCDiatype',
+  fontWeight: FontWeight.w400,
+  height: 1.25,
+  letterSpacing: 0,
+);
 
 void _homeAiLog(String message) {
   debugPrint('[AIChat][Home] $message');
@@ -34,10 +51,10 @@ class _HomeV2ScreenState extends State<HomeV2Screen> with RouteAware {
   final _activeConsults = <_ActiveConsult>[];
   _PendingSurvey? _pendingSurvey;
   String _firstName = '';
-  String? _conversationInitialMessage;
-  int _conversationKey = 0;
   _HomeAiPhase _aiPhase = _HomeAiPhase.home;
   bool _homeVisible = false;
+  bool _activeConsultsLoaded = false;
+  bool _pendingSurveyLoaded = false;
   PageRoute<dynamic>? _route;
 
   @override
@@ -84,7 +101,10 @@ class _HomeV2ScreenState extends State<HomeV2Screen> with RouteAware {
 
   Future<void> _loadActiveConsults() async {
     final token = Supabase.instance.client.auth.currentSession?.accessToken;
-    if (token == null || token.isEmpty) return;
+    if (token == null || token.isEmpty) {
+      if (mounted) setState(() => _activeConsultsLoaded = true);
+      return;
+    }
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
     try {
       final request = await client
@@ -110,17 +130,24 @@ class _HomeV2ScreenState extends State<HomeV2Screen> with RouteAware {
         _activeConsults
           ..clear()
           ..addAll(active);
+        _activeConsultsLoaded = true;
       });
     } catch (_) {
       // Home should keep rendering even if session activity cannot load.
     } finally {
       client.close(force: true);
+      if (mounted && !_activeConsultsLoaded) {
+        setState(() => _activeConsultsLoaded = true);
+      }
     }
   }
 
   Future<void> _loadPendingSurveys() async {
     final token = Supabase.instance.client.auth.currentSession?.accessToken;
-    if (token == null || token.isEmpty) return;
+    if (token == null || token.isEmpty) {
+      if (mounted) setState(() => _pendingSurveyLoaded = true);
+      return;
+    }
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
     try {
       final request = await client
@@ -146,11 +173,17 @@ class _HomeV2ScreenState extends State<HomeV2Screen> with RouteAware {
       }
       _surveyHomeLog('pending load found=${pending != null}');
       if (!mounted) return;
-      setState(() => _pendingSurvey = pending);
+      setState(() {
+        _pendingSurvey = pending;
+        _pendingSurveyLoaded = true;
+      });
     } catch (error) {
       _surveyHomeLog('pending load failed: $error');
     } finally {
       client.close(force: true);
+      if (mounted && !_pendingSurveyLoaded) {
+        setState(() => _pendingSurveyLoaded = true);
+      }
     }
   }
 
@@ -241,10 +274,7 @@ class _HomeV2ScreenState extends State<HomeV2Screen> with RouteAware {
   void _exitAiMode() {
     _homeAiLog('exitAiMode from phase=$_aiPhase');
     _messageFocusNode.unfocus();
-    setState(() {
-      _aiPhase = _HomeAiPhase.home;
-      _conversationInitialMessage = null;
-    });
+    setState(() => _aiPhase = _HomeAiPhase.home);
     _playHomeFade();
   }
 
@@ -271,24 +301,24 @@ class _HomeV2ScreenState extends State<HomeV2Screen> with RouteAware {
     if (text.isEmpty) return;
     _messageFocusNode.unfocus();
     _messageCtrl.clear();
-    setState(() {
-      _conversationInitialMessage = text;
-      _conversationKey += 1;
-      _aiPhase = _HomeAiPhase.conversation;
-    });
+    final query = Uri(queryParameters: {
+      'message': text,
+      'displayName': _displayName,
+    }).query;
     _homeAiLog(
-        'opened inline AI conversation key=$_conversationKey initialMessageLength=${text.length}');
+        'opening full AI chat route initialMessageLength=${text.length}');
+    context.go('/chat/ai?$query');
   }
+
+  String get _displayName => _firstName.isEmpty ? 'Jorge' : _firstName;
 
   @override
   Widget build(BuildContext context) {
-    final bottomInset = MediaQuery.of(context).padding.bottom;
-    final displayName = _firstName.isEmpty ? 'Jorge' : _firstName;
-    final hasActiveConsults = _activeConsults.isNotEmpty;
+    final displayName = _displayName;
+    final hasActiveConsults =
+        _activeConsultsLoaded && _activeConsults.isNotEmpty;
     final isPrompt = _aiPhase == _HomeAiPhase.prompt;
-    final isConversation = _aiPhase == _HomeAiPhase.conversation;
-    final isAiActive = isPrompt || isConversation;
-    final horizontalPadding = isConversation ? 18.0 : 32.0;
+    final isAiActive = isPrompt;
 
     return Scaffold(
       body: DecoratedBox(
@@ -300,122 +330,107 @@ class _HomeV2ScreenState extends State<HomeV2Screen> with RouteAware {
           ),
         ),
         child: SafeArea(
+          bottom: false,
           child: AnimatedOpacity(
             duration: const Duration(milliseconds: 320),
             curve: Curves.easeOutCubic,
             opacity: _homeVisible ? 1 : 0,
-            child: AnimatedSlide(
-              duration: const Duration(milliseconds: 320),
-              curve: Curves.easeOutCubic,
-              offset: _homeVisible ? Offset.zero : const Offset(0, 0.018),
-              child: Padding(
-                padding: EdgeInsets.fromLTRB(
-                    horizontalPadding, 24, horizontalPadding, 24 + bottomInset),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _HomeTopBar(
-                      phase: _aiPhase,
-                      onBack: _exitAiMode,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(18, 24, 18, 0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _HomeTopBar(
+                    phase: _aiPhase,
+                    onBack: _exitAiMode,
+                  ),
+                  AnimatedContainer(
+                    duration: const Duration(milliseconds: 560),
+                    curve: Curves.easeOutCubic,
+                    height: isAiActive ? 24 : 96,
+                  ),
+                  Text(
+                    '¡Hola, $displayName!',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontFamily: 'ABCDiatype',
+                      fontWeight: FontWeight.w400,
                     ),
-                    if (!isConversation) ...[
-                      AnimatedContainer(
-                        duration: const Duration(milliseconds: 560),
-                        curve: Curves.easeOutCubic,
-                        height: isAiActive ? 24 : 96,
+                  ),
+                  const SizedBox(height: 6),
+                  SizedBox(
+                    width: 332,
+                    child: Text(
+                      hasActiveConsults
+                          ? 'Esta es tu actividad:'
+                          : '¿Cómo podemos asistirte hoy?',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 28,
+                        fontFamily: 'ABCDiatype',
+                        fontWeight: FontWeight.w400,
+                        height: 1.10,
                       ),
-                      Text(
-                        '¡Hola, $displayName!',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 20,
-                          fontFamily: 'ABCDiatype',
-                          fontWeight: FontWeight.w400,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      SizedBox(
-                        width: 340,
-                        child: Text(
-                          hasActiveConsults
-                              ? 'Esta es tu actividad:'
-                              : '¿Cómo podemos asistirte hoy?',
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 36,
-                            fontFamily: 'ABCDiatype',
-                            fontWeight: FontWeight.w400,
-                            height: 1.02,
+                    ),
+                  ),
+                  const SizedBox(height: 30),
+                  Expanded(
+                    child: AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 320),
+                      switchInCurve: Curves.easeOutCubic,
+                      switchOutCurve: Curves.easeInCubic,
+                      transitionBuilder: (child, animation) {
+                        final offsetAnimation = Tween<Offset>(
+                          begin: const Offset(0, 0.025),
+                          end: Offset.zero,
+                        ).animate(animation);
+                        return FadeTransition(
+                          opacity: animation,
+                          child: SlideTransition(
+                            position: offsetAnimation,
+                            child: child,
                           ),
-                        ),
-                      ),
-                      const SizedBox(height: 34),
-                    ] else
-                      const SizedBox(height: 16),
-                    Expanded(
-                      child: AnimatedSwitcher(
-                        duration: const Duration(milliseconds: 320),
-                        switchInCurve: Curves.easeOutCubic,
-                        switchOutCurve: Curves.easeInCubic,
-                        transitionBuilder: (child, animation) {
-                          final offsetAnimation = Tween<Offset>(
-                            begin: const Offset(0, 0.025),
-                            end: Offset.zero,
-                          ).animate(animation);
-                          return FadeTransition(
-                            opacity: animation,
-                            child: SlideTransition(
-                              position: offsetAnimation,
-                              child: child,
+                        );
+                      },
+                      child: isPrompt
+                          ? _AiSuggestionList(
+                              key: const ValueKey('ai-prompt-suggestions'),
+                              onSelected: _useSuggestion,
+                            )
+                          : _HomeDefaultSection(
+                              key: const ValueKey('home-default-section'),
+                              visible: _aiPhase == _HomeAiPhase.home,
+                              pendingSurvey: _pendingSurvey,
+                              pendingSurveyLoaded: _pendingSurveyLoaded,
+                              activeConsults: _activeConsults,
+                              activeConsultsLoaded: _activeConsultsLoaded,
+                              onSurveyNow: (survey) =>
+                                  _answerPendingSurvey(survey, 'now'),
+                              onSurveyLater: (survey) =>
+                                  _answerPendingSurvey(survey, 'later'),
+                              onSurveyDismiss: (survey) =>
+                                  _answerPendingSurvey(survey, 'dismiss'),
+                              onConsultSelected: (consult) {
+                                if (consult.mode == 'video') {
+                                  context.go(
+                                      '/video/${Uri.encodeComponent(consult.id)}');
+                                } else {
+                                  context.go(
+                                      '/chat/${Uri.encodeComponent(consult.id)}');
+                                }
+                              },
                             ),
-                          );
-                        },
-                        child: isConversation
-                            ? ChatScreen(
-                                key: ValueKey('home-ai-$_conversationKey'),
-                                sessionId: 'ai',
-                                initialMessage: _conversationInitialMessage,
-                                embedded: true,
-                              )
-                            : isPrompt
-                                ? _AiSuggestionList(
-                                    key:
-                                        const ValueKey('ai-prompt-suggestions'),
-                                    onSelected: _useSuggestion,
-                                  )
-                                : _HomeDefaultSection(
-                                    key: const ValueKey('home-default-section'),
-                                    visible: _aiPhase == _HomeAiPhase.home,
-                                    pendingSurvey: _pendingSurvey,
-                                    activeConsults: _activeConsults,
-                                    onSurveyNow: (survey) =>
-                                        _answerPendingSurvey(survey, 'now'),
-                                    onSurveyLater: (survey) =>
-                                        _answerPendingSurvey(survey, 'later'),
-                                    onSurveyDismiss: (survey) =>
-                                        _answerPendingSurvey(survey, 'dismiss'),
-                                    onConsultSelected: (consult) {
-                                      if (consult.mode == 'video') {
-                                        context.go(
-                                            '/video/${Uri.encodeComponent(consult.id)}');
-                                      } else {
-                                        context.go(
-                                            '/chat/${Uri.encodeComponent(consult.id)}');
-                                      }
-                                    },
-                                  ),
-                      ),
                     ),
-                    if (!isConversation)
-                      _MessageComposer(
-                        controller: _messageCtrl,
-                        focusNode: _messageFocusNode,
-                        isPrompt: isPrompt,
-                        onTap: _enterAiMode,
-                        onSend: _openAiChat,
-                      ),
-                  ],
-                ),
+                  ),
+                  _MessageComposer(
+                    controller: _messageCtrl,
+                    focusNode: _messageFocusNode,
+                    isPrompt: isPrompt,
+                    onTap: _enterAiMode,
+                    onSend: _openAiChat,
+                  ),
+                ],
               ),
             ),
           ),
@@ -542,8 +557,7 @@ class _HomeTopBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final showHomeChrome = phase == _HomeAiPhase.home;
-    final showBack =
-        phase == _HomeAiPhase.prompt || phase == _HomeAiPhase.conversation;
+    final showBack = phase == _HomeAiPhase.prompt;
 
     return SizedBox(
       height: 42,
@@ -634,7 +648,9 @@ class _HomeDefaultSection extends StatelessWidget {
     super.key,
     required this.visible,
     required this.pendingSurvey,
+    required this.pendingSurveyLoaded,
     required this.activeConsults,
+    required this.activeConsultsLoaded,
     required this.onSurveyNow,
     required this.onSurveyLater,
     required this.onSurveyDismiss,
@@ -643,7 +659,9 @@ class _HomeDefaultSection extends StatelessWidget {
 
   final bool visible;
   final _PendingSurvey? pendingSurvey;
+  final bool pendingSurveyLoaded;
   final List<_ActiveConsult> activeConsults;
+  final bool activeConsultsLoaded;
   final ValueChanged<_PendingSurvey> onSurveyNow;
   final ValueChanged<_PendingSurvey> onSurveyLater;
   final ValueChanged<_PendingSurvey> onSurveyDismiss;
@@ -651,6 +669,10 @@ class _HomeDefaultSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final showPendingSurvey = pendingSurveyLoaded && pendingSurvey != null;
+    final showActiveConsults =
+        activeConsultsLoaded && activeConsults.isNotEmpty;
+
     return AnimatedOpacity(
       duration: const Duration(milliseconds: 220),
       curve: Curves.easeOut,
@@ -659,7 +681,7 @@ class _HomeDefaultSection extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const _AiShortcut(),
-          if (pendingSurvey != null) ...[
+          if (showPendingSurvey) ...[
             const SizedBox(height: 34),
             _PendingSurveyCard(
               survey: pendingSurvey!,
@@ -668,7 +690,7 @@ class _HomeDefaultSection extends StatelessWidget {
               onDismiss: () => onSurveyDismiss(pendingSurvey!),
             ),
           ],
-          if (activeConsults.isNotEmpty) ...[
+          if (showActiveConsults) ...[
             const SizedBox(height: 50),
             const Text(
               'consultas activas:',
@@ -1045,69 +1067,104 @@ class _MessageComposer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final bottomInset = MediaQuery.paddingOf(context).bottom;
     return GestureDetector(
       onTap: onTap,
-      child: FractionallySizedBox(
-        widthFactor: 1.06,
-        child: Container(
-          height: 40,
-          padding: const EdgeInsets.only(left: 20, right: 14),
-          decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.05),
-            borderRadius: BorderRadius.circular(40),
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: isPrompt
-                    ? TextField(
-                        controller: controller,
-                        focusNode: focusNode,
-                        cursorColor: Colors.white,
-                        minLines: 1,
-                        maxLines: 1,
-                        textInputAction: TextInputAction.send,
-                        onSubmitted: (_) => onSend(),
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 13,
-                          fontFamily: 'ABCDiatype',
-                          fontWeight: FontWeight.w500,
-                        ),
-                        decoration: InputDecoration(
-                          isCollapsed: true,
-                          border: InputBorder.none,
-                          hintText: 'escribir mensaje...',
-                          hintStyle: TextStyle(
-                            color: Colors.white.withValues(alpha: 0.30),
-                            fontSize: 13,
-                            fontFamily: 'ABCDiatype',
-                            fontWeight: FontWeight.w500,
+      child: Padding(
+        padding: EdgeInsets.only(top: 8, bottom: 14 + bottomInset),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 46, maxHeight: 46),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(28),
+              border: Border.all(color: Colors.white.withValues(alpha: 0.055)),
+            ),
+            child: Padding(
+              padding:
+                  const EdgeInsets.only(left: 18, right: 6, top: 3, bottom: 3),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Expanded(
+                    child: isPrompt
+                        ? Align(
+                            alignment: Alignment.centerLeft,
+                            child: ValueListenableBuilder<TextEditingValue>(
+                              valueListenable: controller,
+                              builder: (context, value, child) {
+                                return Stack(
+                                  alignment: Alignment.centerLeft,
+                                  children: [
+                                    if (value.text.isEmpty)
+                                      const IgnorePointer(
+                                        child: _ComposerPlaceholder(),
+                                      ),
+                                    TextField(
+                                      controller: controller,
+                                      focusNode: focusNode,
+                                      cursorColor: Colors.white,
+                                      cursorHeight: 16,
+                                      keyboardType: TextInputType.multiline,
+                                      textCapitalization:
+                                          TextCapitalization.sentences,
+                                      minLines: 1,
+                                      maxLines: 1,
+                                      textInputAction: TextInputAction.send,
+                                      textAlignVertical:
+                                          TextAlignVertical.center,
+                                      onSubmitted: (_) => onSend(),
+                                      style: _composerTextStyle,
+                                      decoration: const InputDecoration(
+                                        isCollapsed: true,
+                                        isDense: true,
+                                        contentPadding: EdgeInsets.zero,
+                                        border: InputBorder.none,
+                                      ),
+                                    ),
+                                  ],
+                                );
+                              },
+                            ),
+                          )
+                        : const Align(
+                            alignment: Alignment.centerLeft,
+                            child: _ComposerPlaceholder(),
                           ),
-                        ),
-                      )
-                    : Text(
-                        'escribir mensaje...',
-                        style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.30),
-                          fontSize: 13,
-                          fontFamily: 'ABCDiatype',
-                          fontWeight: FontWeight.w500,
-                        ),
+                  ),
+                  const SizedBox(width: 8),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 1),
+                    child: IconButton.filled(
+                      onPressed: isPrompt ? onSend : onTap,
+                      style: IconButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        foregroundColor: Colors.black,
+                        fixedSize: const Size(38, 38),
                       ),
+                      icon: const Icon(Icons.arrow_upward_rounded, size: 19),
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(width: 12),
-              GestureDetector(
-                onTap: isPrompt ? onSend : onTap,
-                child: SvgPicture.asset(
-                  'assets/icons/rightup.svg',
-                  width: 17,
-                  height: 17,
-                ),
-              ),
-            ],
+            ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _ComposerPlaceholder extends StatelessWidget {
+  const _ComposerPlaceholder();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Text(
+      _composerPlaceholderText,
+      style: _composerPlaceholderStyle,
+      textHeightBehavior: TextHeightBehavior(
+        applyHeightToFirstAscent: false,
+        applyHeightToLastDescent: false,
       ),
     );
   }

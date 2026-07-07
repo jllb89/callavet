@@ -751,6 +751,10 @@ class _ActivitySections extends StatelessWidget {
         final upcomingAppointments =
             queue?.upcomingAppointments ?? const <_UpcomingAppointment>[];
         final isLoading = snapshot.connectionState == ConnectionState.waiting;
+        if (isLoading && snapshot.data == null) {
+          return const SizedBox.shrink();
+        }
+
         final hasJoinableVideo =
             activeConsults.any((consult) => consult.canJoinVideo);
         if (!isLoading &&

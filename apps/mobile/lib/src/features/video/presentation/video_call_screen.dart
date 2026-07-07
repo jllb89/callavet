@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:livekit_client/livekit_client.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -13,6 +14,14 @@ import '../../../core/config/environment.dart';
 void _ownerVideoLog(String message) {
   debugPrint('[VideoRoadmap][Owner] $message');
 }
+
+const _videoOverlayStyle = SystemUiOverlayStyle(
+  statusBarColor: Colors.transparent,
+  statusBarIconBrightness: Brightness.light,
+  statusBarBrightness: Brightness.dark,
+  systemNavigationBarColor: Colors.black,
+  systemNavigationBarIconBrightness: Brightness.light,
+);
 
 class VideoCallScreen extends StatefulWidget {
   const VideoCallScreen({super.key, required this.sessionId});
@@ -70,7 +79,8 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
         throw const _VideoCallException(
             'No pude obtener credenciales de video.');
       }
-      _ownerVideoLog('connect.credentials sessionId=${widget.sessionId} roomName=$roomName');
+      _ownerVideoLog(
+          'connect.credentials sessionId=${widget.sessionId} roomName=$roomName');
 
       final room = Room(
         roomOptions: const RoomOptions(adaptiveStream: true, dynacast: true),
@@ -81,7 +91,8 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
         ..on<LocalTrackUnpublishedEvent>((_) => _handleRoomUpdate())
         ..on<TrackSubscribedEvent>((_) => _handleRoomUpdate())
         ..on<TrackUnsubscribedEvent>((_) => _handleRoomUpdate())
-        ..on<RoomDisconnectedEvent>((_) => unawaited(_handleRoomDisconnected()));
+        ..on<RoomDisconnectedEvent>(
+            (_) => unawaited(_handleRoomDisconnected()));
       room.addListener(_handleRoomUpdate);
 
       if (!mounted) {
@@ -99,7 +110,8 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
       await room.connect(url, token);
       final mediaWarning = await _publishInitialTracks(room);
       if (!mounted) return;
-      _ownerVideoLog('connect.succeeded sessionId=${widget.sessionId} roomName=$roomName mediaWarning=${mediaWarning != null}');
+      _ownerVideoLog(
+          'connect.succeeded sessionId=${widget.sessionId} roomName=$roomName mediaWarning=${mediaWarning != null}');
       setState(() {
         _connecting = false;
         _error = mediaWarning;
@@ -108,7 +120,8 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
       });
     } catch (error) {
       if (!mounted) return;
-      _ownerVideoLog('connect.failed sessionId=${widget.sessionId} error=$error');
+      _ownerVideoLog(
+          'connect.failed sessionId=${widget.sessionId} error=$error');
       setState(() {
         _connecting = false;
         _error = error.toString();
@@ -131,7 +144,8 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
       await room.localParticipant?.setCameraEnabled(true);
     } catch (error) {
       debugPrint('[VideoCall] Camera publish failed: $error');
-      warnings.add('No pude activar la camara. Puedes continuar con audio o intentar activarla de nuevo.');
+      warnings.add(
+          'No pude activar la camara. Puedes continuar con audio o intentar activarla de nuevo.');
     }
     return warnings.isEmpty ? null : warnings.join(' ');
   }
@@ -150,7 +164,8 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
   Future<void> _handleRoomDisconnected() async {
     _handleRoomUpdate();
     if (!mounted || _ending) return;
-    _ownerVideoLog('disconnect.remote sessionId=${widget.sessionId} roomName=$_roomName');
+    _ownerVideoLog(
+        'disconnect.remote sessionId=${widget.sessionId} roomName=$_roomName');
     setState(() {
       _connecting = false;
       _room = null;
@@ -163,10 +178,12 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
         : await _generatePostCallMessage(endState).catchError((_) => null);
     if (!mounted || _ending) return;
     _ownerVideoLog(
-      'disconnect.resolved sessionId=${widget.sessionId} endReason=${endState?.endReason} endedBy=${endState?.endedByRole} rejoin=${endState?.rejoinEligible} postCallMessage=${postCallMessage?.trim().isNotEmpty == true}');
+        'disconnect.resolved sessionId=${widget.sessionId} endReason=${endState?.endReason} endedBy=${endState?.endedByRole} rejoin=${endState?.rejoinEligible} postCallMessage=${postCallMessage?.trim().isNotEmpty == true}');
     if (endState != null && endState.shouldReturnToChat) {
-      _ownerVideoLog('disconnect.open_chat sessionId=${widget.sessionId} endReason=${endState.endReason}');
-      _openPostCallChat(postCallMessage, rejoinEligible: endState.rejoinEligible);
+      _ownerVideoLog(
+          'disconnect.open_chat sessionId=${widget.sessionId} endReason=${endState.endReason}');
+      _openPostCallChat(postCallMessage,
+          rejoinEligible: endState.rejoinEligible);
       return;
     }
     setState(() {
@@ -182,7 +199,8 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
 
   Future<void> _toggleMicrophone() async {
     if (await _isIosSimulator()) {
-      setState(() => _error = 'El microfono no esta disponible en el simulador iOS. Prueba audio en un dispositivo real.');
+      setState(() => _error =
+          'El microfono no esta disponible en el simulador iOS. Prueba audio en un dispositivo real.');
       return;
     }
     final participant = _room?.localParticipant;
@@ -202,7 +220,8 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
 
   Future<void> _toggleCamera() async {
     if (await _isIosSimulator()) {
-      setState(() => _error = 'La camara no esta disponible en el simulador iOS. Prueba video en un dispositivo real.');
+      setState(() => _error =
+          'La camara no esta disponible en el simulador iOS. Prueba video en un dispositivo real.');
       return;
     }
     final participant = _room?.localParticipant;
@@ -222,7 +241,8 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
 
   Future<void> _switchCamera() async {
     if (await _isIosSimulator()) {
-      setState(() => _error = 'El cambio de camara no esta disponible en el simulador iOS.');
+      setState(() => _error =
+          'El cambio de camara no esta disponible en el simulador iOS.');
       return;
     }
     final participant = _room?.localParticipant;
@@ -252,7 +272,8 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
 
   Future<void> _leaveCall() async {
     if (_ending) return;
-    _ownerVideoLog('leave.requested sessionId=${widget.sessionId} roomName=$_roomName');
+    _ownerVideoLog(
+        'leave.requested sessionId=${widget.sessionId} roomName=$_roomName');
     setState(() {
       _ending = true;
       _returningToChat = true;
@@ -265,15 +286,19 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
         final response = await _endRoom(roomName);
         final stateData = _asMap(response['endState']);
         if (stateData != null) endState = _VideoEndState.fromJson(stateData);
-        _ownerVideoLog('leave.end_room_response sessionId=${widget.sessionId} endReason=${endState?.endReason} rejoin=${endState?.rejoinEligible}');
+        _ownerVideoLog(
+            'leave.end_room_response sessionId=${widget.sessionId} endReason=${endState?.endReason} rejoin=${endState?.rejoinEligible}');
       }
     } catch (error) {
-      _ownerVideoLog('leave.end_room_failed sessionId=${widget.sessionId} error=$error');
+      _ownerVideoLog(
+          'leave.end_room_failed sessionId=${widget.sessionId} error=$error');
       debugPrint('[VideoCall] Room end failed: $error');
     }
     if (endState != null) {
-      postCallMessage = await _generatePostCallMessage(endState).catchError((_) => null);
-      _ownerVideoLog('leave.post_call_message sessionId=${widget.sessionId} generated=${postCallMessage?.trim().isNotEmpty == true}');
+      postCallMessage =
+          await _generatePostCallMessage(endState).catchError((_) => null);
+      _ownerVideoLog(
+          'leave.post_call_message sessionId=${widget.sessionId} generated=${postCallMessage?.trim().isNotEmpty == true}');
     }
     try {
       await _room?.disconnect();
@@ -281,8 +306,10 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
       debugPrint('[VideoCall] Disconnect failed: $error');
     }
     if (!mounted) return;
-    _ownerVideoLog('leave.open_chat sessionId=${widget.sessionId} hasAssistantMessage=${postCallMessage?.trim().isNotEmpty == true}');
-    _openPostCallChat(postCallMessage, rejoinEligible: endState?.rejoinEligible == true);
+    _ownerVideoLog(
+        'leave.open_chat sessionId=${widget.sessionId} hasAssistantMessage=${postCallMessage?.trim().isNotEmpty == true}');
+    _openPostCallChat(postCallMessage,
+        rejoinEligible: endState?.rejoinEligible == true);
   }
 
   void _rejoinCall() {
@@ -300,15 +327,18 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
     unawaited(_connect());
   }
 
-  void _openPostCallChat(String? assistantMessage, {bool rejoinEligible = false}) {
+  void _openPostCallChat(String? assistantMessage,
+      {bool rejoinEligible = false}) {
     final message = assistantMessage?.trim();
-    _ownerVideoLog('post_call.open_chat sessionId=${widget.sessionId} hasAssistantMessage=${message?.isNotEmpty == true} rejoinEligible=$rejoinEligible');
+    _ownerVideoLog(
+        'post_call.open_chat sessionId=${widget.sessionId} hasAssistantMessage=${message?.isNotEmpty == true} rejoinEligible=$rejoinEligible');
     final params = <String, String>{
       if (message != null && message.isNotEmpty) 'assistantMessage': message,
       if (rejoinEligible) 'rejoinVideo': 'true',
       'survey': 'true',
     };
-    final query = params.isEmpty ? '' : '?${Uri(queryParameters: params).query}';
+    final query =
+        params.isEmpty ? '' : '?${Uri(queryParameters: params).query}';
     context.go('/chat/${Uri.encodeComponent(widget.sessionId)}$query');
   }
 
@@ -319,7 +349,8 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
   }
 
   Future<Map<String, dynamic>> _endRoom(String roomName) async {
-    return _postGatewayJson('/video/rooms/${Uri.encodeComponent(roomName)}/end', {
+    return _postGatewayJson(
+        '/video/rooms/${Uri.encodeComponent(roomName)}/end', {
       'participantRole': 'owner',
       'reason': 'owner_ended',
     });
@@ -331,19 +362,22 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
       '/video/sessions/${Uri.encodeComponent(widget.sessionId)}/end-state',
     );
     final endState = _VideoEndState.fromJson(data);
-    _ownerVideoLog('end_state.result sessionId=${widget.sessionId} endReason=${endState.endReason} endedBy=${endState.endedByRole} rejoin=${endState.rejoinEligible}');
+    _ownerVideoLog(
+        'end_state.result sessionId=${widget.sessionId} endReason=${endState.endReason} endedBy=${endState.endedByRole} rejoin=${endState.rejoinEligible}');
     return endState;
   }
 
   Future<String?> _generatePostCallMessage(_VideoEndState endState) async {
-    _ownerVideoLog('post_call.generate.request sessionId=${widget.sessionId} endReason=${endState.endReason} rejoin=${endState.rejoinEligible}');
+    _ownerVideoLog(
+        'post_call.generate.request sessionId=${widget.sessionId} endReason=${endState.endReason} rejoin=${endState.rejoinEligible}');
     final data = await _postGatewayJson(
       '/video/sessions/${Uri.encodeComponent(widget.sessionId)}/post-call-message',
       {'endState': endState.toJson()},
     );
     final payload = _asMap(data['payload']);
     final message = payload?['message']?.toString().trim();
-    _ownerVideoLog('post_call.generate.result sessionId=${widget.sessionId} hasMessage=${message?.isNotEmpty == true} suggestedAction=${payload?['suggestedAction']}');
+    _ownerVideoLog(
+        'post_call.generate.result sessionId=${widget.sessionId} hasMessage=${message?.isNotEmpty == true} suggestedAction=${payload?['suggestedAction']}');
     return message == null || message.isEmpty ? null : message;
   }
 
@@ -410,49 +444,55 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
   Widget build(BuildContext context) {
     final room = _room;
     final endState = _endState;
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: DecoratedBox(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment(0.50, -0.00),
-            end: Alignment(0.50, 1.00),
-            colors: [Color(0xFF141417), Color(0xFF070707)],
+    final content = _returningToChat
+        ? const _ReturningToChatView()
+        : SafeArea(
+            child: _error != null && room == null
+                ? _VideoStatusView(
+                    icon: Icons.videocam_off_rounded,
+                    title:
+                        endState?.title ?? 'No pude conectar la videollamada',
+                    message: _error!,
+                    actionLabel: endState?.actionLabel ?? 'volver',
+                    onAction: endState?.rejoinEligible == true
+                        ? _rejoinCall
+                        : () => endState == null
+                            ? context.go('/home')
+                            : _openPostCallChat(_postCallAssistantMessage),
+                  )
+                : room == null || _connecting
+                    ? const _VideoStatusView(
+                        icon: Icons.videocam_rounded,
+                        title: 'Conectando videollamada',
+                        message: 'Preparando camara y microfono.',
+                      )
+                    : _ConnectedVideoCall(
+                        room: room,
+                        roomName: _roomName,
+                        micEnabled: _micEnabled,
+                        cameraEnabled: _cameraEnabled,
+                        ending: _ending,
+                        error: _error,
+                        onToggleMic: _toggleMicrophone,
+                        onToggleCamera: _toggleCamera,
+                        onSwitchCamera: _switchCamera,
+                        onLeave: _leaveCall,
+                      ),
+          );
+
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: _videoOverlayStyle,
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        body: DecoratedBox(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment(0.50, -0.00),
+              end: Alignment(0.50, 1.00),
+              colors: [Color(0xFF141417), Color(0xFF070707)],
+            ),
           ),
-        ),
-        child: SafeArea(
-          child: _returningToChat
-              ? const _ReturningToChatView()
-              : _error != null && room == null
-              ? _VideoStatusView(
-                  icon: Icons.videocam_off_rounded,
-                title: endState?.title ?? 'No pude conectar la videollamada',
-                  message: _error!,
-                actionLabel: endState?.actionLabel ?? 'volver',
-                onAction: endState?.rejoinEligible == true
-                  ? _rejoinCall
-                  : () => endState == null
-                    ? context.go('/home')
-                    : _openPostCallChat(_postCallAssistantMessage),
-                )
-              : room == null || _connecting
-                  ? const _VideoStatusView(
-                      icon: Icons.videocam_rounded,
-                      title: 'Conectando videollamada',
-                      message: 'Preparando camara y microfono.',
-                    )
-                  : _ConnectedVideoCall(
-                      room: room,
-                      roomName: _roomName,
-                      micEnabled: _micEnabled,
-                      cameraEnabled: _cameraEnabled,
-                      ending: _ending,
-                      error: _error,
-                      onToggleMic: _toggleMicrophone,
-                      onToggleCamera: _toggleCamera,
-                      onSwitchCamera: _switchCamera,
-                      onLeave: _leaveCall,
-                    ),
+          child: content,
         ),
       ),
     );
@@ -467,26 +507,6 @@ class _ReturningToChatView extends StatelessWidget {
     return Stack(
       fit: StackFit.expand,
       children: [
-        const DecoratedBox(
-          decoration: BoxDecoration(
-            image: DecorationImage(
-              image: AssetImage('assets/images/onboarding/rectangle_1.png'),
-              fit: BoxFit.cover,
-            ),
-          ),
-        ),
-        DecoratedBox(
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-              colors: [
-                Colors.black.withValues(alpha: 0.18),
-                Colors.black.withValues(alpha: 0.62),
-              ],
-            ),
-          ),
-        ),
         Center(
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -575,7 +595,8 @@ class _VideoEndState {
     return 'Puedes continuar el seguimiento desde el chat de la consulta.';
   }
 
-  String get actionLabel => rejoinEligible ? 'volver a entrar' : 'volver al chat';
+  String get actionLabel =>
+      rejoinEligible ? 'volver a entrar' : 'volver al chat';
 
   bool get shouldReturnToChat {
     return endedByRole == 'vet' ||

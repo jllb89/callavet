@@ -92,14 +92,18 @@ class AppRouter {
       GoRoute(
         path: '/home',
         name: 'home',
-        builder: (context, state) => const HomeV2Screen(),
+        pageBuilder: (context, state) => _noTransitionPage(
+          state,
+          const HomeV2Screen(),
+        ),
       ),
       GoRoute(
         path: '/chat/:sessionId',
         name: 'chat',
-        builder: (context, state) {
+        pageBuilder: (context, state) {
           final sessionId = state.pathParameters['sessionId'] ?? '';
           final initialMessage = state.uri.queryParameters['message'];
+          final displayName = state.uri.queryParameters['displayName'];
           final assistantMessage =
               state.uri.queryParameters['assistantMessage'];
           final rejoinVideo =
@@ -109,15 +113,20 @@ class AppRouter {
             'Router entered /chat/:sessionId uri=${state.uri} sessionId=$sessionId '
             'initialMessagePresent=${initialMessage?.trim().isNotEmpty == true} '
             'initialMessageLength=${initialMessage?.trim().length ?? 0} '
+            'displayNamePresent=${displayName?.trim().isNotEmpty == true} '
             'assistantMessagePresent=${assistantMessage?.trim().isNotEmpty == true} '
             'rejoinVideo=$rejoinVideo survey=$startSurvey',
           );
-          return ChatScreen(
-            sessionId: sessionId,
-            initialMessage: initialMessage,
-            initialAssistantMessage: assistantMessage,
-            initialRejoinVideo: rejoinVideo,
-            initialSurvey: startSurvey,
+          return _noTransitionPage(
+            state,
+            ChatScreen(
+              sessionId: sessionId,
+              initialMessage: initialMessage,
+              homeDisplayName: displayName,
+              initialAssistantMessage: assistantMessage,
+              initialRejoinVideo: rejoinVideo,
+              initialSurvey: startSurvey,
+            ),
           );
         },
       ),
@@ -145,5 +154,16 @@ class AppRouter {
         child: Text('Not found: ${state.error?.toString() ?? 'unknown route'}'),
       ),
     ),
+  );
+}
+
+Page<void> _noTransitionPage(GoRouterState state, Widget child) {
+  return CustomTransitionPage<void>(
+    key: state.pageKey,
+    transitionDuration: Duration.zero,
+    reverseTransitionDuration: Duration.zero,
+    transitionsBuilder: (context, animation, secondaryAnimation, child) =>
+        child,
+    child: child,
   );
 }

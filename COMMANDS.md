@@ -14,7 +14,7 @@ cd /Users/jorge/Desktop/call-a-vet/apps/mobile && flutter run \
   --dart-define=KYC_LOCATION_DEBUG=false \
   --dart-define=KYC_FLOW_DEBUG=true \
   --dart-define=CAV_AI_CHAT_DRY_RUN=false \
-  -d "vet"
+  -d ADA34BCC-99C2-407C-B4E7-43986D0F9634
 
 ## Production-like local run (quiet logs)
 cd /Users/jorge/Desktop/call-a-vet/apps/mobile && flutter run \
@@ -25,7 +25,7 @@ cd /Users/jorge/Desktop/call-a-vet/apps/mobile && flutter run \
   --dart-define=BYPASS_OTP=false \
   --dart-define=KYC_LOCATION_DEBUG=false \
   --dart-define=KYC_FLOW_DEBUG=false \
-  -d "vet"
+  -d ADA34BCC-99C2-407C-B4E7-43986D0F9634
 
 # Toggle OTP bypass:
 #   --dart-define=BYPASS_OTP=true   -> skips OTP step (dev/testing)
@@ -146,8 +146,8 @@ cd /Users/jorge/Desktop/call-a-vet/apps/vet && flutter run \
   -d "vet"
 
 
-  Run owner app on simulator A (terminal 1)
-cd /Users/jorge/Desktop/call-a-vet/apps/mobile && flutter run -d 014D86FE-511C-490C-BD95-893A67FF2774 --dart-define=SUPABASE_URL=https://oajnhvizipicnypdxcrb.supabase.co --dart-define=SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9ham5odml6aXBpY255cGR4Y3JiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjE2MDc5MzcsImV4cCI6MjA3NzE4MzkzN30.aSAu4SZVrZjxIyik50rraOmm7Ni2Wk7tFdLXDE_Jelc --dart-define=API_BASE_URL=https://cav-gateway-staging-ugvx.onrender.com --dart-define=DEV_FORCE_SIGNOUT_ON_START=true --dart-define=BYPASS_OTP=false --dart-define=KYC_LOCATION_DEBUG=false --dart-define=KYC_FLOW_DEBUG=true --dart-define=CAV_AI_CHAT_DRY_RUN=false
+  Run owner app on simulator A (terminal 1, iPhone 17 Pro Max)
+cd /Users/jorge/Desktop/call-a-vet/apps/mobile && flutter run -d ADA34BCC-99C2-407C-B4E7-43986D0F9634 --dart-define=SUPABASE_URL=https://oajnhvizipicnypdxcrb.supabase.co --dart-define=SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9ham5odml6aXBpY255cGR4Y3JiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjE2MDc5MzcsImV4cCI6MjA3NzE4MzkzN30.aSAu4SZVrZjxIyik50rraOmm7Ni2Wk7tFdLXDE_Jelc --dart-define=API_BASE_URL=https://cav-gateway-staging-ugvx.onrender.com --dart-define=DEV_FORCE_SIGNOUT_ON_START=true --dart-define=BYPASS_OTP=false --dart-define=KYC_LOCATION_DEBUG=false --dart-define=KYC_FLOW_DEBUG=true --dart-define=CAV_AI_CHAT_DRY_RUN=false
 
 Run vet app on simulator B (terminal 2)
 cd /Users/jorge/Desktop/call-a-vet/apps/vet && flutter run -d D344C088-92BE-4393-B3A5-3E786FD17498 --dart-define=SUPABASE_URL=https://oajnhvizipicnypdxcrb.supabase.co --dart-define=SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9ham5odml6aXBpY255cGR4Y3JiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjE2MDc5MzcsImV4cCI6MjA3NzE4MzkzN30.aSAu4SZVrZjxIyik50rraOmm7Ni2Wk7tFdLXDE_Jelc --dart-define=API_BASE_URL=https://cav-gateway-staging-ugvx.onrender.com --dart-define=DEV_FORCE_SIGNOUT_ON_START=true --dart-define=BYPASS_OTP=false --dart-define=VET_AUTH_DEBUG=true

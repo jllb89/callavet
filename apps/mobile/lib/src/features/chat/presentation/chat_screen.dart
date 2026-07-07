@@ -48,18 +48,18 @@ class ChatScreen extends StatefulWidget {
     super.key,
     required this.sessionId,
     this.initialMessage,
+    this.homeDisplayName,
     this.initialAssistantMessage,
     this.initialRejoinVideo = false,
     this.initialSurvey = false,
-    this.embedded = false,
   });
 
   final String sessionId;
   final String? initialMessage;
+  final String? homeDisplayName;
   final String? initialAssistantMessage;
   final bool initialRejoinVideo;
   final bool initialSurvey;
-  final bool embedded;
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -72,9 +72,14 @@ class _ChatScreenState extends State<ChatScreen> {
   final _messages = <_ChatMessage>[];
 
   late final String _conversationId;
+  Timer? _surveyReturnHomeTimer;
   bool _isSending = false;
+  bool _isReturningHome = false;
   bool _surveyLoading = false;
   _ActiveSurveyFeedback? _activeSurveyFeedback;
+
+  static const _surveyReturnHomeDelay = Duration(seconds: 5);
+  static const _returnHomeFadeDuration = Duration(milliseconds: 260);
 
   static final _uuidPattern = RegExp(
     r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
@@ -88,20 +93,21 @@ class _ChatScreenState extends State<ChatScreen> {
       'init sessionId=${widget.sessionId} sessionIdLooksUuid=${_uuidOrNull(widget.sessionId) != null} '
       'conversationId=$_conversationId initialMessagePresent=${widget.initialMessage?.trim().isNotEmpty == true} '
       'initialMessageLength=${widget.initialMessage?.trim().length ?? 0} '
+      'homeDisplayNamePresent=${widget.homeDisplayName?.trim().isNotEmpty == true} '
       'initialAssistantMessagePresent=${widget.initialAssistantMessage?.trim().isNotEmpty == true} '
       'initialRejoinVideo=${widget.initialRejoinVideo} '
       'initialSurvey=${widget.initialSurvey} '
       'apiBaseUrl=${Environment.apiBaseUrl} dryRun=$_aiChatDryRun',
     );
     final initialMessage = widget.initialMessage?.trim();
-    final hasInitialMessage = initialMessage != null && initialMessage.isNotEmpty;
+    final hasInitialMessage =
+        initialMessage != null && initialMessage.isNotEmpty;
     final initialAssistantMessage = widget.initialAssistantMessage?.trim();
     final hasInitialAssistantMessage =
         initialAssistantMessage != null && initialAssistantMessage.isNotEmpty;
     final cachedSessionId = _uuidOrNull(widget.sessionId);
-    final cachedMessages = cachedSessionId == null
-        ? null
-        : _sessionMessageCache[cachedSessionId];
+    final cachedMessages =
+        cachedSessionId == null ? null : _sessionMessageCache[cachedSessionId];
     if (cachedMessages != null && cachedMessages.isNotEmpty) {
       _messages.addAll(cachedMessages);
       _aiChatLog(
@@ -140,8 +146,37 @@ class _ChatScreenState extends State<ChatScreen> {
     _inputCtrl.dispose();
     _focusNode.dispose();
     _scrollController.dispose();
+    _surveyReturnHomeTimer?.cancel();
     super.dispose();
   }
+
+  void _scheduleSurveyReturnHome() {
+    _surveyReturnHomeTimer?.cancel();
+    _surveyChatLog(
+        'return home scheduled after ${_surveyReturnHomeDelay.inSeconds}s');
+    _surveyReturnHomeTimer = Timer(_surveyReturnHomeDelay, () {
+      if (!mounted) return;
+      _surveyChatLog('returning home after survey completion or skip');
+      unawaited(_returnHome());
+    });
+  }
+
+  Future<void> _returnHome() async {
+    if (_isReturningHome) return;
+    _surveyReturnHomeTimer?.cancel();
+    _focusNode.unfocus();
+    setState(() => _isReturningHome = true);
+    await Future<void>.delayed(_returnHomeFadeDuration);
+    if (!mounted) return;
+    context.go('/home');
+  }
+
+  String get _homeDisplayName {
+    final trimmed = widget.homeDisplayName?.trim();
+    return trimmed == null || trimmed.isEmpty ? 'Jorge' : trimmed;
+  }
+
+  bool get _showsHomeIntro => widget.sessionId == 'ai';
 
   void _sendComposerMessage() {
     final text = _inputCtrl.text.trim();
@@ -173,12 +208,17 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     setState(() => _surveyLoading = true);
     try {
-      final response = await _getGatewayJson('/sessions/${Uri.encodeComponent(sessionId)}/survey');
+      final response = await _getGatewayJson(
+          '/sessions/${Uri.encodeComponent(sessionId)}/survey');
       final surveyResponse = _SurveyResponse.fromJson(response);
       _surveyChatLog(
         'get response eligible=${surveyResponse.eligible} status=${surveyResponse.survey?.status} reason=${surveyResponse.reason}',
       );
-      if (!mounted || !surveyResponse.eligible || surveyResponse.survey == null) return;
+      if (!mounted ||
+          !surveyResponse.eligible ||
+          surveyResponse.survey == null) {
+        return;
+      }
       _continueSurvey(surveyResponse.survey!);
     } catch (error) {
       _surveyChatLog('get failed: ${error.runtimeType} $error');
@@ -193,7 +233,8 @@ class _ChatScreenState extends State<ChatScreen> {
     final hasPrompt = _messages.any((message) =>
         message.surveyAction?.surveyId == survey.id &&
         message.surveyAction?.step == _SurveyStep.prompt);
-    if ((survey.status == 'pending' || survey.status == 'deferred') && !hasPrompt) {
+    if ((survey.status == 'pending' || survey.status == 'deferred') &&
+        !hasPrompt) {
       setState(() {
         _messages.add(_ChatMessage.assistant(
           '¿Quieres calificar esta consulta ahora?',
@@ -263,11 +304,13 @@ class _ChatScreenState extends State<ChatScreen> {
             includeInHistory: false,
           ));
         });
+        _scheduleSurveyReturnHome();
       }
     } catch (error) {
       _surveyChatLog('prompt answer failed: ${error.runtimeType} $error');
       if (!mounted) return;
-      setState(() => _messages.add(_ChatMessage.assistant(_friendlyError(error), includeInHistory: false)));
+      setState(() => _messages.add(_ChatMessage.assistant(_friendlyError(error),
+          includeInHistory: false)));
     } finally {
       if (mounted) {
         setState(() => _isSending = false);
@@ -307,7 +350,8 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (error) {
       _surveyChatLog('score save failed: ${error.runtimeType} $error');
       if (!mounted) return;
-      setState(() => _messages.add(_ChatMessage.assistant(_friendlyError(error), includeInHistory: false)));
+      setState(() => _messages.add(_ChatMessage.assistant(_friendlyError(error),
+          includeInHistory: false)));
     } finally {
       if (mounted) {
         setState(() => _isSending = false);
@@ -370,7 +414,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _ActiveSurveyFeedback active, String? feedback) async {
     final trimmed = feedback?.trim();
     _surveyChatLog(
-      'feedback submit surveyId=${active.survey.id} hasFeedback=${trimmed?.isNotEmpty == true}');
+        'feedback submit surveyId=${active.survey.id} hasFeedback=${trimmed?.isNotEmpty == true}');
     setState(() {
       if (trimmed != null && trimmed.isNotEmpty) {
         _messages.add(_ChatMessage.user(trimmed, includeInHistory: false));
@@ -393,10 +437,12 @@ class _ChatScreenState extends State<ChatScreen> {
           includeInHistory: false,
         ));
       });
+      _scheduleSurveyReturnHome();
     } catch (error) {
       _surveyChatLog('feedback submit failed: ${error.runtimeType} $error');
       if (!mounted) return;
-      setState(() => _messages.add(_ChatMessage.assistant(_friendlyError(error), includeInHistory: false)));
+      setState(() => _messages.add(_ChatMessage.assistant(_friendlyError(error),
+          includeInHistory: false)));
     } finally {
       if (mounted) {
         setState(() => _isSending = false);
@@ -1219,46 +1265,55 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     final thread = _buildThread(context);
-    if (widget.embedded) return thread;
 
     return Scaffold(
       resizeToAvoidBottomInset: true,
       body: DecoratedBox(
         decoration: const BoxDecoration(
           gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Color(0xFF161616), Color(0xFF050505)],
+            begin: Alignment(0.50, -0.00),
+            end: Alignment(0.50, 1.00),
+            colors: [Color(0xFF141417), Color(0xFF070707)],
           ),
         ),
-        child: thread,
+        child: IgnorePointer(
+          ignoring: _isReturningHome,
+          child: AnimatedOpacity(
+            duration: _returnHomeFadeDuration,
+            curve: Curves.easeOutCubic,
+            opacity: _isReturningHome ? 0 : 1,
+            child: thread,
+          ),
+        ),
       ),
     );
   }
 
   Widget _buildThread(BuildContext context) {
     final topInset = MediaQuery.paddingOf(context).top;
-    final bottomInset =
-        widget.embedded ? 0.0 : MediaQuery.paddingOf(context).bottom;
-    final showEmbeddedIntro = widget.embedded &&
-        widget.initialMessage?.trim().isNotEmpty != true &&
-        widget.initialAssistantMessage?.trim().isNotEmpty != true;
+    final bottomInset = MediaQuery.paddingOf(context).bottom;
+    final topChromeHeight = topInset + 90;
+    final topFadeHeight = topInset + 132;
+    final bottomFadeHeight = bottomInset + 150;
+    final showHomeIntro = _showsHomeIntro;
     final messageList = ListView.builder(
       controller: _scrollController,
       padding: EdgeInsets.fromLTRB(
-        widget.embedded ? 0 : 22,
-        widget.embedded ? 10 : topInset + 78,
-        widget.embedded ? 0 : 22,
-        widget.embedded ? 20 : bottomInset + 102,
+        18,
+        topChromeHeight,
+        18,
+        bottomInset + 102,
       ),
-      itemCount: (showEmbeddedIntro ? 1 : 0) + _messages.length,
+      itemCount: (showHomeIntro ? 1 : 0) + _messages.length,
       itemBuilder: (context, index) {
-        final introCount = showEmbeddedIntro ? 1 : 0;
-        if (showEmbeddedIntro && index == 0) {
-          return const _EmbeddedChatIntro();
+        final introCount = showHomeIntro ? 1 : 0;
+        if (showHomeIntro && index == 0) {
+          return _HomeChatIntro(displayName: _homeDisplayName);
         }
         final messageIndex = index - introCount;
         final message = _messages[messageIndex];
+        final isFirstUserMessage = message.isUser &&
+            !_messages.take(messageIndex).any((message) => message.isUser);
         final userTurnsBeforeOrAtMessage = _messages
             .take(messageIndex + 1)
             .where((message) => message.isUser)
@@ -1266,9 +1321,9 @@ class _ChatScreenState extends State<ChatScreen> {
         return _AnimatedMessageEntry(
           key: ValueKey(message.id),
           isUser: message.isUser,
+          isFirstUserMessage: isFirstUserMessage,
           child: _MessageBubble(
             message: message,
-            embedded: widget.embedded,
             sending: _isSending,
             canShowActions: userTurnsBeforeOrAtMessage >= 2,
             onServiceSelected: _activateService,
@@ -1281,31 +1336,16 @@ class _ChatScreenState extends State<ChatScreen> {
         );
       },
     );
-
-    if (widget.embedded) {
-      return Column(
-        children: [
-          Expanded(child: messageList),
-          _ChatComposer(
-            controller: _inputCtrl,
-            focusNode: _focusNode,
-            sending: _isSending,
-            embedded: true,
-            includeBottomInset: false,
-            onSend: _sendComposerMessage,
-          ),
-        ],
-      );
-    }
+    final fadedMessageList = _MessageOpacityFade(
+      topFadeHeight: topFadeHeight,
+      bottomFadeHeight: bottomFadeHeight,
+      child: messageList,
+    );
 
     return Stack(
       children: [
         Positioned.fill(
-          child: _MessageOpacityFade(
-            topFadeHeight: topInset + 128,
-            bottomFadeHeight: bottomInset + 150,
-            child: messageList,
-          ),
+          child: fadedMessageList,
         ),
         Positioned(
           top: 0,
@@ -1313,7 +1353,7 @@ class _ChatScreenState extends State<ChatScreen> {
           right: 0,
           child: SafeArea(
             bottom: false,
-            child: _ChatHeader(onBack: () => context.go('/home')),
+            child: _ChatHeader(onBack: () => unawaited(_returnHome())),
           ),
         ),
         Positioned(
@@ -1324,7 +1364,6 @@ class _ChatScreenState extends State<ChatScreen> {
             controller: _inputCtrl,
             focusNode: _focusNode,
             sending: _isSending,
-            embedded: false,
             includeBottomInset: true,
             onSend: _sendComposerMessage,
           ),
@@ -1336,7 +1375,8 @@ class _ChatScreenState extends State<ChatScreen> {
   void _openVideoFromChat(String sessionId) {
     final normalizedSessionId = _uuidOrNull(sessionId);
     if (normalizedSessionId == null) return;
-    _aiChatLog('post-call rejoin video action selected sessionId=$normalizedSessionId');
+    _aiChatLog(
+        'post-call rejoin video action selected sessionId=$normalizedSessionId');
     _cacheSessionMessages(normalizedSessionId);
     context.go('/video/${Uri.encodeComponent(normalizedSessionId)}');
   }
@@ -1380,26 +1420,43 @@ class _MessageOpacityFade extends StatelessWidget {
   }
 }
 
-class _EmbeddedChatIntro extends StatelessWidget {
-  const _EmbeddedChatIntro();
+class _HomeChatIntro extends StatelessWidget {
+  const _HomeChatIntro({required this.displayName});
+
+  final String displayName;
 
   @override
   Widget build(BuildContext context) {
-    return const Padding(
-      padding: EdgeInsets.only(bottom: 28),
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 30),
       child: Align(
         alignment: Alignment.centerLeft,
         child: SizedBox(
-          width: 340,
-          child: Text(
-            '¿Cómo podemos asistirte hoy?',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 36,
-              fontFamily: 'ABCDiatype',
-              fontWeight: FontWeight.w400,
-              height: 1.02,
-            ),
+          width: 332,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '¡Hola, $displayName!',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 20,
+                  fontFamily: 'ABCDiatype',
+                  fontWeight: FontWeight.w400,
+                ),
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                '¿Cómo podemos asistirte hoy?',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 28,
+                  fontFamily: 'ABCDiatype',
+                  fontWeight: FontWeight.w400,
+                  height: 1.10,
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -1415,15 +1472,23 @@ class _ChatHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      padding: const EdgeInsets.fromLTRB(18, 24, 18, 0),
       child: Align(
         alignment: Alignment.centerLeft,
-        child: IconButton(
-          onPressed: onBack,
-          icon: const Icon(
-            Icons.arrow_back_ios_new_rounded,
-            color: Colors.white,
-            size: 22,
+        child: GestureDetector(
+          onTap: onBack,
+          behavior: HitTestBehavior.opaque,
+          child: const SizedBox(
+            width: 24,
+            height: 42,
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Icon(
+                Icons.arrow_back_ios_new_rounded,
+                color: Colors.white,
+                size: 22,
+              ),
+            ),
           ),
         ),
       ),
@@ -1435,26 +1500,33 @@ class _AnimatedMessageEntry extends StatelessWidget {
   const _AnimatedMessageEntry({
     super.key,
     required this.isUser,
+    required this.isFirstUserMessage,
     required this.child,
   });
 
   final bool isUser;
+  final bool isFirstUserMessage;
   final Widget child;
 
   @override
   Widget build(BuildContext context) {
     return TweenAnimationBuilder<double>(
       tween: Tween(begin: 0, end: 1),
-      duration: const Duration(milliseconds: 260),
-      curve: Curves.easeOutCubic,
+      duration: Duration(milliseconds: isFirstUserMessage ? 520 : 260),
+      curve: isFirstUserMessage ? Curves.easeOutQuart : Curves.easeOutCubic,
       builder: (context, value, child) {
         final slideX = (isUser ? 10.0 : -10.0) * (1 - value);
-        final slideY = 5.0 * (1 - value);
+        final slideY = (isFirstUserMessage ? 34.0 : 5.0) * (1 - value);
+        final scale = isFirstUserMessage ? 0.98 + (value * 0.02) : 1.0;
         return Opacity(
           opacity: value,
           child: Transform.translate(
             offset: Offset(slideX, slideY),
-            child: child,
+            child: Transform.scale(
+              scale: scale,
+              alignment: Alignment.bottomRight,
+              child: child,
+            ),
           ),
         );
       },
@@ -1466,7 +1538,6 @@ class _AnimatedMessageEntry extends StatelessWidget {
 class _MessageBubble extends StatelessWidget {
   const _MessageBubble({
     required this.message,
-    required this.embedded,
     required this.sending,
     required this.canShowActions,
     required this.onServiceSelected,
@@ -1478,7 +1549,6 @@ class _MessageBubble extends StatelessWidget {
   });
 
   final _ChatMessage message;
-  final bool embedded;
   final bool sending;
   final bool canShowActions;
   final void Function(String service, _AiChatTurnResult result)
@@ -1497,10 +1567,8 @@ class _MessageBubble extends StatelessWidget {
     final bubbleColor = isUser ? const Color(0xFF242426) : Colors.black;
     const textColor = Colors.white;
     final viewportWidth = MediaQuery.sizeOf(context).width;
-    final widthFactor =
-        isUser ? (embedded ? 0.74 : 0.66) : (embedded ? 0.82 : 0.72);
-    final fixedCap =
-        isUser ? (embedded ? 300.0 : 350.0) : (embedded ? 330.0 : 380.0);
+    final widthFactor = isUser ? 0.66 : 0.72;
+    final fixedCap = isUser ? 350.0 : 380.0;
     final maxBubbleWidth = math.min(viewportWidth * widthFactor, fixedCap);
     const messageTextStyle = TextStyle(
       color: textColor,
@@ -1609,8 +1677,8 @@ class _AssistantMessageContent extends StatelessWidget {
       children: [
         for (var index = 0; index < blocks.length; index++)
           Padding(
-            padding: EdgeInsets.only(
-                bottom: index == blocks.length - 1 ? 0 : 8),
+            padding:
+                EdgeInsets.only(bottom: index == blocks.length - 1 ? 0 : 8),
             child: _AssistantMessageBlockView(
               block: blocks[index],
               style: style,
@@ -1682,8 +1750,7 @@ class _AssistantMessageList extends StatelessWidget {
       children: [
         for (var index = 0; index < items.length; index++)
           Padding(
-            padding: EdgeInsets.only(
-                bottom: index == items.length - 1 ? 0 : 6),
+            padding: EdgeInsets.only(bottom: index == items.length - 1 ? 0 : 6),
             child: _AssistantMessageListRow(
               marker: numbered ? '${index + 1}.' : null,
               text: items[index],
@@ -1926,7 +1993,6 @@ class _ChatComposer extends StatelessWidget {
     required this.controller,
     required this.focusNode,
     required this.sending,
-    required this.embedded,
     required this.includeBottomInset,
     required this.onSend,
   });
@@ -1934,7 +2000,6 @@ class _ChatComposer extends StatelessWidget {
   final TextEditingController controller;
   final FocusNode focusNode;
   final bool sending;
-  final bool embedded;
   final bool includeBottomInset;
   final VoidCallback onSend;
 
@@ -1943,8 +2008,7 @@ class _ChatComposer extends StatelessWidget {
     final bottomInset =
         includeBottomInset ? MediaQuery.paddingOf(context).bottom : 0.0;
     return Padding(
-      padding: EdgeInsets.fromLTRB(
-          embedded ? 0 : 18, 8, embedded ? 0 : 18, 14 + bottomInset),
+      padding: EdgeInsets.fromLTRB(18, 8, 18, 14 + bottomInset),
       child: ConstrainedBox(
         constraints: const BoxConstraints(minHeight: 46, maxHeight: 150),
         child: AnimatedBuilder(
@@ -2600,8 +2664,7 @@ class _AiMessageBlock {
 
     final text = json['text']?.toString().trim();
     if (text == null || text.isEmpty) return null;
-    return _AiMessageBlock(
-        type: type, text: text, items: const <String>[]);
+    return _AiMessageBlock(type: type, text: text, items: const <String>[]);
   }
 
   final _AiMessageBlockType type;
@@ -2698,7 +2761,8 @@ class _AiChatPayload {
         if (nextStep.isNotEmpty) 'nextStep': nextStep,
         'urgency': urgency,
         'intakeQuestions': intakeQuestions,
-        if (recommendedService != null) 'recommendedService': recommendedService,
+        if (recommendedService != null)
+          'recommendedService': recommendedService,
         if (caseSummary != null) 'caseSummary': caseSummary,
         if (handoffSummary != null) 'handoffSummary': handoffSummary,
         if (routingRationale != null) 'routingRationale': routingRationale,
@@ -2708,11 +2772,13 @@ class _AiChatPayload {
         'message': message,
         'formatVersion': formatVersion,
         'nextStep': nextStep,
-        'displayBlocks':
-            displayBlocks.map((block) => block.toJson()).toList(growable: false),
+        'displayBlocks': displayBlocks
+            .map((block) => block.toJson())
+            .toList(growable: false),
         'intakeQuestions': intakeQuestions,
         'urgency': urgency,
-        if (recommendedService != null) 'recommendedService': recommendedService,
+        if (recommendedService != null)
+          'recommendedService': recommendedService,
         if (actionLabel != null) 'actionLabel': actionLabel,
         'safetyEscalation': safetyEscalation,
         if (caseSummary != null) 'caseSummary': caseSummary,
