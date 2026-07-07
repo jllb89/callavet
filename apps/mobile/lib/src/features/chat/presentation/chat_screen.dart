@@ -5,6 +5,9 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
@@ -12,6 +15,7 @@ import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:video_compress/video_compress.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../../core/config/environment.dart';
@@ -73,11 +77,13 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen> {
+class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final _inputCtrl = TextEditingController();
   final _focusNode = FocusNode();
   final _scrollController = ScrollController();
   final _messages = <_ChatMessage>[];
+  final _stagedConsultAttachments = <_PendingConsultAttachment>[];
+  final _consultUploadCancelTokens = <String, _ConsultUploadCancelToken>{};
   final _imagePicker = ImagePicker();
   final _audioRecorder = AudioRecorder();
 
@@ -86,6 +92,9 @@ class _ChatScreenState extends State<ChatScreen> {
   RealtimeChannel? _consultSessionChannel;
   RealtimeChannel? _consultRoomChannel;
   Timer? _consultRefreshDebounce;
+  Timer? _consultReconnectTimer;
+  Timer? _consultReadReceiptDebounce;
+  Timer? _consultDraftDebounce;
   Timer? _typingDebounce;
   Timer? _vetTypingClearTimer;
   Timer? _surveyReturnHomeTimer;
@@ -100,12 +109,19 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _vetOnline = false;
   bool _vetTyping = false;
   bool _vetEnteredAnnounced = false;
+  bool _consultOutboxFlushing = false;
+  bool _showConsultDraftRestoredBanner = false;
+  int _consultReconnectAttempts = 0;
+  DateTime? _lastVetTypingAt;
+  String? _unreadConsultMarkerMessageId;
+  String? _consultRealtimeStatus;
   String? _inlineConsultSessionId;
   String _consultVetName = 'vet';
   _ActiveSurveyFeedback? _activeSurveyFeedback;
 
   static const _surveyReturnHomeDelay = Duration(seconds: 5);
   static const _returnHomeFadeDuration = Duration(milliseconds: 260);
+  static const _consultSendTimeout = Duration(seconds: 25);
 
   static final _uuidPattern = RegExp(
     r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
@@ -114,6 +130,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _conversationId = 'mobile-${DateTime.now().microsecondsSinceEpoch}';
     _aiChatLog(
       'init sessionId=${widget.sessionId} sessionIdLooksUuid=${_uuidOrNull(widget.sessionId) != null} '
@@ -126,6 +143,7 @@ class _ChatScreenState extends State<ChatScreen> {
       'apiBaseUrl=${Environment.apiBaseUrl} dryRun=$_aiChatDryRun',
     );
     _inputCtrl.addListener(_handleComposerChanged);
+    _focusNode.addListener(_handleComposerFocusChanged);
     final initialMessage = widget.initialMessage?.trim();
     final hasInitialMessage =
         initialMessage != null && initialMessage.isNotEmpty;
@@ -134,6 +152,7 @@ class _ChatScreenState extends State<ChatScreen> {
         initialAssistantMessage != null && initialAssistantMessage.isNotEmpty;
     final cachedSessionId = _consultSessionId;
     if (_isConsultChatRoute && cachedSessionId != null) {
+      unawaited(_restoreConsultDraft(cachedSessionId));
       unawaited(_loadConsultMessages());
       _startConsultRealtime(cachedSessionId);
       _startConsultRoomSignals(cachedSessionId);
@@ -172,11 +191,17 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     final sessionId = _uuidOrNull(widget.sessionId);
     if (sessionId != null && !_isConsultChatRoute) {
       _cacheSessionMessages(sessionId);
     }
     _consultRefreshDebounce?.cancel();
+    _consultReconnectTimer?.cancel();
+    _consultReadReceiptDebounce?.cancel();
+    _consultDraftDebounce?.cancel();
+    _persistCurrentConsultDraft();
+    _sendConsultTyping(false);
     final messagesChannel = _consultMessagesChannel;
     if (messagesChannel != null) {
       Supabase.instance.client.removeChannel(messagesChannel);
@@ -202,6 +227,18 @@ class _ChatScreenState extends State<ChatScreen> {
     super.dispose();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) {
+      _sendConsultTyping(false);
+      return;
+    }
+    final sessionId = _consultSessionId;
+    if (sessionId == null || _consultClosed) return;
+    unawaited(_catchUpConsultMessages(sessionId));
+    unawaited(_flushConsultOutbox(sessionId));
+  }
+
   void _scheduleSurveyReturnHome() {
     _surveyReturnHomeTimer?.cancel();
     _surveyChatLog(
@@ -216,6 +253,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _returnHome() async {
     if (_isReturningHome) return;
     _surveyReturnHomeTimer?.cancel();
+    _sendConsultTyping(false);
     _focusNode.unfocus();
     setState(() => _isReturningHome = true);
     await Future<void>.delayed(_returnHomeFadeDuration);
@@ -251,7 +289,12 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _sendComposerMessage() {
     final text = _inputCtrl.text.trim();
-    if (text.isEmpty) {
+    final stagedAttachments = List<_PendingConsultAttachment>.unmodifiable(
+      _stagedConsultAttachments,
+    );
+    final hasConsultStagedMedia =
+        _isConsultChatRoute && stagedAttachments.isNotEmpty;
+    if (text.isEmpty && !hasConsultStagedMedia) {
       _aiChatLog('composer send ignored: empty input');
       return;
     }
@@ -268,7 +311,15 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
     if (_isConsultChatRoute) {
-      unawaited(_sendConsultMessage(text));
+      _sendConsultTyping(false);
+      final sessionId = _consultSessionId;
+      if (sessionId != null) unawaited(_ConsultDraftStore.clear(sessionId));
+      _dismissConsultDraftBanner();
+      setState(() => _stagedConsultAttachments.clear());
+      unawaited(_sendConsultPayload(
+        text: text,
+        pendingAttachments: stagedAttachments,
+      ));
       return;
     }
     _sendUserMessage(text);
@@ -288,6 +339,8 @@ class _ChatScreenState extends State<ChatScreen> {
           .whereType<Map<String, dynamic>>()
           .map(_ChatMessage.consultFromJson)
           .toList(growable: false);
+      final outboxEntries =
+          await _ConsultOutboxStore.entriesForSession(sessionId);
       final receipts = _asList(response['receipts']) ?? const [];
       final session = _asMap(response['session']);
       final status = session?['status']?.toString().toLowerCase();
@@ -295,13 +348,23 @@ class _ChatScreenState extends State<ChatScreen> {
       if (!mounted) return;
       setState(() {
         final hydratedMessages = _messagesWithReceipts(messages, receipts);
+        final serverClientKeys = hydratedMessages
+            .map((message) => message.clientKey)
+            .whereType<String>()
+            .toSet();
+        final outboxMessages = outboxEntries
+            .where((entry) => !serverClientKeys.contains(entry.clientKey))
+            .map((entry) => entry.toMessage())
+            .toList(growable: false);
         if (_inlineConsultSessionId == null) {
           _messages
             ..clear()
-            ..addAll(hydratedMessages);
+            ..addAll(hydratedMessages)
+            ..addAll(outboxMessages);
         } else {
           _messages.removeWhere((message) => message.streamOrder != null);
           _messages.addAll(hydratedMessages);
+          _messages.addAll(outboxMessages);
           _messages.sort(_compareInlineMessages);
         }
         if (vetName != null && vetName.isNotEmpty) {
@@ -310,6 +373,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _consultClosed = _isClosedConsultStatus(status);
       });
       _markVisibleConsultMessagesRead();
+      unawaited(_flushConsultOutbox(sessionId));
       if (_consultClosed) unawaited(_startSurveyPrompt());
       _scrollToBottom();
     } catch (error) {
@@ -348,10 +412,13 @@ class _ChatScreenState extends State<ChatScreen> {
               _scheduleConsultRefresh();
               return;
             }
+            if (_hasConsultStreamGap(message)) _scheduleConsultRefresh();
+            if (message.attachments.isEmpty) _scheduleConsultRefresh();
             _upsertConsultMessage(message);
           },
         )
-        .subscribe();
+        .subscribe(
+            (status, [_]) => _handleConsultRealtimeStatus(sessionId, status));
     _consultMessagesChannel = messagesChannel;
 
     final sessionChannel =
@@ -392,12 +459,27 @@ class _ChatScreenState extends State<ChatScreen> {
           callback: (payload) {
             if (payload['role']?.toString() != 'vet') return;
             final typing = payload['typing'] == true;
+            final eventAt = _parseDateTime(payload['at']) ?? DateTime.now();
+            if (typing && DateTime.now().difference(eventAt).inSeconds > 8) {
+              return;
+            }
             if (!mounted) return;
-            setState(() => _vetTyping = typing);
+            final wasTyping = _vetTyping;
+            setState(() {
+              _lastVetTypingAt = typing ? eventAt : null;
+              _vetTyping = typing;
+            });
+            if (typing && !wasTyping) {
+              _announceForAccessibility('El veterinario está escribiendo.');
+            }
             _vetTypingClearTimer?.cancel();
             if (typing) {
               _vetTypingClearTimer = Timer(const Duration(seconds: 3), () {
-                if (mounted) setState(() => _vetTyping = false);
+                if (!mounted || _lastVetTypingAt != eventAt) return;
+                setState(() {
+                  _vetTyping = false;
+                  _lastVetTypingAt = null;
+                });
               });
             }
           },
@@ -431,14 +513,57 @@ class _ChatScreenState extends State<ChatScreen> {
         .onPresenceSync((_) => _syncVetPresence(channel))
         .subscribe((status, [_]) {
       if (status == RealtimeSubscribeStatus.subscribed) {
+        _handleConsultRealtimeStatus(sessionId, status);
         unawaited(channel.track({
           'role': 'user',
           'userId': userId,
           'onlineAt': DateTime.now().toIso8601String(),
         }));
+      } else {
+        _handleConsultRealtimeStatus(sessionId, status);
       }
     });
     _consultRoomChannel = channel;
+  }
+
+  void _handleConsultRealtimeStatus(
+      String sessionId, RealtimeSubscribeStatus status) {
+    if (!mounted) return;
+    if (status == RealtimeSubscribeStatus.subscribed) {
+      _consultReconnectAttempts = 0;
+      _consultReconnectTimer?.cancel();
+      if (_consultRealtimeStatus != null) {
+        setState(() => _consultRealtimeStatus = null);
+      }
+      unawaited(_catchUpConsultMessages(sessionId));
+      return;
+    }
+    setState(() {
+      _consultRealtimeStatus = switch (status) {
+        RealtimeSubscribeStatus.channelError => 'reconectando chat...',
+        RealtimeSubscribeStatus.closed => 'chat sin conexión',
+        RealtimeSubscribeStatus.timedOut => 'reconectando chat...',
+        RealtimeSubscribeStatus.subscribed => null,
+      };
+    });
+    _emitConsultTelemetry('realtime_reconnect', metadata: {
+      'status': status.name,
+      'reconnectAttempt': _consultReconnectAttempts + 1,
+    });
+    _scheduleConsultRealtimeRestart(sessionId);
+  }
+
+  void _scheduleConsultRealtimeRestart(String sessionId) {
+    if (_consultReconnectTimer?.isActive == true) return;
+    final delaySeconds = math.min(10, 1 << _consultReconnectAttempts);
+    _consultReconnectAttempts = math.min(_consultReconnectAttempts + 1, 4);
+    _consultReconnectTimer = Timer(Duration(seconds: delaySeconds), () {
+      if (!mounted || _consultClosed) return;
+      _stopConsultRealtime();
+      _startConsultRealtime(sessionId);
+      _startConsultRoomSignals(sessionId);
+      unawaited(_catchUpConsultMessages(sessionId));
+    });
   }
 
   void _syncVetPresence(RealtimeChannel channel) {
@@ -453,6 +578,7 @@ class _ChatScreenState extends State<ChatScreen> {
             includeInHistory: false,
           ));
           _vetEnteredAnnounced = true;
+          _announceForAccessibility('El veterinario ha entrado al chat.');
         }
         _vetOnline = online;
       });
@@ -464,20 +590,60 @@ class _ChatScreenState extends State<ChatScreen> {
     if (!_isConsultChatRoute || _consultClosed || _consultRoomChannel == null) {
       return;
     }
+    final sessionId = _consultSessionId;
+    if (sessionId != null) {
+      _consultDraftDebounce?.cancel();
+      _consultDraftDebounce = Timer(const Duration(milliseconds: 400), () {
+        unawaited(_ConsultDraftStore.save(sessionId, _inputCtrl.text));
+      });
+      if (_showConsultDraftRestoredBanner && _inputCtrl.text.trim().isEmpty) {
+        _dismissConsultDraftBanner();
+      }
+    }
     _typingDebounce?.cancel();
     final isTyping = _inputCtrl.text.trim().isNotEmpty;
     _typingDebounce = Timer(const Duration(milliseconds: 300), () {
-      final channel = _consultRoomChannel;
-      if (channel == null) return;
-      unawaited(channel.sendBroadcastMessage(
-        event: 'typing',
-        payload: {
-          'role': 'user',
-          'typing': isTyping,
-          'at': DateTime.now().toIso8601String(),
-        },
-      ));
+      _sendConsultTyping(isTyping);
     });
+  }
+
+  void _handleComposerFocusChanged() {
+    if (!_focusNode.hasFocus) _sendConsultTyping(false);
+  }
+
+  Future<void> _restoreConsultDraft(String sessionId) async {
+    final draft = await _ConsultDraftStore.read(sessionId);
+    if (!mounted || draft == null || draft.trim().isEmpty) return;
+    if (_inputCtrl.text.trim().isNotEmpty) return;
+    _inputCtrl.text = draft;
+    _inputCtrl.selection = TextSelection.collapsed(offset: draft.length);
+    setState(() => _showConsultDraftRestoredBanner = true);
+    _announceForAccessibility('Borrador restaurado.');
+  }
+
+  void _dismissConsultDraftBanner() {
+    if (!mounted || !_showConsultDraftRestoredBanner) return;
+    setState(() => _showConsultDraftRestoredBanner = false);
+  }
+
+  void _persistCurrentConsultDraft() {
+    final sessionId = _consultSessionId;
+    if (sessionId == null) return;
+    unawaited(_ConsultDraftStore.save(sessionId, _inputCtrl.text));
+  }
+
+  void _sendConsultTyping(bool typing) {
+    final channel = _consultRoomChannel;
+    if (channel == null) return;
+    _typingDebounce?.cancel();
+    unawaited(channel.sendBroadcastMessage(
+      event: 'typing',
+      payload: {
+        'role': 'user',
+        'typing': typing,
+        'at': DateTime.now().toIso8601String(),
+      },
+    ));
   }
 
   void _scheduleConsultRefresh() {
@@ -488,7 +654,75 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _refreshConsultMessages() {
     if (!mounted) return;
-    unawaited(_loadConsultMessages());
+    final sessionId = _consultSessionId;
+    if (sessionId == null) return;
+    unawaited(_catchUpConsultMessages(sessionId));
+  }
+
+  int get _lastConsultStreamOrder => _messages
+      .map((message) => message.streamOrder ?? 0)
+      .fold<int>(0, (max, value) => value > max ? value : max);
+
+  bool _hasConsultStreamGap(_ChatMessage message) {
+    final order = message.streamOrder;
+    final lastOrder = _lastConsultStreamOrder;
+    return order != null && lastOrder > 0 && order > lastOrder + 1;
+  }
+
+  Future<void> _catchUpConsultMessages(String sessionId) async {
+    final afterStreamOrder = _lastConsultStreamOrder;
+    if (afterStreamOrder <= 0) {
+      await _loadConsultMessages();
+      return;
+    }
+    final startedAt = DateTime.now();
+    try {
+      final response = await _getGatewayJson(
+        '/sessions/${Uri.encodeComponent(sessionId)}/messages?afterStreamOrder=$afterStreamOrder&limit=100&sort=stream_order.asc',
+      );
+      final messages = (_asList(response['items']) ?? const [])
+          .map(_asMap)
+          .whereType<Map<String, dynamic>>()
+          .map(_ChatMessage.consultFromJson)
+          .toList(growable: false);
+      final receipts = _asList(response['receipts']) ?? const [];
+      for (final message in _messagesWithReceipts(messages, receipts)) {
+        _upsertConsultMessage(message);
+      }
+      String? firstIncoming;
+      for (final message in messages) {
+        if (!message.isUser) {
+          firstIncoming = message.id;
+          break;
+        }
+      }
+      if (firstIncoming != null && mounted) {
+        setState(() => _unreadConsultMarkerMessageId = firstIncoming);
+      }
+      if (messages.isNotEmpty) _markVisibleConsultMessagesRead();
+      unawaited(_flushConsultOutbox(sessionId));
+      _emitConsultTelemetry(
+        'realtime_catchup',
+        durationMs: DateTime.now().difference(startedAt).inMilliseconds,
+        valueCount: messages.length,
+        metadata: {
+          'afterStreamOrder': afterStreamOrder,
+          'cursor': response['cursor'],
+        },
+      );
+    } catch (error) {
+      _aiChatLog('consult catch-up failed: ${error.runtimeType} $error');
+    }
+  }
+
+  bool _shouldShowDateSeparator(_ChatMessage? previous, _ChatMessage current) {
+    final currentDate = current.createdAt;
+    if (currentDate == null) return previous == null;
+    final previousDate = previous?.createdAt;
+    if (previousDate == null) return true;
+    return previousDate.year != currentDate.year ||
+        previousDate.month != currentDate.month ||
+        previousDate.day != currentDate.day;
   }
 
   void _stopConsultRealtime() {
@@ -520,7 +754,9 @@ class _ChatScreenState extends State<ChatScreen> {
       _vetTyping = false;
       _vetEnteredAnnounced = false;
       _isSending = false;
+      _showConsultDraftRestoredBanner = false;
     });
+    unawaited(_restoreConsultDraft(sessionId));
     _startConsultRealtime(sessionId);
     _startConsultRoomSignals(sessionId);
     unawaited(_loadConsultMessages());
@@ -529,19 +765,29 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _upsertConsultMessage(_ChatMessage message) {
     if (!mounted) return;
+    var inserted = false;
     setState(() {
-      final index =
-          _messages.indexWhere((existing) => existing.id == message.id);
+      final index = _messages.indexWhere((existing) =>
+          existing.id == message.id ||
+          (message.clientKey != null &&
+              existing.clientKey == message.clientKey));
       if (index >= 0) {
         _messages[index] = message.withReceiptFrom(_messages[index]);
       } else {
         _messages.add(message);
+        inserted = true;
       }
       _messages.sort(_inlineConsultSessionId == null
           ? _compareConsultMessages
           : _compareInlineMessages);
     });
-    if (!message.isUser) _markVisibleConsultMessagesRead();
+    if (message.streamOrder != null && message.clientKey != null) {
+      unawaited(_ConsultOutboxStore.remove(message.clientKey!));
+    }
+    if (!message.isUser) {
+      if (inserted) _announceForAccessibility('Nuevo mensaje del veterinario.');
+      _markVisibleConsultMessagesRead();
+    }
     _scrollToBottom();
   }
 
@@ -609,19 +855,28 @@ class _ChatScreenState extends State<ChatScreen> {
         .map((message) => message.streamOrder ?? 0)
         .fold<int>(0, (max, value) => value > max ? value : max);
     if (lastStreamOrder <= 0) return;
-    unawaited(_postGatewayJson(
-      '/sessions/${Uri.encodeComponent(sessionId)}/messages/read',
-      {'lastStreamOrder': lastStreamOrder},
-    ));
-  }
-
-  Future<void> _sendConsultMessage(String text) async {
-    await _sendConsultPayload(text: text);
+    _consultReadReceiptDebounce?.cancel();
+    _consultReadReceiptDebounce = Timer(const Duration(milliseconds: 250), () {
+      final startedAt = DateTime.now();
+      unawaited(_postGatewayJson(
+        '/sessions/${Uri.encodeComponent(sessionId)}/messages/read',
+        {'lastStreamOrder': lastStreamOrder},
+      ).then((_) {
+        _emitConsultTelemetry(
+          'read_receipt_sent',
+          valueMs: DateTime.now().difference(startedAt).inMilliseconds,
+          metadata: {'streamOrder': lastStreamOrder},
+        );
+      }).catchError((_) {}));
+    });
   }
 
   Future<void> _sendConsultPayload({
     String text = '',
     List<_PendingConsultAttachment> pendingAttachments = const [],
+    String? clientKeyOverride,
+    bool retrying = false,
+    int? attemptsOverride,
   }) async {
     final sessionId = _consultSessionId;
     if (sessionId == null || _isSending) return;
@@ -637,17 +892,44 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     final trimmedText = text.trim();
     if (trimmedText.isEmpty && pendingAttachments.isEmpty) return;
-    final clientKey =
+    _sendConsultTyping(false);
+    final clientKey = clientKeyOverride ??
         'owner-${DateTime.now().microsecondsSinceEpoch}-${_nextChatMessageId()}';
+    final sendStartedAt = DateTime.now();
+    _emitConsultTelemetry('send_started', clientKey: clientKey, metadata: {
+      'attachmentCount': pendingAttachments.length,
+      'retrying': retrying,
+    });
+    final outboxEntry = _ConsultOutboxEntry(
+      sessionId: sessionId,
+      clientKey: clientKey,
+      text: trimmedText,
+      attachments: pendingAttachments,
+      status: retrying ? 'retrying' : 'sending',
+      attempts: attemptsOverride ?? (retrying ? 1 : 0),
+      createdAt: DateTime.now(),
+      updatedAt: DateTime.now(),
+    );
+    await _ConsultOutboxStore.upsert(outboxEntry);
     final optimisticMessage = _ChatMessage.user(
       trimmedText,
+      id: clientKey,
+      clientKey: clientKey,
+      deliveryState: retrying ? 'retrying' : 'sending',
       includeInHistory: false,
       attachments: pendingAttachments
           .map((attachment) => attachment.toPreviewAttachment())
           .toList(growable: false),
     );
     setState(() {
-      _messages.add(optimisticMessage);
+      final index = _messages.indexWhere((message) =>
+          message.id == optimisticMessage.id ||
+          message.clientKey == optimisticMessage.clientKey);
+      if (index >= 0) {
+        _messages[index] = optimisticMessage.withReceiptFrom(_messages[index]);
+      } else {
+        _messages.add(optimisticMessage);
+      }
       _isSending = true;
     });
     _scrollToBottom();
@@ -655,7 +937,11 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       final attachmentRefs = <Map<String, String>>[];
       for (final attachment in pendingAttachments) {
-        final uploaded = await _uploadConsultAttachment(sessionId, attachment);
+        final uploaded = await _uploadConsultAttachment(
+          sessionId,
+          attachment,
+          clientKey: clientKey,
+        );
         attachmentRefs.add({'id': uploaded.id});
       }
       final response = await _postGatewayJson(
@@ -665,25 +951,90 @@ class _ChatScreenState extends State<ChatScreen> {
           'clientKey': clientKey,
           if (attachmentRefs.isNotEmpty) 'attachments': attachmentRefs,
         },
-      );
+      ).timeout(_consultSendTimeout);
+      await _ConsultOutboxStore.remove(clientKey);
       final message = _asMap(response['message']);
+      _emitConsultTelemetry(
+        'send_completed',
+        clientKey: clientKey,
+        messageId: message?['id']?.toString(),
+        durationMs: DateTime.now().difference(sendStartedAt).inMilliseconds,
+        metadata: {
+          'attachmentCount': attachmentRefs.length,
+          'duplicate': response['duplicate'] == true,
+          'streamOrder': message?['stream_order'],
+        },
+      );
       if (message != null) {
         if (mounted) {
-          setState(() => _messages.removeWhere(
-              (candidate) => candidate.id == optimisticMessage.id));
+          setState(() => _messages.removeWhere((candidate) =>
+              candidate.id == optimisticMessage.id ||
+              candidate.clientKey == clientKey));
         }
         _upsertConsultMessage(_ChatMessage.consultFromJson(message));
       } else {
         await _loadConsultMessages();
       }
+      if (mounted) unawaited(HapticFeedback.lightImpact());
     } catch (error) {
       _aiChatLog('consult send failed: ${error.runtimeType} $error');
+      if (error is _ConsultUploadCanceledException) {
+        await _ConsultOutboxStore.remove(clientKey);
+        _consultUploadCancelTokens.remove(clientKey);
+        if (mounted) {
+          setState(() {
+            _messages.removeWhere((candidate) =>
+                candidate.id == optimisticMessage.id ||
+                candidate.clientKey == clientKey);
+          });
+          _announceForAccessibility('Carga cancelada.');
+        }
+        return;
+      }
+      final errorCode = _telemetryErrorCode(error);
+      _emitConsultTelemetry(
+        'send_failed',
+        clientKey: clientKey,
+        durationMs: DateTime.now().difference(sendStartedAt).inMilliseconds,
+        errorCode: errorCode,
+        metadata: {'attachmentCount': pendingAttachments.length},
+      );
+      final attempts = outboxEntry.attempts + 1;
+      final retryable = _isRetryableConsultErrorCode(errorCode);
+      final nextRetryAt = retryable ? _nextConsultRetryAt(attempts) : null;
+      await _ConsultOutboxStore.upsert(outboxEntry.copyWith(
+        status: retryable ? 'queued' : 'failed',
+        attempts: attempts,
+        lastError: error.toString(),
+        lastErrorCode: errorCode,
+        nextRetryAt: nextRetryAt,
+        updatedAt: DateTime.now(),
+      ));
+      if (retryable && nextRetryAt != null) {
+        _scheduleConsultOutboxRetry(sessionId, nextRetryAt);
+      }
       if (!mounted) return;
+      unawaited(HapticFeedback.mediumImpact());
+      _announceForAccessibility('No se pudo enviar el mensaje.');
       setState(() {
-        _messages
-            .removeWhere((candidate) => candidate.id == optimisticMessage.id);
-        _messages.add(_ChatMessage.assistant(_friendlyError(error),
-            includeInHistory: false));
+        final failedMessage = _ChatMessage.user(
+          trimmedText,
+          id: clientKey,
+          clientKey: clientKey,
+          deliveryState: 'failed',
+          includeInHistory: false,
+          attachments: pendingAttachments
+              .map((attachment) => attachment.toPreviewAttachment())
+              .toList(growable: false),
+        );
+        final index = _messages.indexWhere((candidate) =>
+            candidate.id == optimisticMessage.id ||
+            candidate.clientKey == clientKey);
+        if (index >= 0) {
+          _messages[index] = failedMessage.withReceiptFrom(_messages[index]);
+        } else {
+          _messages.add(failedMessage);
+        }
       });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -695,6 +1046,9 @@ class _ChatScreenState extends State<ChatScreen> {
                   onPressed: () => unawaited(_sendConsultPayload(
                     text: trimmedText,
                     pendingAttachments: pendingAttachments,
+                    clientKeyOverride: clientKey,
+                    retrying: true,
+                    attemptsOverride: attempts,
                   )),
                 ),
         ),
@@ -705,8 +1059,39 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  Future<void> _flushConsultOutbox(String sessionId) async {
+    if (_consultOutboxFlushing || _isSending || _consultClosed) return;
+    _consultOutboxFlushing = true;
+    try {
+      final entries = await _ConsultOutboxStore.entriesForSession(sessionId);
+      for (final entry in entries) {
+        if (!mounted || _consultClosed) return;
+        if (entry.status == 'failed') continue;
+        if (!entry.retryDue) {
+          final nextRetryAt = entry.nextRetryAt;
+          if (nextRetryAt != null) {
+            _scheduleConsultOutboxRetry(sessionId, nextRetryAt);
+          }
+          continue;
+        }
+        await _sendConsultPayload(
+          text: entry.text,
+          pendingAttachments: entry.attachments,
+          clientKeyOverride: entry.clientKey,
+          retrying: entry.attempts > 0,
+          attemptsOverride: entry.attempts,
+        );
+      }
+    } finally {
+      _consultOutboxFlushing = false;
+    }
+  }
+
   Future<_ConsultAttachment> _uploadConsultAttachment(
-      String sessionId, _PendingConsultAttachment attachment) async {
+    String sessionId,
+    _PendingConsultAttachment attachment, {
+    required String clientKey,
+  }) async {
     final response = await _postGatewayJson(
       '/sessions/${Uri.encodeComponent(sessionId)}/attachments/upload-url',
       attachment.toUploadBody(),
@@ -723,30 +1108,308 @@ class _ChatScreenState extends State<ChatScreen> {
       throw const _ChatApiException(
           'No pude preparar el archivo para subirlo.');
     }
-    await Supabase.instance.client.storage.from(bucket).uploadToSignedUrl(
-          path,
-          token,
-          File(attachment.path),
-          FileOptions(contentType: attachment.contentType),
-        );
+    final attachmentId = attachmentJson['id']?.toString();
+    final uploadStartedAt = DateTime.now();
+    final cancelToken = _consultUploadCancelTokens.putIfAbsent(
+        clientKey, _ConsultUploadCancelToken.new);
+    _emitConsultTelemetry('upload_started',
+        clientKey: clientKey,
+        attachmentId: attachmentId,
+        valueCount: attachment.byteSize,
+        metadata: {'attachmentKind': attachment.kind.name});
+    try {
+      await _uploadFileToSignedUrlWithProgress(
+        bucket: bucket,
+        path: path,
+        token: token,
+        file: File(attachment.path),
+        fileName: attachment.fileName,
+        contentType: attachment.contentType,
+        cancelToken: cancelToken,
+        onProgress: (progress) {
+          _updateConsultAttachmentUploadProgress(
+              clientKey, attachment.path, progress);
+          final percent = (progress * 100).round();
+          if (percent == 25 ||
+              percent == 50 ||
+              percent == 75 ||
+              percent == 100) {
+            _emitConsultTelemetry('upload_progress',
+                clientKey: clientKey,
+                attachmentId: attachmentId,
+                valueCount: percent,
+                metadata: {'progressPercent': percent});
+          }
+        },
+      );
+      _emitConsultTelemetry('upload_completed',
+          clientKey: clientKey,
+          attachmentId: attachmentId,
+          durationMs: DateTime.now().difference(uploadStartedAt).inMilliseconds,
+          valueCount: attachment.byteSize,
+          metadata: {'attachmentKind': attachment.kind.name});
+      _consultUploadCancelTokens.remove(clientKey);
+    } catch (error) {
+      if (error is _ConsultUploadCanceledException) rethrow;
+      _emitConsultTelemetry('upload_failed',
+          clientKey: clientKey,
+          attachmentId: attachmentId,
+          durationMs: DateTime.now().difference(uploadStartedAt).inMilliseconds,
+          valueCount: attachment.byteSize,
+          errorCode: _telemetryErrorCode(error),
+          metadata: {'attachmentKind': attachment.kind.name});
+      _announceForAccessibility('No se pudo subir el archivo.');
+      rethrow;
+    } finally {
+      if (cancelToken.canceled) _consultUploadCancelTokens.remove(clientKey);
+    }
     return _ConsultAttachment.fromJson(attachmentJson);
+  }
+
+  Future<void> _uploadFileToSignedUrlWithProgress({
+    required String bucket,
+    required String path,
+    required String token,
+    required File file,
+    required String fileName,
+    required String contentType,
+    required _ConsultUploadCancelToken cancelToken,
+    required ValueChanged<double> onProgress,
+  }) async {
+    final totalBytes = await file.length();
+    if (totalBytes <= 0) {
+      throw const _ChatApiException('El archivo está vacío.');
+    }
+    onProgress(0);
+    final boundary = '----cav-${DateTime.now().microsecondsSinceEpoch}';
+    final uri =
+        _signedStorageUploadUri(bucket: bucket, path: path, token: token);
+    final client = HttpClient();
+    try {
+      if (cancelToken.canceled) throw const _ConsultUploadCanceledException();
+      final request = await client.putUrl(uri);
+      request.headers.contentType = ContentType(
+        'multipart',
+        'form-data',
+        parameters: {'boundary': boundary},
+      );
+      request.headers.set('x-upsert', 'false');
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      final beforeFile = utf8.encode(
+        '--$boundary\r\n'
+        'content-disposition: form-data; name=""; filename="${_multipartEscape(fileName)}"\r\n'
+        'content-type: $contentType\r\n\r\n',
+      );
+      final afterFile = utf8.encode(
+        '\r\n--$boundary\r\n'
+        'content-disposition: form-data; name="cacheControl"\r\n\r\n'
+        '3600\r\n'
+        '--$boundary--\r\n',
+      );
+      request.contentLength = beforeFile.length + totalBytes + afterFile.length;
+      request.add(beforeFile);
+      var sentBytes = 0;
+      var lastProgress = -1.0;
+      await for (final chunk in file.openRead()) {
+        if (cancelToken.canceled) {
+          client.close(force: true);
+          throw const _ConsultUploadCanceledException();
+        }
+        request.add(chunk);
+        sentBytes += chunk.length;
+        final progress = (sentBytes / totalBytes).clamp(0.0, 1.0).toDouble();
+        if (progress - lastProgress >= 0.01 || progress == 1.0) {
+          lastProgress = progress;
+          onProgress(progress);
+        }
+      }
+      request.add(afterFile);
+      if (cancelToken.canceled) {
+        client.close(force: true);
+        throw const _ConsultUploadCanceledException();
+      }
+      final uploadResponse = await request.close();
+      final body = await utf8.decoder.bind(uploadResponse).join();
+      if (uploadResponse.statusCode < 200 || uploadResponse.statusCode >= 300) {
+        throw _ChatApiException(body.isEmpty
+            ? 'No pude subir el archivo.'
+            : 'No pude subir el archivo: $body');
+      }
+      onProgress(1);
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  void _cancelConsultUpload(String clientKey) {
+    _consultUploadCancelTokens[clientKey]?.cancel();
+  }
+
+  Future<void> _retryFailedConsultMessage(String clientKey) async {
+    final sessionId = _consultSessionId;
+    if (sessionId == null || _consultClosed) return;
+    final entries = await _ConsultOutboxStore.entriesForSession(sessionId);
+    _ConsultOutboxEntry? entry;
+    for (final candidate in entries) {
+      if (candidate.clientKey == clientKey) {
+        entry = candidate;
+        break;
+      }
+    }
+    if (entry == null) return;
+    await _sendConsultPayload(
+      text: entry.text,
+      pendingAttachments: entry.attachments,
+      clientKeyOverride: entry.clientKey,
+      retrying: true,
+      attemptsOverride: entry.attempts,
+    );
+  }
+
+  bool _isRetryableConsultErrorCode(String code) => !{
+        'auth',
+        'too_large',
+        'unsupported_media',
+        'session_closed'
+      }.contains(code);
+
+  DateTime _nextConsultRetryAt(int attempts) {
+    final seconds = math.min(60, math.pow(2, math.min(attempts, 6)).toInt());
+    return DateTime.now().add(
+        Duration(seconds: seconds, milliseconds: math.Random().nextInt(750)));
+  }
+
+  void _scheduleConsultOutboxRetry(String sessionId, DateTime nextRetryAt) {
+    final delay = nextRetryAt.difference(DateTime.now());
+    unawaited(Future<void>.delayed(
+      delay.isNegative ? Duration.zero : delay,
+      () async {
+        if (!mounted || _consultClosed) return;
+        await _flushConsultOutbox(sessionId);
+      },
+    ));
+  }
+
+  Uri _signedStorageUploadUri({
+    required String bucket,
+    required String path,
+    required String token,
+  }) {
+    final base = Uri.parse(Environment.supabaseUrl);
+    final encodedPath = path
+        .split('/')
+        .where((segment) => segment.isNotEmpty)
+        .map(Uri.encodeComponent)
+        .join('/');
+    final normalizedBasePath = base.path.endsWith('/')
+        ? base.path.substring(0, base.path.length - 1)
+        : base.path;
+    return base.replace(
+      path:
+          '$normalizedBasePath/storage/v1/object/upload/sign/${Uri.encodeComponent(bucket)}/$encodedPath',
+      queryParameters: {'token': token},
+    );
+  }
+
+  String _multipartEscape(String value) => value.replaceAll('"', r'\"');
+
+  void _updateConsultAttachmentUploadProgress(
+      String clientKey, String localPath, double progress) {
+    if (!mounted) return;
+    setState(() {
+      final messageIndex = _messages.indexWhere(
+        (message) => message.clientKey == clientKey || message.id == clientKey,
+      );
+      if (messageIndex < 0) return;
+      final message = _messages[messageIndex];
+      _messages[messageIndex] = message.copyWith(
+        attachments: message.attachments
+            .map((attachment) =>
+                attachment.localPath == localPath || attachment.id == localPath
+                    ? attachment.copyWith(uploadProgress: progress)
+                    : attachment)
+            .toList(growable: false),
+      );
+    });
   }
 
   Future<_ConsultAttachment?> _refreshConsultAttachmentDownloadUrl(
       _ConsultAttachment attachment) async {
     final sessionId = _consultSessionId;
     if (sessionId == null) return null;
+    final startedAt = DateTime.now();
     try {
       final response = await _getGatewayJson(
         '/sessions/${Uri.encodeComponent(sessionId)}/attachments/${Uri.encodeComponent(attachment.id)}/download-url',
       );
       final attachmentJson = _asMap(response['attachment']);
       if (attachmentJson == null) return null;
+      _emitConsultTelemetry(
+        'playback_refresh',
+        attachmentId: attachment.id,
+        durationMs: DateTime.now().difference(startedAt).inMilliseconds,
+        metadata: {
+          'playbackKind': attachment.kind.name,
+          'status': 'success',
+        },
+      );
       return _ConsultAttachment.fromJson(attachmentJson);
     } catch (error) {
       _aiChatLog('attachment refresh failed: ${error.runtimeType} $error');
+      _emitConsultTelemetry(
+        'playback_refresh',
+        attachmentId: attachment.id,
+        durationMs: DateTime.now().difference(startedAt).inMilliseconds,
+        errorCode: _telemetryErrorCode(error),
+        metadata: {
+          'playbackKind': attachment.kind.name,
+          'status': 'failed',
+        },
+      );
       return null;
     }
+  }
+
+  void _emitConsultTelemetry(
+    String eventType, {
+    String? clientKey,
+    String? messageId,
+    String? attachmentId,
+    int? durationMs,
+    int? valueMs,
+    int? valueCount,
+    String? errorCode,
+    Map<String, Object?> metadata = const {},
+  }) {
+    final sessionId = _consultSessionId;
+    if (sessionId == null) return;
+    unawaited(_postGatewayJson(
+      '/sessions/${Uri.encodeComponent(sessionId)}/telemetry',
+      {
+        'eventType': eventType,
+        if (clientKey != null) 'clientKey': clientKey,
+        if (messageId != null) 'messageId': messageId,
+        if (attachmentId != null) 'attachmentId': attachmentId,
+        if (durationMs != null) 'durationMs': durationMs,
+        if (valueMs != null) 'valueMs': valueMs,
+        if (valueCount != null) 'valueCount': valueCount,
+        if (errorCode != null) 'errorCode': errorCode,
+        if (metadata.isNotEmpty) 'metadata': metadata,
+      },
+    ).catchError((_) => <String, dynamic>{}));
+  }
+
+  String _telemetryErrorCode(Object error) {
+    final raw = error.toString().toLowerCase();
+    if (raw.contains('timeout') || raw.contains('tardó')) return 'timeout';
+    if (raw.contains('socket') || raw.contains('conexión')) return 'network';
+    if (raw.contains('unauthorized') || raw.contains('sesión')) return 'auth';
+    if (raw.contains('too_large') || raw.contains('grande')) return 'too_large';
+    if (raw.contains('unsupported')) return 'unsupported_media';
+    if (raw.contains('closed') || raw.contains('terminó')) {
+      return 'session_closed';
+    }
+    return error.runtimeType.toString();
   }
 
   Future<void> _pickConsultMedia() async {
@@ -790,16 +1453,13 @@ class _ChatScreenState extends State<ChatScreen> {
           attachments.add(await _pendingAttachmentFromXFile(
               file, _ConsultAttachmentKind.image));
         }
-        await _sendConsultPayload(pendingAttachments: attachments);
+        _stageConsultAttachments(attachments);
       } else {
         final file = await _imagePicker.pickVideo(source: ImageSource.gallery);
         if (file == null) return;
-        await _sendConsultPayload(
-          pendingAttachments: [
-            await _pendingAttachmentFromXFile(
-                file, _ConsultAttachmentKind.video)
-          ],
-        );
+        _stageConsultAttachments([
+          await _pendingAttachmentFromXFile(file, _ConsultAttachmentKind.video)
+        ]);
       }
     } catch (error) {
       if (!mounted) return;
@@ -809,18 +1469,104 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  void _stageConsultAttachments(List<_PendingConsultAttachment> attachments) {
+    if (attachments.isEmpty || !mounted) return;
+    final beforeCount = _stagedConsultAttachments.length;
+    setState(() {
+      final remaining = math.max(0, 6 - _stagedConsultAttachments.length);
+      _stagedConsultAttachments.addAll(attachments.take(remaining));
+    });
+    _announceForAccessibility(
+      attachments.length == 1
+          ? 'Archivo adjunto listo para enviar.'
+          : '${attachments.length} archivos adjuntos listos para enviar.',
+    );
+    if (beforeCount + attachments.length > 6) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Puedes adjuntar hasta 6 archivos.')),
+      );
+    }
+  }
+
+  void _removeStagedConsultAttachment(_PendingConsultAttachment attachment) {
+    setState(() {
+      _stagedConsultAttachments
+          .removeWhere((item) => item.path == attachment.path);
+    });
+    _announceForAccessibility('Archivo adjunto eliminado.');
+  }
+
   Future<_PendingConsultAttachment> _pendingAttachmentFromXFile(
       XFile file, _ConsultAttachmentKind kind) async {
-    final byteSize = await file.length();
-    final contentType = _contentTypeForFile(file.path, kind);
+    final preparedFile = await _prepareConsultMediaFile(file, kind);
+    final byteSize = await preparedFile.length();
+    final contentType = _contentTypeForFile(preparedFile.path, kind);
     _validatePendingAttachment(kind, byteSize, null);
     return _PendingConsultAttachment(
       kind: kind,
-      path: file.path,
-      fileName: file.name,
+      path: preparedFile.path,
+      fileName: preparedFile.name,
       contentType: contentType,
       byteSize: byteSize,
     );
+  }
+
+  Future<XFile> _prepareConsultMediaFile(
+      XFile file, _ConsultAttachmentKind kind) async {
+    if (kind == _ConsultAttachmentKind.image) {
+      return _compressConsultImage(file);
+    }
+    if (kind == _ConsultAttachmentKind.video) {
+      return _compressConsultVideo(file);
+    }
+    return file;
+  }
+
+  Future<XFile> _compressConsultImage(XFile file) async {
+    try {
+      final originalSize = await file.length();
+      final dir = await getTemporaryDirectory();
+      final targetPath =
+          '${dir.path}/consult-image-${DateTime.now().microsecondsSinceEpoch}.jpg';
+      final compressed = await FlutterImageCompress.compressAndGetFile(
+        file.path,
+        targetPath,
+        quality: 82,
+        minWidth: 1800,
+        minHeight: 1800,
+        format: CompressFormat.jpeg,
+      );
+      if (compressed == null) return file;
+      final compressedSize = await compressed.length();
+      return compressedSize > 0 && compressedSize < originalSize
+          ? compressed
+          : file;
+    } catch (error) {
+      _aiChatLog('image compression skipped: ${error.runtimeType} $error');
+      return file;
+    }
+  }
+
+  Future<XFile> _compressConsultVideo(XFile file) async {
+    try {
+      final originalSize = await file.length();
+      final mediaInfo = await VideoCompress.compressVideo(
+        file.path,
+        quality: VideoQuality.MediumQuality,
+        deleteOrigin: false,
+        includeAudio: true,
+      );
+      final compressedPath = mediaInfo?.path;
+      if (compressedPath == null || compressedPath.isEmpty) return file;
+      final compressed = XFile(compressedPath);
+      final compressedSize = await compressed.length();
+      return compressedSize > 0 && compressedSize < originalSize
+          ? compressed
+          : file;
+    } catch (error) {
+      _aiChatLog('video compression skipped: ${error.runtimeType} $error');
+      return file;
+    }
   }
 
   bool get _canSendConsultMedia =>
@@ -848,8 +1594,11 @@ class _ChatScreenState extends State<ChatScreen> {
         _recordingVoice = true;
         _recordingStartedAt = DateTime.now();
       });
+      unawaited(HapticFeedback.mediumImpact());
+      _announceForAccessibility('Grabando nota de voz.');
     } catch (error) {
       if (!mounted) return;
+      _announceForAccessibility('No se pudo iniciar la grabación.');
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('No pude grabar: $error')),
       );
@@ -863,6 +1612,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _recordingVoice = false;
       _recordingStartedAt = null;
     });
+    unawaited(HapticFeedback.lightImpact());
     final path = await _audioRecorder.stop();
     if (!send || path == null) return;
     final durationMs = startedAt == null
@@ -874,24 +1624,33 @@ class _ChatScreenState extends State<ChatScreen> {
       final byteSize = await file.length();
       _validatePendingAttachment(
           _ConsultAttachmentKind.voice, byteSize, durationMs);
-      await _sendConsultPayload(
-        pendingAttachments: [
-          _PendingConsultAttachment(
-            kind: _ConsultAttachmentKind.voice,
-            path: path,
-            fileName: path.split('/').last,
-            contentType: 'audio/mp4',
-            byteSize: byteSize,
-            durationMs: durationMs,
-          ),
-        ],
-      );
+      _stageConsultAttachments([
+        _PendingConsultAttachment(
+          kind: _ConsultAttachmentKind.voice,
+          path: path,
+          fileName: path.split('/').last,
+          contentType: 'audio/mp4',
+          byteSize: byteSize,
+          durationMs: durationMs,
+        ),
+      ]);
+      _announceForAccessibility('Nota de voz lista para enviar.');
     } catch (error) {
       if (!mounted) return;
+      _announceForAccessibility('No se pudo adjuntar la nota de voz.');
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('No se pudo enviar la nota de voz: $error')),
       );
     }
+  }
+
+  void _announceForAccessibility(String message) {
+    if (!mounted) return;
+    unawaited(SemanticsService.sendAnnouncement(
+      View.of(context),
+      message,
+      Directionality.of(context),
+    ));
   }
 
   Future<void> _endConsultFromOwner() async {
@@ -2027,29 +2786,46 @@ class _ChatScreenState extends State<ChatScreen> {
         }
         final messageIndex = index - introCount;
         final message = _messages[messageIndex];
+        final previousMessage =
+            messageIndex > 0 ? _messages[messageIndex - 1] : null;
+        final showDateSeparator =
+            _shouldShowDateSeparator(previousMessage, message);
         final isFirstUserMessage = message.isUser &&
             !_messages.take(messageIndex).any((message) => message.isUser);
         final userTurnsBeforeOrAtMessage = _messages
             .take(messageIndex + 1)
             .where((message) => message.isUser)
             .length;
-        return _AnimatedMessageEntry(
-          key: ValueKey(message.id),
-          isUser: message.isUser,
-          isFirstUserMessage: isFirstUserMessage,
-          child: _MessageBubble(
-            message: message,
-            vetName: _consultVetName,
-            sending: _isSending,
-            canShowActions: userTurnsBeforeOrAtMessage >= 2,
-            onServiceSelected: _activateService,
-            onOneOffPurchaseSelected: _purchaseSingleSession,
-            onUpgradeSelected: _openSubscriptionUpgrade,
-            onPlanUpgradeConfirmed: _confirmSubscriptionUpgrade,
-            onRejoinVideo: _openVideoFromChat,
-            onSurveyAction: _handleSurveyAction,
-            onRefreshAttachment: _refreshConsultAttachmentDownloadUrl,
-          ),
+        return Column(
+          key: ValueKey('thread-${message.id}'),
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (showDateSeparator)
+              _ChatDateSeparator(date: message.createdAt ?? DateTime.now()),
+            if (_unreadConsultMarkerMessageId == message.id)
+              const _UnreadMessagesMarker(),
+            _AnimatedMessageEntry(
+              key: ValueKey(message.id),
+              isUser: message.isUser,
+              isFirstUserMessage: isFirstUserMessage,
+              child: _MessageBubble(
+                message: message,
+                vetName: _consultVetName,
+                sending: _isSending,
+                canShowActions: userTurnsBeforeOrAtMessage >= 2,
+                onServiceSelected: _activateService,
+                onOneOffPurchaseSelected: _purchaseSingleSession,
+                onUpgradeSelected: _openSubscriptionUpgrade,
+                onPlanUpgradeConfirmed: _confirmSubscriptionUpgrade,
+                onRejoinVideo: _openVideoFromChat,
+                onSurveyAction: _handleSurveyAction,
+                onRefreshAttachment: _refreshConsultAttachmentDownloadUrl,
+                onCancelUpload: _cancelConsultUpload,
+                onRetryMessage: (clientKey) =>
+                    unawaited(_retryFailedConsultMessage(clientKey)),
+              ),
+            ),
+          ],
         );
       },
     );
@@ -2064,6 +2840,13 @@ class _ChatScreenState extends State<ChatScreen> {
         Positioned.fill(
           child: fadedMessageList,
         ),
+        if (_showConsultDraftRestoredBanner)
+          Positioned(
+            left: 18,
+            right: 18,
+            bottom: bottomInset + 88,
+            child: _DraftRestoredBanner(onDismiss: _dismissConsultDraftBanner),
+          ),
         Positioned(
           top: 0,
           left: 0,
@@ -2077,11 +2860,12 @@ class _ChatScreenState extends State<ChatScreen> {
                   : null,
               ending: _endingConsult,
               statusText: _isConsultChatRoute
-                  ? _vetTyping
-                      ? 'veterinario escribiendo...'
-                      : _vetOnline
-                          ? 'veterinario en línea'
-                          : 'consulta activa'
+                  ? _consultRealtimeStatus ??
+                      (_vetTyping
+                          ? 'veterinario escribiendo...'
+                          : _vetOnline
+                              ? 'veterinario en línea'
+                              : 'consulta activa')
                   : null,
             ),
           ),
@@ -2098,9 +2882,11 @@ class _ChatScreenState extends State<ChatScreen> {
                 (_consultLoading && _messages.isEmpty),
             mediaEnabled: _canSendConsultMedia,
             recording: _recordingVoice,
+            stagedAttachments: _stagedConsultAttachments,
             includeBottomInset: true,
             onSend: _sendComposerMessage,
             onPickMedia: _pickConsultMedia,
+            onRemoveAttachment: _removeStagedConsultAttachment,
             onMicStart: _startVoiceRecording,
             onMicStop: _stopVoiceRecording,
           ),
@@ -2153,6 +2939,120 @@ class _MessageOpacityFade extends StatelessWidget {
         ).createShader(bounds);
       },
       child: child,
+    );
+  }
+}
+
+class _ChatDateSeparator extends StatelessWidget {
+  const _ChatDateSeparator({required this.date});
+
+  final DateTime date;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Center(
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            child: Text(
+              _chatDateLabel(date),
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.68),
+                fontSize: 11,
+                fontFamily: 'ABCDiatype',
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _UnreadMessagesMarker extends StatelessWidget {
+  const _UnreadMessagesMarker();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        children: [
+          Expanded(child: Divider(color: Colors.white.withValues(alpha: 0.18))),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            child: Text(
+              'Nuevos',
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.72),
+                fontSize: 11,
+                fontFamily: 'ABCDiatype',
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          Expanded(child: Divider(color: Colors.white.withValues(alpha: 0.18))),
+        ],
+      ),
+    );
+  }
+}
+
+class _DraftRestoredBanner extends StatelessWidget {
+  const _DraftRestoredBanner({required this.onDismiss});
+
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      liveRegion: true,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.82),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+          child: Row(
+            children: [
+              const Icon(Icons.restore_rounded, color: Colors.white, size: 17),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Borrador restaurado',
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.86),
+                    fontSize: 12,
+                    fontFamily: 'ABCDiatype',
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              IconButton(
+                tooltip: 'Ocultar aviso de borrador',
+                onPressed: onDismiss,
+                visualDensity: VisualDensity.compact,
+                style: IconButton.styleFrom(
+                  fixedSize: const Size(36, 36),
+                  padding: EdgeInsets.zero,
+                ),
+                icon: const Icon(Icons.close_rounded,
+                    color: Colors.white, size: 18),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -2220,18 +3120,25 @@ class _ChatHeader extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(18, 24, 18, 0),
       child: Row(
         children: [
-          GestureDetector(
-            onTap: onBack,
-            behavior: HitTestBehavior.opaque,
-            child: const SizedBox(
-              width: 24,
-              height: 42,
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Icon(
-                  Icons.arrow_back_ios_new_rounded,
-                  color: Colors.white,
-                  size: 22,
+          Semantics(
+            button: true,
+            label: 'Volver al inicio',
+            child: Tooltip(
+              message: 'Volver',
+              child: GestureDetector(
+                onTap: onBack,
+                behavior: HitTestBehavior.opaque,
+                child: const SizedBox(
+                  width: 44,
+                  height: 44,
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Icon(
+                      Icons.arrow_back_ios_new_rounded,
+                      color: Colors.white,
+                      size: 22,
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -2253,13 +3160,19 @@ class _ChatHeader extends StatelessWidget {
           ] else
             const Spacer(),
           if (onEnd != null)
-            TextButton(
-              onPressed: ending ? null : onEnd,
-              style: TextButton.styleFrom(
-                foregroundColor: Colors.white,
-                disabledForegroundColor: Colors.white.withValues(alpha: 0.35),
+            Semantics(
+              button: true,
+              enabled: !ending,
+              label: ending ? 'Cerrando consulta' : 'Cerrar consulta',
+              child: TextButton(
+                onPressed: ending ? null : onEnd,
+                style: TextButton.styleFrom(
+                  foregroundColor: Colors.white,
+                  disabledForegroundColor: Colors.white.withValues(alpha: 0.35),
+                  minimumSize: const Size(44, 44),
+                ),
+                child: Text(ending ? 'cerrando...' : 'cerrar'),
               ),
-              child: Text(ending ? 'cerrando...' : 'cerrar'),
             ),
         ],
       ),
@@ -2318,6 +3231,8 @@ class _MessageBubble extends StatelessWidget {
     required this.onPlanUpgradeConfirmed,
     required this.onRejoinVideo,
     required this.onSurveyAction,
+    required this.onCancelUpload,
+    required this.onRetryMessage,
     this.onRefreshAttachment,
   });
 
@@ -2334,6 +3249,8 @@ class _MessageBubble extends StatelessWidget {
       onPlanUpgradeConfirmed;
   final ValueChanged<String> onRejoinVideo;
   final ValueChanged<_SurveyActionChoice> onSurveyAction;
+  final ValueChanged<String> onCancelUpload;
+  final ValueChanged<String> onRetryMessage;
   final Future<_ConsultAttachment?> Function(_ConsultAttachment attachment)?
       onRefreshAttachment;
 
@@ -2395,6 +3312,8 @@ class _MessageBubble extends StatelessWidget {
                           const SizedBox(height: 10),
                         _ConsultAttachmentStrip(
                           attachments: message.attachments,
+                          clientKey: message.clientKey,
+                          onCancelUpload: onCancelUpload,
                           onRefreshAttachment: onRefreshAttachment,
                         ),
                       ],
@@ -2411,6 +3330,22 @@ class _MessageBubble extends StatelessWidget {
                     fontSize: 10,
                     fontFamily: 'ABCDiatype',
                   ),
+                ),
+              ],
+              if (isUser &&
+                  message.deliveryState == 'failed' &&
+                  message.clientKey != null) ...[
+                const SizedBox(height: 5),
+                TextButton.icon(
+                  onPressed: () => onRetryMessage(message.clientKey!),
+                  style: TextButton.styleFrom(
+                    foregroundColor: Colors.white,
+                    minimumSize: const Size(44, 36),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  ),
+                  icon: const Icon(Icons.refresh_rounded, size: 16),
+                  label: const Text('Reintentar'),
                 ),
               ],
               if (!isUser &&
@@ -2456,10 +3391,14 @@ class _MessageBubble extends StatelessWidget {
 class _ConsultAttachmentStrip extends StatelessWidget {
   const _ConsultAttachmentStrip({
     required this.attachments,
+    required this.clientKey,
+    required this.onCancelUpload,
     this.onRefreshAttachment,
   });
 
   final List<_ConsultAttachment> attachments;
+  final String? clientKey;
+  final ValueChanged<String> onCancelUpload;
   final Future<_ConsultAttachment?> Function(_ConsultAttachment attachment)?
       onRefreshAttachment;
 
@@ -2473,6 +3412,8 @@ class _ConsultAttachmentStrip extends StatelessWidget {
                 padding: const EdgeInsets.only(bottom: 6),
                 child: _ConsultAttachmentPreview(
                   attachment: attachment,
+                  clientKey: clientKey,
+                  onCancelUpload: onCancelUpload,
                   onRefreshAttachment: onRefreshAttachment,
                 ),
               ))
@@ -2484,10 +3425,14 @@ class _ConsultAttachmentStrip extends StatelessWidget {
 class _ConsultAttachmentPreview extends StatelessWidget {
   const _ConsultAttachmentPreview({
     required this.attachment,
+    required this.clientKey,
+    required this.onCancelUpload,
     this.onRefreshAttachment,
   });
 
   final _ConsultAttachment attachment;
+  final String? clientKey;
+  final ValueChanged<String> onCancelUpload;
   final Future<_ConsultAttachment?> Function(_ConsultAttachment attachment)?
       onRefreshAttachment;
 
@@ -2507,7 +3452,23 @@ class _ConsultAttachmentPreview extends StatelessWidget {
           : Image.network(url!, fit: BoxFit.cover);
       return ClipRRect(
         borderRadius: BorderRadius.circular(14),
-        child: SizedBox(width: 220, height: 160, child: image),
+        child: SizedBox(
+          width: 220,
+          height: 160,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              image,
+              if (attachment.isUploading)
+                _AttachmentUploadOverlay(
+                  attachment: attachment,
+                  onCancel: clientKey == null
+                      ? null
+                      : () => onCancelUpload(clientKey!),
+                ),
+            ],
+          ),
+        ),
       );
     }
     if (attachment.kind == _ConsultAttachmentKind.voice) {
@@ -2544,7 +3505,7 @@ class _ConsultAttachmentPreview extends StatelessWidget {
           Flexible(
             child: Text(
               attachment.isUploading
-                  ? 'Subiendo $label...'
+                  ? 'Subiendo $label ${_uploadProgressText(attachment)}'
                   : _attachmentLabel(label, attachment),
               style: const TextStyle(
                 color: Colors.white,
@@ -2555,6 +3516,69 @@ class _ConsultAttachmentPreview extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _AttachmentUploadOverlay extends StatelessWidget {
+  const _AttachmentUploadOverlay({required this.attachment, this.onCancel});
+
+  final _ConsultAttachment attachment;
+  final VoidCallback? onCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    final progress = attachment.uploadProgress.clamp(0.0, 1.0).toDouble();
+    return DecoratedBox(
+      decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.42)),
+      child: Align(
+        alignment: Alignment.bottomLeft,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Subiendo ${_uploadProgressText(attachment)}',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  if (onCancel != null)
+                    IconButton(
+                      tooltip: 'Cancelar carga',
+                      onPressed: onCancel,
+                      visualDensity: VisualDensity.compact,
+                      style: IconButton.styleFrom(
+                        fixedSize: const Size(36, 36),
+                        padding: EdgeInsets.zero,
+                      ),
+                      icon: const Icon(Icons.close_rounded,
+                          color: Colors.white, size: 18),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 7),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(99),
+                child: LinearProgressIndicator(
+                  value: progress <= 0 ? null : progress,
+                  minHeight: 4,
+                  backgroundColor: Colors.white.withValues(alpha: 0.22),
+                  valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -2725,6 +3749,11 @@ class _ConsultVoiceNoteBubbleState extends State<_ConsultVoiceNoteBubble> {
             : _playing
                 ? Icons.pause_rounded
                 : Icons.play_arrow_rounded;
+    final playLabel = _failed
+        ? 'Reintentar nota de voz'
+        : _playing
+            ? 'Pausar nota de voz'
+            : 'Reproducir nota de voz';
 
     return Container(
       width: 232,
@@ -2736,24 +3765,39 @@ class _ConsultVoiceNoteBubbleState extends State<_ConsultVoiceNoteBubble> {
       ),
       child: Row(
         children: [
-          GestureDetector(
-            onTap: _togglePlayback,
-            child: Container(
-              width: 34,
-              height: 34,
-              decoration: const BoxDecoration(
-                color: Colors.white,
-                shape: BoxShape.circle,
-              ),
-              child: _loading
-                  ? const Padding(
-                      padding: EdgeInsets.all(9),
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: Colors.black,
+          Semantics(
+            button: true,
+            enabled: !_loading && !widget.attachment.isUploading,
+            label: playLabel,
+            child: Tooltip(
+              message: playLabel,
+              child: GestureDetector(
+                onTap: _togglePlayback,
+                behavior: HitTestBehavior.opaque,
+                child: SizedBox(
+                  width: 44,
+                  height: 44,
+                  child: Center(
+                    child: Container(
+                      width: 34,
+                      height: 34,
+                      decoration: const BoxDecoration(
+                        color: Colors.white,
+                        shape: BoxShape.circle,
                       ),
-                    )
-                  : Icon(icon, color: Colors.black, size: 21),
+                      child: _loading
+                          ? const Padding(
+                              padding: EdgeInsets.all(9),
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.black,
+                              ),
+                            )
+                          : Icon(icon, color: Colors.black, size: 21),
+                    ),
+                  ),
+                ),
+              ),
             ),
           ),
           const SizedBox(width: 10),
@@ -2768,7 +3812,7 @@ class _ConsultVoiceNoteBubbleState extends State<_ConsultVoiceNoteBubble> {
                   _failed
                       ? 'Toca para reintentar'
                       : widget.attachment.isUploading
-                          ? 'Subiendo nota de voz...'
+                          ? 'Subiendo nota de voz ${_uploadProgressText(widget.attachment)}'
                           : durationText,
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.7),
@@ -2967,10 +4011,15 @@ class _ConsultVideoBubbleState extends State<_ConsultVideoBubble> {
     final label = _failed
         ? 'Toca para reintentar'
         : widget.attachment.isUploading
-            ? 'Subiendo video...'
+            ? 'Subiendo video ${_uploadProgressText(widget.attachment)}'
             : duration.inMilliseconds > 0
                 ? '${_formatVoiceDuration(position)} / ${_formatVoiceDuration(duration)}'
                 : _attachmentLabel('Video', widget.attachment);
+    final playLabel = _failed
+        ? 'Reintentar video'
+        : playing
+            ? 'Pausar video'
+            : 'Reproducir video';
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(14),
@@ -2978,85 +4027,95 @@ class _ConsultVideoBubbleState extends State<_ConsultVideoBubble> {
         width: 232,
         child: AspectRatio(
           aspectRatio: aspectRatio,
-          child: GestureDetector(
-            onTap: _togglePlayback,
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                if (initialized && controller != null)
-                  VideoPlayer(controller)
-                else
-                  Container(color: Colors.white.withValues(alpha: 0.08)),
-                if (overlayVisible)
-                  Container(color: Colors.black.withValues(alpha: 0.34)),
-                Center(
-                  child: Container(
-                    width: 44,
-                    height: 44,
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.94),
-                      shape: BoxShape.circle,
-                    ),
-                    child: _loading
-                        ? const Padding(
-                            padding: EdgeInsets.all(12),
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.black,
-                            ),
-                          )
-                        : Icon(icon, color: Colors.black, size: 26),
-                  ),
-                ),
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: [
-                          Colors.black.withValues(alpha: 0),
-                          Colors.black.withValues(alpha: 0.65),
-                        ],
+          child: Semantics(
+            button: true,
+            enabled: !_loading,
+            label: playLabel,
+            value: label,
+            child: Tooltip(
+              message: playLabel,
+              child: GestureDetector(
+                onTap: _togglePlayback,
+                behavior: HitTestBehavior.opaque,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    if (initialized && controller != null)
+                      VideoPlayer(controller)
+                    else
+                      Container(color: Colors.white.withValues(alpha: 0.08)),
+                    if (overlayVisible)
+                      Container(color: Colors.black.withValues(alpha: 0.34)),
+                    Center(
+                      child: Container(
+                        width: 44,
+                        height: 44,
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.94),
+                          shape: BoxShape.circle,
+                        ),
+                        child: _loading
+                            ? const Padding(
+                                padding: EdgeInsets.all(12),
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.black,
+                                ),
+                              )
+                            : Icon(icon, color: Colors.black, size: 26),
                       ),
                     ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(999),
-                          child: LinearProgressIndicator(
-                            minHeight: 3,
-                            value: progress,
-                            backgroundColor:
-                                Colors.white.withValues(alpha: 0.24),
-                            valueColor: const AlwaysStoppedAnimation<Color>(
-                                Colors.white),
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 8),
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [
+                              Colors.black.withValues(alpha: 0),
+                              Colors.black.withValues(alpha: 0.65),
+                            ],
                           ),
                         ),
-                        const SizedBox(height: 5),
-                        Text(
-                          label,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: Colors.white.withValues(alpha: 0.86),
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            height: 1,
-                          ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(999),
+                              child: LinearProgressIndicator(
+                                minHeight: 3,
+                                value: progress,
+                                backgroundColor:
+                                    Colors.white.withValues(alpha: 0.24),
+                                valueColor: const AlwaysStoppedAnimation<Color>(
+                                    Colors.white),
+                              ),
+                            ),
+                            const SizedBox(height: 5),
+                            Text(
+                              label,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: Colors.white.withValues(alpha: 0.86),
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                height: 1,
+                              ),
+                            ),
+                          ],
                         ),
-                      ],
+                      ),
                     ),
-                  ),
+                  ],
                 ),
-              ],
+              ),
             ),
           ),
         ),
@@ -3376,25 +4435,39 @@ class _ServiceButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: enabled ? onTap : null,
-      child: AnimatedOpacity(
-        duration: const Duration(milliseconds: 160),
-        opacity: enabled ? 1 : 0.45,
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(30),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 9),
-            child: Text(
-              label,
-              style: const TextStyle(
-                color: Colors.black,
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-                height: 1,
+    return Semantics(
+      button: true,
+      enabled: enabled,
+      selected: selected,
+      label: label,
+      child: GestureDetector(
+        onTap: enabled ? onTap : null,
+        behavior: HitTestBehavior.opaque,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: AnimatedOpacity(
+              duration: const Duration(milliseconds: 160),
+              opacity: enabled ? 1 : 0.45,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(30),
+                ),
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 13, vertical: 9),
+                  child: Text(
+                    label,
+                    style: const TextStyle(
+                      color: Colors.black,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                      height: 1,
+                    ),
+                  ),
+                ),
               ),
             ),
           ),
@@ -3439,9 +4512,11 @@ class _ChatComposer extends StatelessWidget {
     required this.sending,
     required this.mediaEnabled,
     required this.recording,
+    required this.stagedAttachments,
     required this.includeBottomInset,
     required this.onSend,
     required this.onPickMedia,
+    required this.onRemoveAttachment,
     required this.onMicStart,
     required this.onMicStop,
   });
@@ -3451,9 +4526,11 @@ class _ChatComposer extends StatelessWidget {
   final bool sending;
   final bool mediaEnabled;
   final bool recording;
+  final List<_PendingConsultAttachment> stagedAttachments;
   final bool includeBottomInset;
   final VoidCallback onSend;
   final VoidCallback onPickMedia;
+  final ValueChanged<_PendingConsultAttachment> onRemoveAttachment;
   final VoidCallback onMicStart;
   final Future<void> Function({bool send}) onMicStop;
 
@@ -3463,121 +4540,299 @@ class _ChatComposer extends StatelessWidget {
         includeBottomInset ? MediaQuery.paddingOf(context).bottom : 0.0;
     return Padding(
       padding: EdgeInsets.fromLTRB(18, 8, 18, 14 + bottomInset),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: 46, maxHeight: 150),
-        child: AnimatedBuilder(
-          animation: focusNode,
-          builder: (context, child) {
-            return _ComposerFrame(
-              active: focusNode.hasFocus || sending,
-              thinking: sending,
-              child: child!,
-            );
-          },
-          child: Padding(
-            padding:
-                const EdgeInsets.only(left: 18, right: 6, top: 3, bottom: 3),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: controller,
-                    focusNode: focusNode,
-                    enabled: !sending,
-                    cursorColor: Colors.white,
-                    keyboardType: TextInputType.multiline,
-                    textCapitalization: TextCapitalization.sentences,
-                    textInputAction: TextInputAction.send,
-                    minLines: 1,
-                    maxLines: 6,
-                    onSubmitted: (_) => onSend(),
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w400,
-                      height: 1.25,
-                    ),
-                    decoration: InputDecoration(
-                      border: InputBorder.none,
-                      hintText: sending ? 'Pensando...' : 'escribir mensaje...',
-                      hintStyle: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.32),
-                        fontSize: 14,
-                        fontWeight: FontWeight.w400,
-                        height: 1.25,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (stagedAttachments.isNotEmpty) ...[
+            _ComposerAttachmentTray(
+              attachments: stagedAttachments,
+              sending: sending,
+              onRemove: onRemoveAttachment,
+            ),
+            const SizedBox(height: 8),
+          ],
+          ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 46, maxHeight: 150),
+            child: AnimatedBuilder(
+              animation: focusNode,
+              builder: (context, child) {
+                return _ComposerFrame(
+                  active: focusNode.hasFocus || sending,
+                  thinking: sending,
+                  child: child!,
+                );
+              },
+              child: Padding(
+                padding: const EdgeInsets.only(
+                    left: 18, right: 6, top: 3, bottom: 3),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: controller,
+                        focusNode: focusNode,
+                        enabled: !sending,
+                        cursorColor: Colors.white,
+                        keyboardType: TextInputType.multiline,
+                        textCapitalization: TextCapitalization.sentences,
+                        textInputAction: TextInputAction.send,
+                        minLines: 1,
+                        maxLines: 6,
+                        onSubmitted: (_) => onSend(),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w400,
+                          height: 1.25,
+                        ),
+                        decoration: InputDecoration(
+                          border: InputBorder.none,
+                          hintText:
+                              sending ? 'Pensando...' : 'escribir mensaje...',
+                          hintStyle: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.32),
+                            fontSize: 14,
+                            fontWeight: FontWeight.w400,
+                            height: 1.25,
+                          ),
+                        ),
                       ),
                     ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 5),
-                  child: IconButton(
-                    onPressed: mediaEnabled ? onPickMedia : null,
-                    visualDensity: VisualDensity.compact,
-                    style: IconButton.styleFrom(
-                      fixedSize: const Size(32, 32),
-                      padding: EdgeInsets.zero,
-                    ),
-                    icon: SvgPicture.asset(
-                      'assets/icons/image-video.svg',
-                      width: 17,
-                      height: 17,
-                      colorFilter: ColorFilter.mode(
-                        Colors.white
-                            .withValues(alpha: mediaEnabled ? 0.72 : 0.24),
-                        BlendMode.srcIn,
-                      ),
-                    ),
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 5),
-                  child: GestureDetector(
-                    onTapDown: mediaEnabled ? (_) => onMicStart() : null,
-                    onTapUp: mediaEnabled ? (_) => onMicStop() : null,
-                    onTapCancel:
-                        mediaEnabled ? () => onMicStop(send: false) : null,
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 140),
-                      width: 32,
-                      height: 32,
-                      decoration: BoxDecoration(
-                        color: recording ? Colors.white : Colors.transparent,
-                        shape: BoxShape.circle,
-                      ),
-                      child: Icon(
-                        Icons.mic_rounded,
-                        size: 18,
-                        color: recording
-                            ? Colors.black
-                            : Colors.white
+                    const SizedBox(width: 8),
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 5),
+                      child: IconButton(
+                        tooltip: 'Adjuntar imagen o video',
+                        onPressed: mediaEnabled ? onPickMedia : null,
+                        visualDensity: VisualDensity.compact,
+                        style: IconButton.styleFrom(
+                          fixedSize: const Size(44, 44),
+                          padding: EdgeInsets.zero,
+                        ),
+                        icon: SvgPicture.asset(
+                          'assets/icons/image-video.svg',
+                          width: 17,
+                          height: 17,
+                          colorFilter: ColorFilter.mode(
+                            Colors.white
                                 .withValues(alpha: mediaEnabled ? 0.72 : 0.24),
+                            BlendMode.srcIn,
+                          ),
+                        ),
                       ),
                     ),
-                  ),
-                ),
-                const SizedBox(width: 4),
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 1),
-                  child: IconButton.filled(
-                    onPressed: sending ? null : onSend,
-                    style: IconButton.styleFrom(
-                      backgroundColor: Colors.white,
-                      disabledBackgroundColor:
-                          Colors.white.withValues(alpha: 0.25),
-                      foregroundColor: Colors.black,
-                      fixedSize: const Size(38, 38),
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 5),
+                      child: Semantics(
+                        button: true,
+                        enabled: mediaEnabled,
+                        label: recording
+                            ? 'Soltar para adjuntar nota de voz'
+                            : 'Mantener presionado para grabar nota de voz',
+                        child: Tooltip(
+                          message: recording ? 'Soltar voz' : 'Grabar voz',
+                          child: GestureDetector(
+                            onTapDown:
+                                mediaEnabled ? (_) => onMicStart() : null,
+                            onTapUp: mediaEnabled ? (_) => onMicStop() : null,
+                            onTapCancel: mediaEnabled
+                                ? () => onMicStop(send: false)
+                                : null,
+                            behavior: HitTestBehavior.opaque,
+                            child: SizedBox(
+                              width: 44,
+                              height: 44,
+                              child: Center(
+                                child: AnimatedContainer(
+                                  duration: const Duration(milliseconds: 140),
+                                  width: 34,
+                                  height: 34,
+                                  decoration: BoxDecoration(
+                                    color: recording
+                                        ? Colors.white
+                                        : Colors.transparent,
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: Icon(
+                                    Icons.mic_rounded,
+                                    size: 18,
+                                    color: recording
+                                        ? Colors.black
+                                        : Colors.white.withValues(
+                                            alpha: mediaEnabled ? 0.72 : 0.24),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
                     ),
-                    icon: const Icon(Icons.arrow_upward_rounded, size: 19),
-                  ),
+                    const SizedBox(width: 4),
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 1),
+                      child: IconButton.filled(
+                        tooltip: 'Enviar mensaje',
+                        onPressed: sending ? null : onSend,
+                        style: IconButton.styleFrom(
+                          backgroundColor: Colors.white,
+                          disabledBackgroundColor:
+                              Colors.white.withValues(alpha: 0.25),
+                          foregroundColor: Colors.black,
+                          fixedSize: const Size(44, 44),
+                        ),
+                        icon: const Icon(Icons.arrow_upward_rounded, size: 19),
+                      ),
+                    ),
+                  ],
                 ),
-              ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ComposerAttachmentTray extends StatelessWidget {
+  const _ComposerAttachmentTray({
+    required this.attachments,
+    required this.sending,
+    required this.onRemove,
+  });
+
+  final List<_PendingConsultAttachment> attachments;
+  final bool sending;
+  final ValueChanged<_PendingConsultAttachment> onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 72,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: attachments.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (context, index) {
+          final attachment = attachments[index];
+          return _ComposerAttachmentChip(
+            attachment: attachment,
+            sending: sending,
+            onRemove: () => onRemove(attachment),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _ComposerAttachmentChip extends StatelessWidget {
+  const _ComposerAttachmentChip({
+    required this.attachment,
+    required this.sending,
+    required this.onRemove,
+  });
+
+  final _PendingConsultAttachment attachment;
+  final bool sending;
+  final VoidCallback onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = switch (attachment.kind) {
+      _ConsultAttachmentKind.image => 'Imagen',
+      _ConsultAttachmentKind.video => 'Video',
+      _ConsultAttachmentKind.voice => 'Voz',
+    };
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Container(
+          width: 142,
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.72),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
+          ),
+          child: Row(
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: SizedBox(
+                  width: 44,
+                  height: 44,
+                  child: attachment.kind == _ConsultAttachmentKind.image
+                      ? Image.file(File(attachment.path), fit: BoxFit.cover)
+                      : ColoredBox(
+                          color: Colors.white.withValues(alpha: 0.10),
+                          child: Icon(
+                            attachment.kind == _ConsultAttachmentKind.video
+                                ? Icons.play_arrow_rounded
+                                : Icons.mic_rounded,
+                            color: Colors.white,
+                            size: 22,
+                          ),
+                        ),
+                ),
+              ),
+              const SizedBox(width: 9),
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      sending ? 'Subiendo' : 'Listo',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.52),
+                        fontSize: 10,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        Positioned(
+          top: -13,
+          right: -13,
+          child: SizedBox(
+            width: 44,
+            height: 44,
+            child: Center(
+              child: IconButton.filled(
+                tooltip: 'Quitar adjunto',
+                onPressed: sending ? null : onRemove,
+                style: IconButton.styleFrom(
+                  backgroundColor: Colors.white,
+                  disabledBackgroundColor: Colors.white.withValues(alpha: 0.35),
+                  foregroundColor: Colors.black,
+                  fixedSize: const Size(30, 30),
+                  padding: EdgeInsets.zero,
+                ),
+                icon: const Icon(Icons.close_rounded, size: 15),
+              ),
             ),
           ),
         ),
-      ),
+      ],
     );
   }
 }
@@ -3730,8 +4985,38 @@ class _PendingConsultAttachment {
   final int byteSize;
   final int? durationMs;
 
+  factory _PendingConsultAttachment.fromJson(Map<String, dynamic> json) {
+    final kindRaw = json['kind']?.toString().toLowerCase();
+    final kind = switch (kindRaw) {
+      'video' => _ConsultAttachmentKind.video,
+      'voice' => _ConsultAttachmentKind.voice,
+      _ => _ConsultAttachmentKind.image,
+    };
+    return _PendingConsultAttachment(
+      kind: kind,
+      path: json['path']?.toString() ?? '',
+      fileName: json['fileName']?.toString() ??
+          json['file_name']?.toString() ??
+          'attachment',
+      contentType: json['contentType']?.toString() ??
+          json['content_type']?.toString() ??
+          'application/octet-stream',
+      byteSize: _asInt(json['byteSize'] ?? json['byte_size']) ?? 0,
+      durationMs: _asInt(json['durationMs'] ?? json['duration_ms']),
+    );
+  }
+
   Map<String, dynamic> toUploadBody() => {
         'kind': kind.name,
+        'fileName': fileName,
+        'contentType': contentType,
+        'byteSize': byteSize,
+        if (durationMs != null) 'durationMs': durationMs,
+      };
+
+  Map<String, dynamic> toJson() => {
+        'kind': kind.name,
+        'path': path,
         'fileName': fileName,
         'contentType': contentType,
         'byteSize': byteSize,
@@ -3746,7 +5031,216 @@ class _PendingConsultAttachment {
         durationMs: durationMs,
         localPath: path,
         status: 'uploading',
+        uploadProgress: 0,
       );
+}
+
+class _ConsultOutboxEntry {
+  const _ConsultOutboxEntry({
+    required this.sessionId,
+    required this.clientKey,
+    required this.text,
+    required this.attachments,
+    required this.status,
+    required this.attempts,
+    required this.createdAt,
+    required this.updatedAt,
+    this.lastError,
+    this.lastErrorCode,
+    this.nextRetryAt,
+  });
+
+  final String sessionId;
+  final String clientKey;
+  final String text;
+  final List<_PendingConsultAttachment> attachments;
+  final String status;
+  final int attempts;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+  final String? lastError;
+  final String? lastErrorCode;
+  final DateTime? nextRetryAt;
+
+  bool get retryDue =>
+      nextRetryAt == null || !nextRetryAt!.isAfter(DateTime.now());
+
+  factory _ConsultOutboxEntry.fromJson(Map<String, dynamic> json) {
+    return _ConsultOutboxEntry(
+      sessionId: json['sessionId']?.toString() ?? '',
+      clientKey: json['clientKey']?.toString() ?? '',
+      text: json['text']?.toString() ?? '',
+      attachments: (_asList(json['attachments']) ?? const [])
+          .map(_asMap)
+          .whereType<Map<String, dynamic>>()
+          .map(_PendingConsultAttachment.fromJson)
+          .where((attachment) => attachment.path.isNotEmpty)
+          .toList(growable: false),
+      status: json['status']?.toString() ?? 'queued',
+      attempts: _asInt(json['attempts']) ?? 0,
+      createdAt: _parseDateTime(json['createdAt']) ?? DateTime.now(),
+      updatedAt: _parseDateTime(json['updatedAt']) ?? DateTime.now(),
+      lastError: json['lastError']?.toString(),
+      lastErrorCode: json['lastErrorCode']?.toString(),
+      nextRetryAt: _parseDateTime(json['nextRetryAt']),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'sessionId': sessionId,
+        'clientKey': clientKey,
+        'text': text,
+        'attachments': attachments
+            .map((attachment) => attachment.toJson())
+            .toList(growable: false),
+        'status': status,
+        'attempts': attempts,
+        'createdAt': createdAt.toIso8601String(),
+        'updatedAt': updatedAt.toIso8601String(),
+        if (lastError != null) 'lastError': lastError,
+        if (lastErrorCode != null) 'lastErrorCode': lastErrorCode,
+        if (nextRetryAt != null) 'nextRetryAt': nextRetryAt!.toIso8601String(),
+      };
+
+  _ConsultOutboxEntry copyWith({
+    String? status,
+    int? attempts,
+    DateTime? updatedAt,
+    String? lastError,
+    String? lastErrorCode,
+    DateTime? nextRetryAt,
+  }) {
+    return _ConsultOutboxEntry(
+      sessionId: sessionId,
+      clientKey: clientKey,
+      text: text,
+      attachments: attachments,
+      status: status ?? this.status,
+      attempts: attempts ?? this.attempts,
+      createdAt: createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      lastError: lastError ?? this.lastError,
+      lastErrorCode: lastErrorCode ?? this.lastErrorCode,
+      nextRetryAt: nextRetryAt ?? this.nextRetryAt,
+    );
+  }
+
+  _ChatMessage toMessage() => _ChatMessage.user(
+        text,
+        id: clientKey,
+        clientKey: clientKey,
+        deliveryState: status,
+        includeInHistory: false,
+        attachments: attachments
+            .map((attachment) => attachment.toPreviewAttachment())
+            .toList(growable: false),
+      );
+}
+
+class _ConsultOutboxStore {
+  static const _fileName = 'owner_consult_chat_outbox.json';
+
+  static Future<File> _file() async {
+    final directory = await getApplicationSupportDirectory();
+    await directory.create(recursive: true);
+    return File('${directory.path}/$_fileName');
+  }
+
+  static Future<List<_ConsultOutboxEntry>> _readAll() async {
+    try {
+      final file = await _file();
+      if (!await file.exists()) return const [];
+      final decoded = jsonDecode(await file.readAsString());
+      return (_asList(decoded) ?? const [])
+          .map(_asMap)
+          .whereType<Map<String, dynamic>>()
+          .map(_ConsultOutboxEntry.fromJson)
+          .where((entry) =>
+              entry.sessionId.isNotEmpty && entry.clientKey.isNotEmpty)
+          .toList(growable: false);
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  static Future<void> _writeAll(List<_ConsultOutboxEntry> entries) async {
+    final file = await _file();
+    await file.writeAsString(jsonEncode(
+        entries.map((entry) => entry.toJson()).toList(growable: false)));
+  }
+
+  static Future<List<_ConsultOutboxEntry>> entriesForSession(
+      String sessionId) async {
+    final entries = await _readAll();
+    return entries
+        .where((entry) => entry.sessionId == sessionId)
+        .toList(growable: false)
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+  }
+
+  static Future<void> upsert(_ConsultOutboxEntry entry) async {
+    final entries = await _readAll();
+    final index = entries
+        .indexWhere((candidate) => candidate.clientKey == entry.clientKey);
+    if (index >= 0) {
+      entries[index] = entry;
+    } else {
+      entries.add(entry);
+    }
+    await _writeAll(entries);
+  }
+
+  static Future<void> remove(String clientKey) async {
+    final entries = await _readAll();
+    entries.removeWhere((entry) => entry.clientKey == clientKey);
+    await _writeAll(entries);
+  }
+}
+
+class _ConsultDraftStore {
+  static const _fileName = 'owner_consult_chat_drafts.json';
+
+  static Future<File> _file() async {
+    final directory = await getApplicationSupportDirectory();
+    await directory.create(recursive: true);
+    return File('${directory.path}/$_fileName');
+  }
+
+  static Future<Map<String, String>> _readAll() async {
+    try {
+      final file = await _file();
+      if (!await file.exists()) return const {};
+      final decoded = jsonDecode(await file.readAsString());
+      final map = _asMap(decoded);
+      if (map == null) return const {};
+      return map.map((key, value) => MapEntry(key, value?.toString() ?? ''));
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  static Future<void> _writeAll(Map<String, String> drafts) async {
+    final file = await _file();
+    await file.writeAsString(jsonEncode(drafts));
+  }
+
+  static Future<String?> read(String sessionId) async {
+    final drafts = await _readAll();
+    return drafts[sessionId];
+  }
+
+  static Future<void> save(String sessionId, String draft) async {
+    final drafts = Map<String, String>.from(await _readAll());
+    final trimmed = draft.trim();
+    if (trimmed.isEmpty) {
+      drafts.remove(sessionId);
+    } else {
+      drafts[sessionId] = draft;
+    }
+    await _writeAll(drafts);
+  }
+
+  static Future<void> clear(String sessionId) => save(sessionId, '');
 }
 
 class _ConsultAttachment {
@@ -3761,6 +5255,7 @@ class _ConsultAttachment {
     this.downloadUrl,
     this.localPath,
     this.status,
+    this.uploadProgress = 0,
   });
 
   factory _ConsultAttachment.fromJson(Map<String, dynamic> json) {
@@ -3783,6 +5278,7 @@ class _ConsultAttachment {
       downloadUrl:
           json['downloadUrl']?.toString() ?? json['download_url']?.toString(),
       status: json['status']?.toString(),
+      uploadProgress: _asDouble(json['uploadProgress']) ?? 0,
     );
   }
 
@@ -3796,8 +5292,28 @@ class _ConsultAttachment {
   final String? downloadUrl;
   final String? localPath;
   final String? status;
+  final double uploadProgress;
 
   bool get isUploading => status == 'uploading';
+
+  _ConsultAttachment copyWith({
+    String? status,
+    double? uploadProgress,
+  }) {
+    return _ConsultAttachment(
+      id: id,
+      kind: kind,
+      contentType: contentType,
+      byteSize: byteSize,
+      width: width,
+      height: height,
+      durationMs: durationMs,
+      downloadUrl: downloadUrl,
+      localPath: localPath,
+      status: status ?? this.status,
+      uploadProgress: uploadProgress ?? this.uploadProgress,
+    );
+  }
 }
 
 class _ChatMessage {
@@ -3816,17 +5332,23 @@ class _ChatMessage {
     this.surveyAction,
     this.includeInHistory = true,
     this.attachments = const [],
+    this.deliveryState,
   });
 
   factory _ChatMessage.user(
     String text, {
+    String? id,
+    String? clientKey,
+    String? deliveryState,
     bool includeInHistory = true,
     List<_ConsultAttachment> attachments = const [],
   }) {
     return _ChatMessage(
-      id: _nextChatMessageId(),
+      id: id ?? _nextChatMessageId(),
       role: _ChatRole.user,
       text: text,
+      clientKey: clientKey,
+      deliveryState: deliveryState,
       includeInHistory: includeInHistory,
       attachments: attachments,
     );
@@ -3888,11 +5410,21 @@ class _ChatMessage {
   final _SurveyAction? surveyAction;
   final bool includeInHistory;
   final List<_ConsultAttachment> attachments;
+  final String? deliveryState;
 
   bool get isUser => role == _ChatRole.user;
   bool get hasAttachments => attachments.isNotEmpty;
 
   String? consultLabel({required String vetName}) {
+    if (streamOrder == null && isUser) {
+      return switch (deliveryState) {
+        'failed' => 'Failed',
+        'retrying' => 'Retrying...',
+        'queued' => 'Queued',
+        'sending' => 'Sending...',
+        _ => null,
+      };
+    }
     if (streamOrder == null) return null;
     if (role == _ChatRole.assistant) return null;
     final time = createdAt == null
@@ -3914,6 +5446,8 @@ class _ChatMessage {
   _ChatMessage copyWith({
     bool? deliveredByOther,
     bool? readByOther,
+    List<_ConsultAttachment>? attachments,
+    String? deliveryState,
   }) {
     return _ChatMessage(
       id: id,
@@ -3929,7 +5463,8 @@ class _ChatMessage {
       rejoinSessionId: rejoinSessionId,
       surveyAction: surveyAction,
       includeInHistory: includeInHistory,
-      attachments: attachments,
+      attachments: attachments ?? this.attachments,
+      deliveryState: deliveryState ?? this.deliveryState,
     );
   }
 
@@ -3937,6 +5472,9 @@ class _ChatMessage {
     return copyWith(
       deliveredByOther: previous.deliveredByOther,
       readByOther: previous.readByOther,
+      attachments: attachments.isEmpty && previous.attachments.isNotEmpty
+          ? previous.attachments
+          : null,
     );
   }
 }
@@ -4632,6 +6170,23 @@ class _ChatApiException implements Exception {
   String toString() => message;
 }
 
+class _ConsultUploadCanceledException implements Exception {
+  const _ConsultUploadCanceledException();
+
+  @override
+  String toString() => 'upload_canceled';
+}
+
+class _ConsultUploadCancelToken {
+  bool _canceled = false;
+
+  bool get canceled => _canceled;
+
+  void cancel() {
+    _canceled = true;
+  }
+}
+
 Map<String, dynamic>? _asMap(Object? value) {
   if (value is Map) {
     return value.map((key, value) => MapEntry(key.toString(), value));
@@ -4647,6 +6202,44 @@ int? _asInt(Object? value) {
   if (value is int) return value;
   if (value is num) return value.toInt();
   return int.tryParse(value?.toString() ?? '');
+}
+
+double? _asDouble(Object? value) {
+  if (value is double) return value;
+  if (value is num) return value.toDouble();
+  return double.tryParse(value?.toString() ?? '');
+}
+
+String _uploadProgressText(_ConsultAttachment attachment) {
+  final percent = (attachment.uploadProgress.clamp(0.0, 1.0) * 100).round();
+  return '$percent%';
+}
+
+String _chatDateLabel(DateTime date) {
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+  final day = DateTime(date.year, date.month, date.day);
+  final difference = today.difference(day).inDays;
+  if (difference == 0) return 'Hoy';
+  if (difference == 1) return 'Ayer';
+  const months = [
+    'ene',
+    'feb',
+    'mar',
+    'abr',
+    'may',
+    'jun',
+    'jul',
+    'ago',
+    'sep',
+    'oct',
+    'nov',
+    'dic',
+  ];
+  final month = months[(date.month - 1).clamp(0, 11)];
+  return date.year == now.year
+      ? '${date.day} $month'
+      : '${date.day} $month ${date.year}';
 }
 
 DateTime? _parseDateTime(Object? value) {

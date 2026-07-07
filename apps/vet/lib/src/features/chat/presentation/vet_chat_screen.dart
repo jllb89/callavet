@@ -4,6 +4,9 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
@@ -11,6 +14,7 @@ import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:video_compress/video_compress.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../../core/config/environment.dart';
@@ -41,19 +45,26 @@ class VetChatScreen extends StatefulWidget {
   State<VetChatScreen> createState() => _VetChatScreenState();
 }
 
-class _VetChatScreenState extends State<VetChatScreen> {
+class _VetChatScreenState extends State<VetChatScreen>
+    with WidgetsBindingObserver {
   final TextEditingController _composerController = TextEditingController();
   final FocusNode _composerFocusNode = FocusNode();
   final ScrollController _scrollController = ScrollController();
   final List<_VetChatMessage> _assistantMessages = <_VetChatMessage>[];
   final List<_VetChatMessage> _consultMessages = <_VetChatMessage>[];
+  final List<_PendingVetAttachment> _stagedVetAttachments =
+      <_PendingVetAttachment>[];
+  final _uploadCancelTokens = <String, _VetUploadCancelToken>{};
   final ImagePicker _imagePicker = ImagePicker();
   final AudioRecorder _audioRecorder = AudioRecorder();
   RealtimeChannel? _messagesChannel;
   RealtimeChannel? _sessionChannel;
   RealtimeChannel? _roomChannel;
   Timer? _refreshDebounce;
+  Timer? _reconnectTimer;
+  Timer? _readReceiptDebounce;
   Timer? _handoffRetryTimer;
+  Timer? _draftDebounce;
   Timer? _typingDebounce;
   Timer? _remoteTypingClearTimer;
   _VetHandoffBrief? _handoffBrief;
@@ -68,11 +79,18 @@ class _VetChatScreenState extends State<VetChatScreen> {
   bool _ownerOnline = false;
   bool _ownerTyping = false;
   bool _handoffPending = false;
+  bool _outboxFlushing = false;
+  bool _showDraftRestoredBanner = false;
+  int _reconnectAttempts = 0;
   int _handoffRetryAttempts = 0;
+  DateTime? _lastOwnerTypingAt;
+  String? _unreadMarkerMessageId;
+  String? _realtimeStatus;
   String _ownerName = 'tutor';
 
   static const _returnDashboardFadeDuration = Duration(milliseconds: 260);
   static const _maxHandoffRetryAttempts = 8;
+  static const _consultSendTimeout = Duration(seconds: 25);
 
   bool get _isAssistant => widget.sessionId == _vetAssistantSessionId;
 
@@ -84,6 +102,8 @@ class _VetChatScreenState extends State<VetChatScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _composerFocusNode.addListener(_handleComposerFocusChanged);
     if (_isAssistant) {
       final initialMessage = widget.initialMessage?.trim();
       if (initialMessage != null && initialMessage.isNotEmpty) {
@@ -98,6 +118,7 @@ class _VetChatScreenState extends State<VetChatScreen> {
       });
     } else {
       _composerController.addListener(_handleComposerChanged);
+      unawaited(_restoreDraft());
       unawaited(_loadConsultThread());
       _startMessagesRealtime();
       _startSessionRealtime();
@@ -107,8 +128,14 @@ class _VetChatScreenState extends State<VetChatScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _refreshDebounce?.cancel();
+    _reconnectTimer?.cancel();
+    _readReceiptDebounce?.cancel();
     _handoffRetryTimer?.cancel();
+    _draftDebounce?.cancel();
+    _persistCurrentDraft();
+    _sendTyping(false);
     final channel = _messagesChannel;
     if (channel != null) {
       Supabase.instance.client.removeChannel(channel);
@@ -129,6 +156,16 @@ class _VetChatScreenState extends State<VetChatScreen> {
     _composerFocusNode.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed || _isAssistant || _consultClosed) {
+      if (!_isAssistant) _sendTyping(false);
+      return;
+    }
+    unawaited(_catchUpMessages());
+    unawaited(_flushOutbox());
   }
 
   Future<void> _loadConsultThread() async {
@@ -154,15 +191,28 @@ class _VetChatScreenState extends State<VetChatScreen> {
               .toList() ??
           const <_VetChatMessage>[];
       messages.sort(_compareMessages);
+      final outboxEntries =
+          await _VetOutboxStore.entriesForSession(widget.sessionId);
       final session = _asMap(messagesResponse['session']);
       final status = session?['status']?.toString().toLowerCase();
       final ownerName = session?['ownerName']?.toString().trim();
       final receipts = _asList(messagesResponse['receipts']) ?? const [];
       if (!mounted) return;
       setState(() {
+        final hydratedMessages = _messagesWithReceipts(messages, receipts);
+        final serverClientKeys = hydratedMessages
+            .map((message) => message.clientKey)
+            .whereType<String>()
+            .toSet();
+        final outboxMessages = outboxEntries
+            .where((entry) => !serverClientKeys.contains(entry.clientKey))
+            .map((entry) => entry.toMessage())
+            .toList(growable: false);
         _consultMessages
           ..clear()
-          ..addAll(_messagesWithReceipts(messages, receipts));
+          ..addAll(hydratedMessages)
+          ..addAll(outboxMessages)
+          ..sort(_compareMessages);
         if (hasUsableHandoff) {
           _handoffBrief = handoffBrief;
           _handoffPending = false;
@@ -182,6 +232,7 @@ class _VetChatScreenState extends State<VetChatScreen> {
         _scheduleHandoffRetry();
       }
       _markVisibleMessagesRead();
+      unawaited(_flushOutbox());
       _scrollToBottom();
     } catch (error) {
       if (!mounted) return;
@@ -215,10 +266,12 @@ class _VetChatScreenState extends State<VetChatScreen> {
               _scheduleRefresh();
               return;
             }
+            if (_hasStreamGap(message)) _scheduleRefresh();
+            if (message.attachments.isEmpty) _scheduleRefresh();
             _upsertConsultMessage(message);
           },
         )
-        .subscribe();
+        .subscribe((status, [_]) => _handleRealtimeStatus(status));
     _messagesChannel = channel;
   }
 
@@ -265,14 +318,29 @@ class _VetChatScreenState extends State<VetChatScreen> {
           callback: (payload) {
             if (payload['role']?.toString() != 'user') return;
             final typing = payload['typing'] == true;
+            final eventAt = _parseDateTime(payload['at']) ?? DateTime.now();
+            if (typing && DateTime.now().difference(eventAt).inSeconds > 8) {
+              return;
+            }
             if (!mounted) return;
-            setState(() => _ownerTyping = typing);
+            final wasTyping = _ownerTyping;
+            setState(() {
+              _lastOwnerTypingAt = typing ? eventAt : null;
+              _ownerTyping = typing;
+            });
+            if (typing && !wasTyping) {
+              _announceForAccessibility('El tutor está escribiendo.');
+            }
             _remoteTypingClearTimer?.cancel();
             if (typing) {
               _remoteTypingClearTimer = Timer(
                 const Duration(seconds: 3),
                 () {
-                  if (mounted) setState(() => _ownerTyping = false);
+                  if (!mounted || _lastOwnerTypingAt != eventAt) return;
+                  setState(() {
+                    _ownerTyping = false;
+                    _lastOwnerTypingAt = null;
+                  });
                 },
               );
             }
@@ -307,39 +375,144 @@ class _VetChatScreenState extends State<VetChatScreen> {
         .onPresenceSync((_) => _syncOwnerPresence(channel))
         .subscribe((status, [_]) {
       if (status == RealtimeSubscribeStatus.subscribed) {
+        _handleRealtimeStatus(status);
         unawaited(channel.track({
           'role': 'vet',
           'userId': userId,
           'onlineAt': DateTime.now().toIso8601String(),
         }));
+      } else {
+        _handleRealtimeStatus(status);
       }
     });
     _roomChannel = channel;
+  }
+
+  void _handleRealtimeStatus(RealtimeSubscribeStatus status) {
+    if (!mounted) return;
+    if (status == RealtimeSubscribeStatus.subscribed) {
+      _reconnectAttempts = 0;
+      _reconnectTimer?.cancel();
+      if (_realtimeStatus != null) setState(() => _realtimeStatus = null);
+      unawaited(_catchUpMessages());
+      return;
+    }
+    setState(() {
+      _realtimeStatus = switch (status) {
+        RealtimeSubscribeStatus.channelError => 'reconectando chat...',
+        RealtimeSubscribeStatus.closed => 'chat sin conexión',
+        RealtimeSubscribeStatus.timedOut => 'reconectando chat...',
+        RealtimeSubscribeStatus.subscribed => null,
+      };
+    });
+    _emitTelemetry('realtime_reconnect', metadata: {
+      'status': status.name,
+      'reconnectAttempt': _reconnectAttempts + 1,
+    });
+    _scheduleRealtimeRestart();
+  }
+
+  void _scheduleRealtimeRestart() {
+    if (_isAssistant || _reconnectTimer?.isActive == true) return;
+    final delaySeconds = math.min(10, 1 << _reconnectAttempts);
+    _reconnectAttempts = math.min(_reconnectAttempts + 1, 4);
+    _reconnectTimer = Timer(Duration(seconds: delaySeconds), () {
+      if (!mounted || _consultClosed || _isAssistant) return;
+      _stopRealtime();
+      _startMessagesRealtime();
+      _startSessionRealtime();
+      _startRoomSignals();
+      unawaited(_catchUpMessages());
+    });
+  }
+
+  void _stopRealtime() {
+    final messagesChannel = _messagesChannel;
+    if (messagesChannel != null) {
+      Supabase.instance.client.removeChannel(messagesChannel);
+      _messagesChannel = null;
+    }
+    final sessionChannel = _sessionChannel;
+    if (sessionChannel != null) {
+      Supabase.instance.client.removeChannel(sessionChannel);
+      _sessionChannel = null;
+    }
+    final roomChannel = _roomChannel;
+    if (roomChannel != null) {
+      unawaited(roomChannel.untrack());
+      Supabase.instance.client.removeChannel(roomChannel);
+      _roomChannel = null;
+    }
   }
 
   void _syncOwnerPresence(RealtimeChannel channel) {
     final online = channel.presenceState().any((state) => state.presences.any(
           (presence) => presence.payload['role']?.toString() == 'user',
         ));
-    if (mounted) setState(() => _ownerOnline = online);
+    if (mounted) {
+      final wasOnline = _ownerOnline;
+      setState(() => _ownerOnline = online);
+      if (online && !wasOnline) {
+        _announceForAccessibility('El tutor está en línea.');
+      }
+    }
   }
 
   void _handleComposerChanged() {
     if (_isAssistant || _consultClosed || _roomChannel == null) return;
+    _draftDebounce?.cancel();
+    _draftDebounce = Timer(const Duration(milliseconds: 400), () {
+      unawaited(
+          _VetDraftStore.save(widget.sessionId, _composerController.text));
+    });
+    if (_showDraftRestoredBanner && _composerController.text.trim().isEmpty) {
+      _dismissDraftBanner();
+    }
     _typingDebounce?.cancel();
     final isTyping = _composerController.text.trim().isNotEmpty;
     _typingDebounce = Timer(const Duration(milliseconds: 300), () {
-      final channel = _roomChannel;
-      if (channel == null) return;
-      unawaited(channel.sendBroadcastMessage(
-        event: 'typing',
-        payload: {
-          'role': 'vet',
-          'typing': isTyping,
-          'at': DateTime.now().toIso8601String(),
-        },
-      ));
+      _sendTyping(isTyping);
     });
+  }
+
+  void _handleComposerFocusChanged() {
+    if (!_composerFocusNode.hasFocus) _sendTyping(false);
+  }
+
+  Future<void> _restoreDraft() async {
+    if (_isAssistant) return;
+    final draft = await _VetDraftStore.read(widget.sessionId);
+    if (!mounted || draft == null || draft.trim().isEmpty) return;
+    if (_composerController.text.trim().isNotEmpty) return;
+    _composerController.text = draft;
+    _composerController.selection =
+        TextSelection.collapsed(offset: draft.length);
+    setState(() => _showDraftRestoredBanner = true);
+    _announceForAccessibility('Borrador restaurado.');
+  }
+
+  void _dismissDraftBanner() {
+    if (!mounted || !_showDraftRestoredBanner) return;
+    setState(() => _showDraftRestoredBanner = false);
+  }
+
+  void _persistCurrentDraft() {
+    if (_isAssistant) return;
+    unawaited(_VetDraftStore.save(widget.sessionId, _composerController.text));
+  }
+
+  void _sendTyping(bool typing) {
+    final channel = _roomChannel;
+    if (channel == null) return;
+    _typingDebounce?.cancel();
+    unawaited(channel.sendBroadcastMessage(
+      event: 'typing',
+      payload: {
+        'role': 'vet',
+        'typing': typing,
+        'at': DateTime.now().toIso8601String(),
+      },
+    ));
   }
 
   void _scheduleRefresh() {
@@ -386,23 +559,101 @@ class _VetChatScreenState extends State<VetChatScreen> {
 
   void _refreshMessages() {
     if (!mounted) return;
-    unawaited(_loadConsultThread());
+    unawaited(_catchUpMessages());
+  }
+
+  int get _lastConsultStreamOrder => _consultMessages
+      .map((message) => message.streamOrder ?? 0)
+      .fold<int>(0, (max, value) => value > max ? value : max);
+
+  bool _hasStreamGap(_VetChatMessage message) {
+    final order = message.streamOrder;
+    final lastOrder = _lastConsultStreamOrder;
+    return order != null && lastOrder > 0 && order > lastOrder + 1;
+  }
+
+  bool _shouldShowDateSeparator(
+      _VetChatMessage? previous, _VetChatMessage current) {
+    final currentDate = current.createdAt;
+    if (currentDate == null) return previous == null;
+    final previousDate = previous?.createdAt;
+    if (previousDate == null) return true;
+    return previousDate.year != currentDate.year ||
+        previousDate.month != currentDate.month ||
+        previousDate.day != currentDate.day;
+  }
+
+  Future<void> _catchUpMessages() async {
+    if (_isAssistant) return;
+    final afterStreamOrder = _lastConsultStreamOrder;
+    if (afterStreamOrder <= 0) {
+      await _loadConsultThread();
+      return;
+    }
+    final startedAt = DateTime.now();
+    try {
+      final response = await _getGatewayJson(
+        '/sessions/${Uri.encodeComponent(widget.sessionId)}/messages?afterStreamOrder=$afterStreamOrder&limit=100&sort=stream_order.asc',
+      );
+      final messages = (_asList(response['items']) ?? const [])
+          .map(_asMap)
+          .whereType<Map<String, dynamic>>()
+          .map(_VetChatMessage.fromJson)
+          .toList(growable: false);
+      final receipts = _asList(response['receipts']) ?? const [];
+      for (final message in _messagesWithReceipts(messages, receipts)) {
+        _upsertConsultMessage(message);
+      }
+      String? firstIncoming;
+      for (final message in messages) {
+        if (message.role != 'vet') {
+          firstIncoming = message.id;
+          break;
+        }
+      }
+      if (firstIncoming != null && mounted) {
+        setState(() => _unreadMarkerMessageId = firstIncoming);
+      }
+      if (messages.isNotEmpty) _markVisibleMessagesRead();
+      unawaited(_flushOutbox());
+      _emitTelemetry(
+        'realtime_catchup',
+        durationMs: DateTime.now().difference(startedAt).inMilliseconds,
+        valueCount: messages.length,
+        metadata: {
+          'afterStreamOrder': afterStreamOrder,
+          'cursor': response['cursor'],
+        },
+      );
+    } catch (_) {
+      await _loadConsultThread();
+    }
   }
 
   void _upsertConsultMessage(_VetChatMessage message) {
     if (!mounted) return;
+    var inserted = false;
     setState(() {
-      final index =
-          _consultMessages.indexWhere((existing) => existing.id == message.id);
+      final index = _consultMessages.indexWhere((existing) =>
+          existing.id == message.id ||
+          (message.clientKey != null &&
+              existing.clientKey == message.clientKey));
       if (index >= 0) {
         _consultMessages[index] =
             message.withReceiptFrom(_consultMessages[index]);
       } else {
         _consultMessages.add(message);
+        inserted = true;
       }
       _consultMessages.sort(_compareMessages);
     });
-    if (message.role != 'vet') _markVisibleMessagesRead();
+    if (message.streamOrder != null && message.clientKey != null) {
+      unawaited(_VetOutboxStore.remove(message.clientKey!));
+    }
+    if (message.role != 'vet') {
+      if (inserted) _announceForAccessibility('Nuevo mensaje del tutor.');
+      _markVisibleMessagesRead();
+    }
     _scrollToBottom();
   }
 
@@ -451,10 +702,20 @@ class _VetChatScreenState extends State<VetChatScreen> {
         .map((message) => message.streamOrder ?? 0)
         .fold<int>(0, (max, value) => value > max ? value : max);
     if (lastStreamOrder <= 0) return;
-    unawaited(_postGatewayJson(
-      '/sessions/${Uri.encodeComponent(widget.sessionId)}/messages/read',
-      {'lastStreamOrder': lastStreamOrder},
-    ));
+    _readReceiptDebounce?.cancel();
+    _readReceiptDebounce = Timer(const Duration(milliseconds: 250), () {
+      final startedAt = DateTime.now();
+      unawaited(_postGatewayJson(
+        '/sessions/${Uri.encodeComponent(widget.sessionId)}/messages/read',
+        {'lastStreamOrder': lastStreamOrder},
+      ).then((_) {
+        _emitTelemetry(
+          'read_receipt_sent',
+          valueMs: DateTime.now().difference(startedAt).inMilliseconds,
+          metadata: {'streamOrder': lastStreamOrder},
+        );
+      }).catchError((_) {}));
+    });
   }
 
   int _compareMessages(_VetChatMessage a, _VetChatMessage b) {
@@ -479,25 +740,77 @@ class _VetChatScreenState extends State<VetChatScreen> {
       return;
     }
     final text = _composerController.text.trim();
-    if (text.isEmpty || _sending || _consultClosed) return;
-    await _sendConsultPayload(text: text, clearComposer: true);
+    final stagedAttachments = List<_PendingVetAttachment>.unmodifiable(
+      _stagedVetAttachments,
+    );
+    if ((text.isEmpty && stagedAttachments.isEmpty) ||
+        _sending ||
+        _consultClosed) {
+      return;
+    }
+    _sendTyping(false);
+    unawaited(_VetDraftStore.clear(widget.sessionId));
+    _dismissDraftBanner();
+    setState(() => _stagedVetAttachments.clear());
+    await _sendConsultPayload(
+      text: text,
+      clearComposer: true,
+      pendingAttachments: stagedAttachments,
+    );
   }
 
   Future<void> _sendConsultPayload({
     String text = '',
     bool clearComposer = false,
     List<_PendingVetAttachment> pendingAttachments = const [],
+    String? clientKeyOverride,
+    bool retrying = false,
+    int? attemptsOverride,
   }) async {
     if (_isAssistant || _sending || _consultClosed) return;
     final trimmedText = text.trim();
     if (trimmedText.isEmpty && pendingAttachments.isEmpty) return;
-    final clientKey =
+    _sendTyping(false);
+    final clientKey = clientKeyOverride ??
         'vet-${DateTime.now().microsecondsSinceEpoch}-${_nextVetAssistantMessageId()}';
-    setState(() => _sending = true);
+    final sendStartedAt = DateTime.now();
+    _emitTelemetry('send_started', clientKey: clientKey, metadata: {
+      'attachmentCount': pendingAttachments.length,
+      'retrying': retrying,
+    });
+    final outboxEntry = _VetOutboxEntry(
+      sessionId: widget.sessionId,
+      clientKey: clientKey,
+      text: trimmedText,
+      attachments: pendingAttachments,
+      status: retrying ? 'retrying' : 'sending',
+      attempts: attemptsOverride ?? (retrying ? 1 : 0),
+      createdAt: DateTime.now(),
+      updatedAt: DateTime.now(),
+    );
+    await _VetOutboxStore.upsert(outboxEntry);
+    final optimisticMessage = outboxEntry.toMessage();
+    setState(() {
+      final index = _consultMessages.indexWhere((message) =>
+          message.id == optimisticMessage.id ||
+          message.clientKey == optimisticMessage.clientKey);
+      if (index >= 0) {
+        _consultMessages[index] =
+            optimisticMessage.withReceiptFrom(_consultMessages[index]);
+      } else {
+        _consultMessages.add(optimisticMessage);
+      }
+      _consultMessages.sort(_compareMessages);
+      _sending = true;
+    });
+    _scrollToBottom();
     try {
       final attachmentRefs = <Map<String, String>>[];
       for (final attachment in pendingAttachments) {
-        final uploaded = await _uploadConsultAttachment(attachment);
+        final uploaded = await _uploadConsultAttachment(
+          attachment,
+          clientKey: clientKey,
+        );
         attachmentRefs.add({'id': uploaded.id});
       }
       final response = await _postGatewayJson(
@@ -505,14 +818,90 @@ class _VetChatScreenState extends State<VetChatScreen> {
         'content': trimmedText,
         'clientKey': clientKey,
         if (attachmentRefs.isNotEmpty) 'attachments': attachmentRefs,
-      });
+      }).timeout(_consultSendTimeout);
+      await _VetOutboxStore.remove(clientKey);
       if (clearComposer) _composerController.clear();
       final message = _asMap(response['message']);
+      _emitTelemetry(
+        'send_completed',
+        clientKey: clientKey,
+        messageId: message?['id']?.toString(),
+        durationMs: DateTime.now().difference(sendStartedAt).inMilliseconds,
+        metadata: {
+          'attachmentCount': attachmentRefs.length,
+          'duplicate': response['duplicate'] == true,
+          'streamOrder': message?['stream_order'],
+        },
+      );
       if (message != null) {
+        if (mounted) {
+          setState(() => _consultMessages.removeWhere((candidate) =>
+              candidate.id == optimisticMessage.id ||
+              candidate.clientKey == clientKey));
+        }
         _upsertConsultMessage(_VetChatMessage.fromJson(message));
       }
+      if (mounted) unawaited(HapticFeedback.lightImpact());
     } catch (error) {
+      if (error is _VetUploadCanceledException) {
+        await _VetOutboxStore.remove(clientKey);
+        _uploadCancelTokens.remove(clientKey);
+        if (mounted) {
+          setState(() {
+            _consultMessages.removeWhere((candidate) =>
+                candidate.id == optimisticMessage.id ||
+                candidate.clientKey == clientKey);
+          });
+          _announceForAccessibility('Carga cancelada.');
+        }
+        return;
+      }
+      final errorCode = _telemetryErrorCode(error);
+      final attempts = outboxEntry.attempts + 1;
+      final retryable = _isRetryableVetErrorCode(errorCode);
+      final nextRetryAt = retryable ? _nextVetRetryAt(attempts) : null;
+      await _VetOutboxStore.upsert(outboxEntry.copyWith(
+        status: retryable ? 'queued' : 'failed',
+        attempts: attempts,
+        lastError: error.toString(),
+        lastErrorCode: errorCode,
+        nextRetryAt: nextRetryAt,
+        updatedAt: DateTime.now(),
+      ));
+      if (retryable && nextRetryAt != null) {
+        _scheduleVetOutboxRetry(nextRetryAt);
+      }
+      _emitTelemetry(
+        'send_failed',
+        clientKey: clientKey,
+        durationMs: DateTime.now().difference(sendStartedAt).inMilliseconds,
+        errorCode: errorCode,
+        metadata: {'attachmentCount': pendingAttachments.length},
+      );
       if (!mounted) return;
+      unawaited(HapticFeedback.mediumImpact());
+      _announceForAccessibility('No se pudo enviar el mensaje.');
+      setState(() {
+        final failedMessage = outboxEntry
+            .copyWith(
+              status: 'failed',
+              attempts: outboxEntry.attempts + 1,
+              lastError: error.toString(),
+              lastErrorCode: errorCode,
+              nextRetryAt: nextRetryAt,
+              updatedAt: DateTime.now(),
+            )
+            .toMessage();
+        final index = _consultMessages.indexWhere((candidate) =>
+            candidate.id == optimisticMessage.id ||
+            candidate.clientKey == clientKey);
+        if (index >= 0) {
+          _consultMessages[index] =
+              failedMessage.withReceiptFrom(_consultMessages[index]);
+        } else {
+          _consultMessages.add(failedMessage);
+        }
+      });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('No se pudo enviar: $error'),
@@ -524,6 +913,9 @@ class _VetChatScreenState extends State<VetChatScreen> {
                     text: trimmedText,
                     clearComposer: clearComposer,
                     pendingAttachments: pendingAttachments,
+                    clientKeyOverride: clientKey,
+                    retrying: true,
+                    attemptsOverride: attempts,
                   )),
                 ),
         ),
@@ -533,8 +925,36 @@ class _VetChatScreenState extends State<VetChatScreen> {
     }
   }
 
+  Future<void> _flushOutbox() async {
+    if (_outboxFlushing || _sending || _consultClosed || _isAssistant) return;
+    _outboxFlushing = true;
+    try {
+      final entries = await _VetOutboxStore.entriesForSession(widget.sessionId);
+      for (final entry in entries) {
+        if (!mounted || _consultClosed) return;
+        if (entry.status == 'failed') continue;
+        if (!entry.retryDue) {
+          final nextRetryAt = entry.nextRetryAt;
+          if (nextRetryAt != null) _scheduleVetOutboxRetry(nextRetryAt);
+          continue;
+        }
+        await _sendConsultPayload(
+          text: entry.text,
+          pendingAttachments: entry.attachments,
+          clientKeyOverride: entry.clientKey,
+          retrying: entry.attempts > 0,
+          attemptsOverride: entry.attempts,
+        );
+      }
+    } finally {
+      _outboxFlushing = false;
+    }
+  }
+
   Future<_VetAttachment> _uploadConsultAttachment(
-      _PendingVetAttachment attachment) async {
+    _PendingVetAttachment attachment, {
+    required String clientKey,
+  }) async {
     final response = await _postGatewayJson(
       '/sessions/${Uri.encodeComponent(widget.sessionId)}/attachments/upload-url',
       attachment.toUploadBody(),
@@ -551,27 +971,303 @@ class _VetChatScreenState extends State<VetChatScreen> {
       throw const _VetChatException(
           'No pude preparar el archivo para subirlo.');
     }
-    await Supabase.instance.client.storage.from(bucket).uploadToSignedUrl(
-          path,
-          token,
-          File(attachment.path),
-          FileOptions(contentType: attachment.contentType),
-        );
+    final attachmentId = attachmentJson['id']?.toString();
+    final uploadStartedAt = DateTime.now();
+    final cancelToken =
+        _uploadCancelTokens.putIfAbsent(clientKey, _VetUploadCancelToken.new);
+    _emitTelemetry('upload_started',
+        clientKey: clientKey,
+        attachmentId: attachmentId,
+        valueCount: attachment.byteSize,
+        metadata: {'attachmentKind': attachment.kind.name});
+    try {
+      await _uploadFileToSignedUrlWithProgress(
+        bucket: bucket,
+        path: path,
+        token: token,
+        file: File(attachment.path),
+        fileName: attachment.fileName,
+        contentType: attachment.contentType,
+        cancelToken: cancelToken,
+        onProgress: (progress) {
+          _updateVetAttachmentUploadProgress(
+              clientKey, attachment.path, progress);
+          final percent = (progress * 100).round();
+          if (percent == 25 ||
+              percent == 50 ||
+              percent == 75 ||
+              percent == 100) {
+            _emitTelemetry('upload_progress',
+                clientKey: clientKey,
+                attachmentId: attachmentId,
+                valueCount: percent,
+                metadata: {'progressPercent': percent});
+          }
+        },
+      );
+      _emitTelemetry('upload_completed',
+          clientKey: clientKey,
+          attachmentId: attachmentId,
+          durationMs: DateTime.now().difference(uploadStartedAt).inMilliseconds,
+          valueCount: attachment.byteSize,
+          metadata: {'attachmentKind': attachment.kind.name});
+      _uploadCancelTokens.remove(clientKey);
+    } catch (error) {
+      if (error is _VetUploadCanceledException) rethrow;
+      _emitTelemetry('upload_failed',
+          clientKey: clientKey,
+          attachmentId: attachmentId,
+          durationMs: DateTime.now().difference(uploadStartedAt).inMilliseconds,
+          valueCount: attachment.byteSize,
+          errorCode: _telemetryErrorCode(error),
+          metadata: {'attachmentKind': attachment.kind.name});
+      _announceForAccessibility('No se pudo subir el archivo.');
+      rethrow;
+    } finally {
+      if (cancelToken.canceled) _uploadCancelTokens.remove(clientKey);
+    }
     return _VetAttachment.fromJson(attachmentJson);
+  }
+
+  Future<void> _uploadFileToSignedUrlWithProgress({
+    required String bucket,
+    required String path,
+    required String token,
+    required File file,
+    required String fileName,
+    required String contentType,
+    required _VetUploadCancelToken cancelToken,
+    required ValueChanged<double> onProgress,
+  }) async {
+    final totalBytes = await file.length();
+    if (totalBytes <= 0) {
+      throw const _VetChatException('El archivo está vacío.');
+    }
+    onProgress(0);
+    final boundary = '----cav-${DateTime.now().microsecondsSinceEpoch}';
+    final uri =
+        _signedStorageUploadUri(bucket: bucket, path: path, token: token);
+    final client = HttpClient();
+    try {
+      if (cancelToken.canceled) throw const _VetUploadCanceledException();
+      final request = await client.putUrl(uri);
+      request.headers.contentType = ContentType(
+        'multipart',
+        'form-data',
+        parameters: {'boundary': boundary},
+      );
+      request.headers.set('x-upsert', 'false');
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      final beforeFile = utf8.encode(
+        '--$boundary\r\n'
+        'content-disposition: form-data; name=""; filename="${_multipartEscape(fileName)}"\r\n'
+        'content-type: $contentType\r\n\r\n',
+      );
+      final afterFile = utf8.encode(
+        '\r\n--$boundary\r\n'
+        'content-disposition: form-data; name="cacheControl"\r\n\r\n'
+        '3600\r\n'
+        '--$boundary--\r\n',
+      );
+      request.contentLength = beforeFile.length + totalBytes + afterFile.length;
+      request.add(beforeFile);
+      var sentBytes = 0;
+      var lastProgress = -1.0;
+      await for (final chunk in file.openRead()) {
+        if (cancelToken.canceled) {
+          client.close(force: true);
+          throw const _VetUploadCanceledException();
+        }
+        request.add(chunk);
+        sentBytes += chunk.length;
+        final progress = (sentBytes / totalBytes).clamp(0.0, 1.0).toDouble();
+        if (progress - lastProgress >= 0.01 || progress == 1.0) {
+          lastProgress = progress;
+          onProgress(progress);
+        }
+      }
+      request.add(afterFile);
+      if (cancelToken.canceled) {
+        client.close(force: true);
+        throw const _VetUploadCanceledException();
+      }
+      final uploadResponse = await request.close();
+      final body = await utf8.decoder.bind(uploadResponse).join();
+      if (uploadResponse.statusCode < 200 || uploadResponse.statusCode >= 300) {
+        throw _VetChatException(body.isEmpty
+            ? 'No pude subir el archivo.'
+            : 'No pude subir el archivo: $body');
+      }
+      onProgress(1);
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  void _cancelUpload(String clientKey) {
+    _uploadCancelTokens[clientKey]?.cancel();
+  }
+
+  Future<void> _retryFailedMessage(String clientKey) async {
+    if (_isAssistant || _consultClosed) return;
+    final entries = await _VetOutboxStore.entriesForSession(widget.sessionId);
+    _VetOutboxEntry? entry;
+    for (final candidate in entries) {
+      if (candidate.clientKey == clientKey) {
+        entry = candidate;
+        break;
+      }
+    }
+    if (entry == null) return;
+    await _sendConsultPayload(
+      text: entry.text,
+      pendingAttachments: entry.attachments,
+      clientKeyOverride: entry.clientKey,
+      retrying: true,
+      attemptsOverride: entry.attempts,
+    );
+  }
+
+  bool _isRetryableVetErrorCode(String code) => !{
+        'auth',
+        'too_large',
+        'unsupported_media',
+        'session_closed'
+      }.contains(code);
+
+  DateTime _nextVetRetryAt(int attempts) {
+    final seconds = math.min(60, math.pow(2, math.min(attempts, 6)).toInt());
+    return DateTime.now().add(
+        Duration(seconds: seconds, milliseconds: math.Random().nextInt(750)));
+  }
+
+  void _scheduleVetOutboxRetry(DateTime nextRetryAt) {
+    final delay = nextRetryAt.difference(DateTime.now());
+    unawaited(Future<void>.delayed(
+      delay.isNegative ? Duration.zero : delay,
+      () async {
+        if (!mounted || _consultClosed || _isAssistant) return;
+        await _flushOutbox();
+      },
+    ));
+  }
+
+  Uri _signedStorageUploadUri({
+    required String bucket,
+    required String path,
+    required String token,
+  }) {
+    final base = Uri.parse(Environment.supabaseUrl);
+    final encodedPath = path
+        .split('/')
+        .where((segment) => segment.isNotEmpty)
+        .map(Uri.encodeComponent)
+        .join('/');
+    final normalizedBasePath = base.path.endsWith('/')
+        ? base.path.substring(0, base.path.length - 1)
+        : base.path;
+    return base.replace(
+      path:
+          '$normalizedBasePath/storage/v1/object/upload/sign/${Uri.encodeComponent(bucket)}/$encodedPath',
+      queryParameters: {'token': token},
+    );
+  }
+
+  String _multipartEscape(String value) => value.replaceAll('"', r'\"');
+
+  void _updateVetAttachmentUploadProgress(
+      String clientKey, String localPath, double progress) {
+    if (!mounted) return;
+    setState(() {
+      final messageIndex = _consultMessages.indexWhere(
+        (message) => message.clientKey == clientKey || message.id == clientKey,
+      );
+      if (messageIndex < 0) return;
+      final message = _consultMessages[messageIndex];
+      _consultMessages[messageIndex] = message.copyWith(
+        attachments: message.attachments
+            .map((attachment) =>
+                attachment.localPath == localPath || attachment.id == localPath
+                    ? attachment.copyWith(uploadProgress: progress)
+                    : attachment)
+            .toList(growable: false),
+      );
+    });
   }
 
   Future<_VetAttachment?> _refreshVetAttachmentDownloadUrl(
       _VetAttachment attachment) async {
+    final startedAt = DateTime.now();
     try {
       final response = await _getGatewayJson(
         '/sessions/${Uri.encodeComponent(widget.sessionId)}/attachments/${Uri.encodeComponent(attachment.id)}/download-url',
       );
       final attachmentJson = _asMap(response['attachment']);
       if (attachmentJson == null) return null;
+      _emitTelemetry(
+        'playback_refresh',
+        attachmentId: attachment.id,
+        durationMs: DateTime.now().difference(startedAt).inMilliseconds,
+        metadata: {
+          'playbackKind': attachment.kind.name,
+          'status': 'success',
+        },
+      );
       return _VetAttachment.fromJson(attachmentJson);
-    } catch (_) {
+    } catch (error) {
+      _emitTelemetry(
+        'playback_refresh',
+        attachmentId: attachment.id,
+        durationMs: DateTime.now().difference(startedAt).inMilliseconds,
+        errorCode: _telemetryErrorCode(error),
+        metadata: {
+          'playbackKind': attachment.kind.name,
+          'status': 'failed',
+        },
+      );
       return null;
     }
+  }
+
+  void _emitTelemetry(
+    String eventType, {
+    String? clientKey,
+    String? messageId,
+    String? attachmentId,
+    int? durationMs,
+    int? valueMs,
+    int? valueCount,
+    String? errorCode,
+    Map<String, Object?> metadata = const {},
+  }) {
+    if (_isAssistant || widget.sessionId.trim().isEmpty) return;
+    unawaited(_postGatewayJson(
+      '/sessions/${Uri.encodeComponent(widget.sessionId)}/telemetry',
+      {
+        'eventType': eventType,
+        if (clientKey != null) 'clientKey': clientKey,
+        if (messageId != null) 'messageId': messageId,
+        if (attachmentId != null) 'attachmentId': attachmentId,
+        if (durationMs != null) 'durationMs': durationMs,
+        if (valueMs != null) 'valueMs': valueMs,
+        if (valueCount != null) 'valueCount': valueCount,
+        if (errorCode != null) 'errorCode': errorCode,
+        if (metadata.isNotEmpty) 'metadata': metadata,
+      },
+    ).catchError((_) => <String, dynamic>{}));
+  }
+
+  String _telemetryErrorCode(Object error) {
+    final raw = error.toString().toLowerCase();
+    if (raw.contains('timeout') || raw.contains('tardó')) return 'timeout';
+    if (raw.contains('socket') || raw.contains('conexión')) return 'network';
+    if (raw.contains('unauthorized') || raw.contains('sesión')) return 'auth';
+    if (raw.contains('too_large') || raw.contains('grande')) return 'too_large';
+    if (raw.contains('unsupported')) return 'unsupported_media';
+    if (raw.contains('closed') || raw.contains('terminó')) {
+      return 'session_closed';
+    }
+    return error.runtimeType.toString();
   }
 
   bool get _canSendConsultMedia =>
@@ -617,15 +1313,13 @@ class _VetChatScreenState extends State<VetChatScreen> {
           attachments.add(await _pendingAttachmentFromXFile(
               file, _VetAttachmentKind.image));
         }
-        await _sendConsultPayload(pendingAttachments: attachments);
+        _stageVetAttachments(attachments);
       } else {
         final file = await _imagePicker.pickVideo(source: ImageSource.gallery);
         if (file == null) return;
-        await _sendConsultPayload(
-          pendingAttachments: [
-            await _pendingAttachmentFromXFile(file, _VetAttachmentKind.video)
-          ],
-        );
+        _stageVetAttachments([
+          await _pendingAttachmentFromXFile(file, _VetAttachmentKind.video)
+        ]);
       }
     } catch (error) {
       if (!mounted) return;
@@ -635,18 +1329,105 @@ class _VetChatScreenState extends State<VetChatScreen> {
     }
   }
 
+  void _stageVetAttachments(List<_PendingVetAttachment> attachments) {
+    if (attachments.isEmpty || !mounted) return;
+    final beforeCount = _stagedVetAttachments.length;
+    setState(() {
+      final remaining = math.max(0, 6 - _stagedVetAttachments.length);
+      _stagedVetAttachments.addAll(attachments.take(remaining));
+    });
+    _announceForAccessibility(
+      attachments.length == 1
+          ? 'Archivo adjunto listo para enviar.'
+          : '${attachments.length} archivos adjuntos listos para enviar.',
+    );
+    if (beforeCount + attachments.length > 6) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Puedes adjuntar hasta 6 archivos.')),
+      );
+    }
+  }
+
+  void _removeStagedVetAttachment(_PendingVetAttachment attachment) {
+    setState(() {
+      _stagedVetAttachments.removeWhere((item) => item.path == attachment.path);
+    });
+    _announceForAccessibility('Archivo adjunto eliminado.');
+  }
+
   Future<_PendingVetAttachment> _pendingAttachmentFromXFile(
       XFile file, _VetAttachmentKind kind) async {
-    final byteSize = await file.length();
-    final contentType = _vetContentTypeForFile(file.path, kind);
+    final preparedFile = await _prepareVetMediaFile(file, kind);
+    final byteSize = await preparedFile.length();
+    final contentType = _vetContentTypeForFile(preparedFile.path, kind);
     _validateVetAttachment(kind, byteSize, null);
     return _PendingVetAttachment(
       kind: kind,
-      path: file.path,
-      fileName: file.name,
+      path: preparedFile.path,
+      fileName: preparedFile.name,
       contentType: contentType,
       byteSize: byteSize,
     );
+  }
+
+  Future<XFile> _prepareVetMediaFile(
+      XFile file, _VetAttachmentKind kind) async {
+    if (kind == _VetAttachmentKind.image) {
+      return _compressVetImage(file);
+    }
+    if (kind == _VetAttachmentKind.video) {
+      return _compressVetVideo(file);
+    }
+    return file;
+  }
+
+  Future<XFile> _compressVetImage(XFile file) async {
+    try {
+      final originalSize = await file.length();
+      final dir = await getTemporaryDirectory();
+      final targetPath =
+          '${dir.path}/consult-image-${DateTime.now().microsecondsSinceEpoch}.jpg';
+      final compressed = await FlutterImageCompress.compressAndGetFile(
+        file.path,
+        targetPath,
+        quality: 82,
+        minWidth: 1800,
+        minHeight: 1800,
+        format: CompressFormat.jpeg,
+      );
+      if (compressed == null) return file;
+      final compressedSize = await compressed.length();
+      return compressedSize > 0 && compressedSize < originalSize
+          ? compressed
+          : file;
+    } catch (error) {
+      debugPrint(
+          '[VetChat] image compression skipped: ${error.runtimeType} $error');
+      return file;
+    }
+  }
+
+  Future<XFile> _compressVetVideo(XFile file) async {
+    try {
+      final originalSize = await file.length();
+      final mediaInfo = await VideoCompress.compressVideo(
+        file.path,
+        quality: VideoQuality.MediumQuality,
+        deleteOrigin: false,
+        includeAudio: true,
+      );
+      final compressedPath = mediaInfo?.path;
+      if (compressedPath == null || compressedPath.isEmpty) return file;
+      final compressed = XFile(compressedPath);
+      final compressedSize = await compressed.length();
+      return compressedSize > 0 && compressedSize < originalSize
+          ? compressed
+          : file;
+    } catch (error) {
+      debugPrint(
+          '[VetChat] video compression skipped: ${error.runtimeType} $error');
+      return file;
+    }
   }
 
   Future<void> _startVoiceRecording() async {
@@ -668,8 +1449,11 @@ class _VetChatScreenState extends State<VetChatScreen> {
         _recordingVoice = true;
         _recordingStartedAt = DateTime.now();
       });
+      unawaited(HapticFeedback.mediumImpact());
+      _announceForAccessibility('Grabando nota de voz.');
     } catch (error) {
       if (!mounted) return;
+      _announceForAccessibility('No se pudo iniciar la grabación.');
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('No pude grabar: $error')),
       );
@@ -683,6 +1467,7 @@ class _VetChatScreenState extends State<VetChatScreen> {
       _recordingVoice = false;
       _recordingStartedAt = null;
     });
+    unawaited(HapticFeedback.lightImpact());
     final path = await _audioRecorder.stop();
     if (!send || path == null) return;
     final durationMs = startedAt == null
@@ -693,20 +1478,20 @@ class _VetChatScreenState extends State<VetChatScreen> {
       final file = File(path);
       final byteSize = await file.length();
       _validateVetAttachment(_VetAttachmentKind.voice, byteSize, durationMs);
-      await _sendConsultPayload(
-        pendingAttachments: [
-          _PendingVetAttachment(
-            kind: _VetAttachmentKind.voice,
-            path: path,
-            fileName: path.split('/').last,
-            contentType: 'audio/mp4',
-            byteSize: byteSize,
-            durationMs: durationMs,
-          ),
-        ],
-      );
+      _stageVetAttachments([
+        _PendingVetAttachment(
+          kind: _VetAttachmentKind.voice,
+          path: path,
+          fileName: path.split('/').last,
+          contentType: 'audio/mp4',
+          byteSize: byteSize,
+          durationMs: durationMs,
+        ),
+      ]);
+      _announceForAccessibility('Nota de voz lista para enviar.');
     } catch (error) {
       if (!mounted) return;
+      _announceForAccessibility('No se pudo adjuntar la nota de voz.');
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('No se pudo enviar la nota de voz: $error')),
       );
@@ -750,6 +1535,8 @@ class _VetChatScreenState extends State<VetChatScreen> {
   Future<void> _returnDashboard() async {
     if (_returningDashboard) return;
     _refreshDebounce?.cancel();
+    _reconnectTimer?.cancel();
+    _sendTyping(false);
     _composerFocusNode.unfocus();
     setState(() => _returningDashboard = true);
     await Future<void>.delayed(_returnDashboardFadeDuration);
@@ -837,6 +1624,15 @@ class _VetChatScreenState extends State<VetChatScreen> {
     });
   }
 
+  void _announceForAccessibility(String message) {
+    if (!mounted) return;
+    unawaited(SemanticsService.sendAnnouncement(
+      View.of(context),
+      message,
+      Directionality.of(context),
+    ));
+  }
+
   @override
   Widget build(BuildContext context) {
     final thread = _isAssistant
@@ -912,10 +1708,31 @@ class _VetChatScreenState extends State<VetChatScreen> {
                         );
                       }
                       final messageIndex = index - (hasHandoff ? 1 : 0);
-                      return _ChatBubble(
-                        message: _consultMessages[messageIndex],
-                        ownerName: _ownerName,
-                        onRefreshAttachment: _refreshVetAttachmentDownloadUrl,
+                      final message = _consultMessages[messageIndex];
+                      final previousMessage = messageIndex > 0
+                          ? _consultMessages[messageIndex - 1]
+                          : null;
+                      final showDateSeparator =
+                          _shouldShowDateSeparator(previousMessage, message);
+                      return Column(
+                        key: ValueKey('thread-${message.id}'),
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (showDateSeparator)
+                            _VetChatDateSeparator(
+                                date: message.createdAt ?? DateTime.now()),
+                          if (_unreadMarkerMessageId == message.id)
+                            const _VetUnreadMessagesMarker(),
+                          _ChatBubble(
+                            message: message,
+                            ownerName: _ownerName,
+                            onRefreshAttachment:
+                                _refreshVetAttachmentDownloadUrl,
+                            onCancelUpload: _cancelUpload,
+                            onRetryMessage: (clientKey) =>
+                                unawaited(_retryFailedMessage(clientKey)),
+                          ),
+                        ],
                       );
                     },
                   );
@@ -929,6 +1746,13 @@ class _VetChatScreenState extends State<VetChatScreen> {
             child: messageList,
           ),
         ),
+        if (_showDraftRestoredBanner)
+          Positioned(
+            left: 18,
+            right: 18,
+            bottom: bottomInset + 88,
+            child: _VetDraftRestoredBanner(onDismiss: _dismissDraftBanner),
+          ),
         Positioned(
           top: 0,
           left: 0,
@@ -939,6 +1763,7 @@ class _VetChatScreenState extends State<VetChatScreen> {
               sessionId: widget.sessionId,
               ownerOnline: _ownerOnline,
               ownerTyping: _ownerTyping,
+              realtimeStatus: _realtimeStatus,
               onBack: () => unawaited(_returnDashboard()),
               onEnd: _consultClosed ? null : () => unawaited(_endConsult()),
               ending: _endingConsult,
@@ -955,9 +1780,11 @@ class _VetChatScreenState extends State<VetChatScreen> {
             sending: _sending || _endingConsult || _consultClosed,
             mediaEnabled: _canSendConsultMedia,
             recording: _recordingVoice,
+            stagedAttachments: _stagedVetAttachments,
             includeBottomInset: true,
             onSend: _sendMessage,
             onPickMedia: _pickConsultMedia,
+            onRemoveAttachment: _removeStagedVetAttachment,
             onMicStart: _startVoiceRecording,
             onMicStop: _stopVoiceRecording,
           ),
@@ -1018,9 +1845,11 @@ class _VetChatScreenState extends State<VetChatScreen> {
             sending: _sending,
             mediaEnabled: false,
             recording: false,
+            stagedAttachments: const [],
             includeBottomInset: true,
             onSend: _sendMessage,
             onPickMedia: () {},
+            onRemoveAttachment: (_) {},
             onMicStart: () {},
             onMicStop: ({bool send = true}) async {},
           ),
@@ -1064,6 +1893,120 @@ class _MessageOpacityFade extends StatelessWidget {
         ).createShader(bounds);
       },
       child: child,
+    );
+  }
+}
+
+class _VetChatDateSeparator extends StatelessWidget {
+  const _VetChatDateSeparator({required this.date});
+
+  final DateTime date;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Center(
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            child: Text(
+              _vetChatDateLabel(date),
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.68),
+                fontSize: 11,
+                fontFamily: 'ABCDiatype',
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _VetUnreadMessagesMarker extends StatelessWidget {
+  const _VetUnreadMessagesMarker();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        children: [
+          Expanded(child: Divider(color: Colors.white.withValues(alpha: 0.18))),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            child: Text(
+              'Nuevos',
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.72),
+                fontSize: 11,
+                fontFamily: 'ABCDiatype',
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          Expanded(child: Divider(color: Colors.white.withValues(alpha: 0.18))),
+        ],
+      ),
+    );
+  }
+}
+
+class _VetDraftRestoredBanner extends StatelessWidget {
+  const _VetDraftRestoredBanner({required this.onDismiss});
+
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      liveRegion: true,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.82),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+          child: Row(
+            children: [
+              const Icon(Icons.restore_rounded, color: Colors.white, size: 17),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Borrador restaurado',
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.86),
+                    fontSize: 12,
+                    fontFamily: 'ABCDiatype',
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              IconButton(
+                tooltip: 'Ocultar aviso de borrador',
+                onPressed: onDismiss,
+                visualDensity: VisualDensity.compact,
+                style: IconButton.styleFrom(
+                  fixedSize: const Size(36, 36),
+                  padding: EdgeInsets.zero,
+                ),
+                icon: const Icon(Icons.close_rounded,
+                    color: Colors.white, size: 18),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -1123,18 +2066,25 @@ class _AssistantChatHeader extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(18, 24, 18, 0),
       child: Align(
         alignment: Alignment.centerLeft,
-        child: GestureDetector(
-          onTap: onBack,
-          behavior: HitTestBehavior.opaque,
-          child: const SizedBox(
-            width: 24,
-            height: 42,
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Icon(
-                Icons.arrow_back_ios_new_rounded,
-                color: Colors.white,
-                size: 22,
+        child: Semantics(
+          button: true,
+          label: 'Volver al panel',
+          child: Tooltip(
+            message: 'Volver',
+            child: GestureDetector(
+              onTap: onBack,
+              behavior: HitTestBehavior.opaque,
+              child: const SizedBox(
+                width: 44,
+                height: 44,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Icon(
+                    Icons.arrow_back_ios_new_rounded,
+                    color: Colors.white,
+                    size: 22,
+                  ),
+                ),
               ),
             ),
           ),
@@ -1174,6 +2124,7 @@ class _ChatTopBar extends StatelessWidget {
     required this.sessionId,
     required this.ownerOnline,
     required this.ownerTyping,
+    required this.realtimeStatus,
     required this.onBack,
     required this.onEnd,
     required this.ending,
@@ -1182,6 +2133,7 @@ class _ChatTopBar extends StatelessWidget {
   final String sessionId;
   final bool ownerOnline;
   final bool ownerTyping;
+  final String? realtimeStatus;
   final VoidCallback onBack;
   final VoidCallback? onEnd;
   final bool ending;
@@ -1192,18 +2144,25 @@ class _ChatTopBar extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(18, 24, 18, 0),
       child: Row(
         children: [
-          GestureDetector(
-            onTap: onBack,
-            behavior: HitTestBehavior.opaque,
-            child: const SizedBox(
-              width: 24,
-              height: 42,
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Icon(
-                  Icons.arrow_back_ios_new_rounded,
-                  color: Colors.white,
-                  size: 22,
+          Semantics(
+            button: true,
+            label: 'Volver al panel',
+            child: Tooltip(
+              message: 'Volver',
+              child: GestureDetector(
+                onTap: onBack,
+                behavior: HitTestBehavior.opaque,
+                child: const SizedBox(
+                  width: 44,
+                  height: 44,
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Icon(
+                      Icons.arrow_back_ios_new_rounded,
+                      color: Colors.white,
+                      size: 22,
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -1211,11 +2170,12 @@ class _ChatTopBar extends StatelessWidget {
           const SizedBox(width: 12),
           Expanded(
             child: Text(
-              ownerTyping
-                  ? 'tutor escribiendo...'
-                  : ownerOnline
-                      ? 'tutor en línea'
-                      : 'consulta activa',
+              realtimeStatus ??
+                  (ownerTyping
+                      ? 'tutor escribiendo...'
+                      : ownerOnline
+                          ? 'tutor en línea'
+                          : 'consulta activa'),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
@@ -1225,13 +2185,19 @@ class _ChatTopBar extends StatelessWidget {
               ),
             ),
           ),
-          TextButton(
-            onPressed: ending ? null : onEnd,
-            style: TextButton.styleFrom(
-              foregroundColor: Colors.white,
-              disabledForegroundColor: Colors.white.withValues(alpha: 0.35),
+          Semantics(
+            button: true,
+            enabled: !ending && onEnd != null,
+            label: ending ? 'Cerrando consulta' : 'Cerrar consulta',
+            child: TextButton(
+              onPressed: ending ? null : onEnd,
+              style: TextButton.styleFrom(
+                foregroundColor: Colors.white,
+                disabledForegroundColor: Colors.white.withValues(alpha: 0.35),
+                minimumSize: const Size(44, 44),
+              ),
+              child: Text(ending ? 'cerrando...' : 'cerrar'),
             ),
-            child: Text(ending ? 'cerrando...' : 'cerrar'),
           ),
         ],
       ),
@@ -1497,11 +2463,15 @@ class _ChatBubble extends StatelessWidget {
   const _ChatBubble({
     required this.message,
     this.ownerName = 'tutor',
+    this.onCancelUpload,
+    this.onRetryMessage,
     this.onRefreshAttachment,
   });
 
   final _VetChatMessage message;
   final String ownerName;
+  final ValueChanged<String>? onCancelUpload;
+  final ValueChanged<String>? onRetryMessage;
   final Future<_VetAttachment?> Function(_VetAttachment attachment)?
       onRefreshAttachment;
 
@@ -1555,6 +2525,8 @@ class _ChatBubble extends StatelessWidget {
                         const SizedBox(height: 10),
                       _VetAttachmentStrip(
                         attachments: message.attachments,
+                        clientKey: message.clientKey,
+                        onCancelUpload: onCancelUpload,
                         onRefreshAttachment: onRefreshAttachment,
                       ),
                     ],
@@ -1571,6 +2543,23 @@ class _ChatBubble extends StatelessWidget {
                 fontFamily: 'ABCDiatype',
               ),
             ),
+            if (isVet &&
+                message.deliveryState == 'failed' &&
+                message.clientKey != null &&
+                onRetryMessage != null) ...[
+              const SizedBox(height: 5),
+              TextButton.icon(
+                onPressed: () => onRetryMessage!(message.clientKey!),
+                style: TextButton.styleFrom(
+                  foregroundColor: Colors.white,
+                  minimumSize: const Size(44, 36),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                ),
+                icon: const Icon(Icons.refresh_rounded, size: 16),
+                label: const Text('Reintentar'),
+              ),
+            ],
           ],
         ),
       ),
@@ -1581,10 +2570,14 @@ class _ChatBubble extends StatelessWidget {
 class _VetAttachmentStrip extends StatelessWidget {
   const _VetAttachmentStrip({
     required this.attachments,
+    required this.clientKey,
+    required this.onCancelUpload,
     this.onRefreshAttachment,
   });
 
   final List<_VetAttachment> attachments;
+  final String? clientKey;
+  final ValueChanged<String>? onCancelUpload;
   final Future<_VetAttachment?> Function(_VetAttachment attachment)?
       onRefreshAttachment;
 
@@ -1598,6 +2591,8 @@ class _VetAttachmentStrip extends StatelessWidget {
                 padding: const EdgeInsets.only(bottom: 6),
                 child: _VetAttachmentPreview(
                   attachment: attachment,
+                  clientKey: clientKey,
+                  onCancelUpload: onCancelUpload,
                   onRefreshAttachment: onRefreshAttachment,
                 ),
               ))
@@ -1609,26 +2604,50 @@ class _VetAttachmentStrip extends StatelessWidget {
 class _VetAttachmentPreview extends StatelessWidget {
   const _VetAttachmentPreview({
     required this.attachment,
+    required this.clientKey,
+    required this.onCancelUpload,
     this.onRefreshAttachment,
   });
 
   final _VetAttachment attachment;
+  final String? clientKey;
+  final ValueChanged<String>? onCancelUpload;
   final Future<_VetAttachment?> Function(_VetAttachment attachment)?
       onRefreshAttachment;
 
   @override
   Widget build(BuildContext context) {
     final url = attachment.downloadUrl;
+    final localPath = attachment.localPath;
     final label = switch (attachment.kind) {
       _VetAttachmentKind.image => 'Imagen',
       _VetAttachmentKind.video => 'Video',
       _VetAttachmentKind.voice => 'Nota de voz',
     };
-    if (attachment.kind == _VetAttachmentKind.image && url != null) {
-      final image = Image.network(url, fit: BoxFit.cover);
+    if (attachment.kind == _VetAttachmentKind.image &&
+        (url != null || localPath != null)) {
+      final image = localPath != null
+          ? Image.file(File(localPath), fit: BoxFit.cover)
+          : Image.network(url!, fit: BoxFit.cover);
       return ClipRRect(
         borderRadius: BorderRadius.circular(14),
-        child: SizedBox(width: 220, height: 160, child: image),
+        child: SizedBox(
+          width: 220,
+          height: 160,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              image,
+              if (attachment.isUploading)
+                _VetAttachmentUploadOverlay(
+                  attachment: attachment,
+                  onCancel: clientKey == null || onCancelUpload == null
+                      ? null
+                      : () => onCancelUpload!(clientKey!),
+                ),
+            ],
+          ),
+        ),
       );
     }
     if (attachment.kind == _VetAttachmentKind.voice) {
@@ -1664,7 +2683,9 @@ class _VetAttachmentPreview extends StatelessWidget {
           const SizedBox(width: 8),
           Flexible(
             child: Text(
-              _vetAttachmentLabel(label, attachment),
+              attachment.isUploading
+                  ? 'Subiendo $label ${_vetUploadProgressText(attachment)}'
+                  : _vetAttachmentLabel(label, attachment),
               style: const TextStyle(
                 color: Colors.white,
                 fontSize: 13,
@@ -1675,6 +2696,70 @@ class _VetAttachmentPreview extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _VetAttachmentUploadOverlay extends StatelessWidget {
+  const _VetAttachmentUploadOverlay({required this.attachment, this.onCancel});
+
+  final _VetAttachment attachment;
+  final VoidCallback? onCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    final progress = attachment.uploadProgress.clamp(0.0, 1.0).toDouble();
+    return DecoratedBox(
+      decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.42)),
+      child: Align(
+        alignment: Alignment.bottomLeft,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Subiendo ${_vetUploadProgressText(attachment)}',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontFamily: 'ABC Diatype',
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  if (onCancel != null)
+                    IconButton(
+                      tooltip: 'Cancelar carga',
+                      onPressed: onCancel,
+                      visualDensity: VisualDensity.compact,
+                      style: IconButton.styleFrom(
+                        fixedSize: const Size(36, 36),
+                        padding: EdgeInsets.zero,
+                      ),
+                      icon: const Icon(Icons.close_rounded,
+                          color: Colors.white, size: 18),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 7),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(99),
+                child: LinearProgressIndicator(
+                  value: progress <= 0 ? null : progress,
+                  minHeight: 4,
+                  backgroundColor: Colors.white.withValues(alpha: 0.22),
+                  valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -1838,6 +2923,11 @@ class _VetVoiceNoteBubbleState extends State<_VetVoiceNoteBubble> {
             : _playing
                 ? Icons.pause_rounded
                 : Icons.play_arrow_rounded;
+    final playLabel = _failed
+        ? 'Reintentar nota de voz'
+        : _playing
+            ? 'Pausar nota de voz'
+            : 'Reproducir nota de voz';
 
     return Container(
       width: 232,
@@ -1849,24 +2939,39 @@ class _VetVoiceNoteBubbleState extends State<_VetVoiceNoteBubble> {
       ),
       child: Row(
         children: [
-          GestureDetector(
-            onTap: _togglePlayback,
-            child: Container(
-              width: 34,
-              height: 34,
-              decoration: const BoxDecoration(
-                color: Colors.white,
-                shape: BoxShape.circle,
-              ),
-              child: _loading
-                  ? const Padding(
-                      padding: EdgeInsets.all(9),
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: Colors.black,
+          Semantics(
+            button: true,
+            enabled: !_loading && !widget.attachment.isUploading,
+            label: playLabel,
+            child: Tooltip(
+              message: playLabel,
+              child: GestureDetector(
+                onTap: _togglePlayback,
+                behavior: HitTestBehavior.opaque,
+                child: SizedBox(
+                  width: 44,
+                  height: 44,
+                  child: Center(
+                    child: Container(
+                      width: 34,
+                      height: 34,
+                      decoration: const BoxDecoration(
+                        color: Colors.white,
+                        shape: BoxShape.circle,
                       ),
-                    )
-                  : Icon(icon, color: Colors.black, size: 21),
+                      child: _loading
+                          ? const Padding(
+                              padding: EdgeInsets.all(9),
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.black,
+                              ),
+                            )
+                          : Icon(icon, color: Colors.black, size: 21),
+                    ),
+                  ),
+                ),
+              ),
             ),
           ),
           const SizedBox(width: 10),
@@ -1878,7 +2983,11 @@ class _VetVoiceNoteBubbleState extends State<_VetVoiceNoteBubble> {
                 _VetVoiceWaveform(id: widget.attachment.id, progress: progress),
                 const SizedBox(height: 4),
                 Text(
-                  _failed ? 'Toca para reintentar' : durationText,
+                  _failed
+                      ? 'Toca para reintentar'
+                      : widget.attachment.isUploading
+                          ? 'Subiendo nota de voz ${_vetUploadProgressText(widget.attachment)}'
+                          : durationText,
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.7),
                     fontSize: 11,
@@ -1974,7 +3083,7 @@ class _VetVideoBubbleState extends State<_VetVideoBubble> {
   }
 
   Future<void> _togglePlayback() async {
-    if (_loading) return;
+    if (_loading || widget.attachment.isUploading) return;
     var controller = _controller;
     if (controller == null || !controller.value.isInitialized || _failed) {
       await _initializeVideo();
@@ -2069,9 +3178,16 @@ class _VetVideoBubbleState extends State<_VetVideoBubble> {
                 : Icons.play_arrow_rounded;
     final label = _failed
         ? 'Toca para reintentar'
-        : duration.inMilliseconds > 0
-            ? '${_formatVetVoiceDuration(position)} / ${_formatVetVoiceDuration(duration)}'
-            : _vetAttachmentLabel('Video', widget.attachment);
+        : widget.attachment.isUploading
+            ? 'Subiendo video ${_vetUploadProgressText(widget.attachment)}'
+            : duration.inMilliseconds > 0
+                ? '${_formatVetVoiceDuration(position)} / ${_formatVetVoiceDuration(duration)}'
+                : _vetAttachmentLabel('Video', widget.attachment);
+    final playLabel = _failed
+        ? 'Reintentar video'
+        : playing
+            ? 'Pausar video'
+            : 'Reproducir video';
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(14),
@@ -2079,86 +3195,99 @@ class _VetVideoBubbleState extends State<_VetVideoBubble> {
         width: 232,
         child: AspectRatio(
           aspectRatio: aspectRatio,
-          child: GestureDetector(
-            onTap: _togglePlayback,
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                if (initialized && controller != null)
-                  VideoPlayer(controller)
-                else
-                  Container(color: Colors.white.withValues(alpha: 0.08)),
-                if (overlayVisible)
-                  Container(color: Colors.black.withValues(alpha: 0.34)),
-                Center(
-                  child: Container(
-                    width: 44,
-                    height: 44,
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.94),
-                      shape: BoxShape.circle,
-                    ),
-                    child: _loading
-                        ? const Padding(
-                            padding: EdgeInsets.all(12),
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.black,
-                            ),
-                          )
-                        : Icon(icon, color: Colors.black, size: 26),
-                  ),
-                ),
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: [
-                          Colors.black.withValues(alpha: 0),
-                          Colors.black.withValues(alpha: 0.65),
-                        ],
+          child: Semantics(
+            button: true,
+            enabled: !_loading && !widget.attachment.isUploading,
+            label: playLabel,
+            value: label,
+            child: Tooltip(
+              message: playLabel,
+              child: GestureDetector(
+                onTap: _togglePlayback,
+                behavior: HitTestBehavior.opaque,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    if (initialized && controller != null)
+                      VideoPlayer(controller)
+                    else
+                      Container(color: Colors.white.withValues(alpha: 0.08)),
+                    if (overlayVisible)
+                      Container(color: Colors.black.withValues(alpha: 0.34)),
+                    Center(
+                      child: Container(
+                        width: 44,
+                        height: 44,
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.94),
+                          shape: BoxShape.circle,
+                        ),
+                        child: _loading
+                            ? const Padding(
+                                padding: EdgeInsets.all(12),
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.black,
+                                ),
+                              )
+                            : Icon(icon, color: Colors.black, size: 26),
                       ),
                     ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(999),
-                          child: LinearProgressIndicator(
-                            minHeight: 3,
-                            value: progress,
-                            backgroundColor:
-                                Colors.white.withValues(alpha: 0.24),
-                            valueColor: const AlwaysStoppedAnimation<Color>(
-                                Colors.white),
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 8),
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [
+                              Colors.black.withValues(alpha: 0),
+                              Colors.black.withValues(alpha: 0.65),
+                            ],
                           ),
                         ),
-                        const SizedBox(height: 5),
-                        Text(
-                          label,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: Colors.white.withValues(alpha: 0.86),
-                            fontSize: 11,
-                            fontFamily: 'ABC Diatype',
-                            fontWeight: FontWeight.w600,
-                            height: 1,
-                          ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(999),
+                              child: LinearProgressIndicator(
+                                minHeight: 3,
+                                value: widget.attachment.isUploading
+                                    ? widget.attachment.uploadProgress
+                                        .clamp(0, 1)
+                                    : progress,
+                                backgroundColor:
+                                    Colors.white.withValues(alpha: 0.24),
+                                valueColor: const AlwaysStoppedAnimation<Color>(
+                                    Colors.white),
+                              ),
+                            ),
+                            const SizedBox(height: 5),
+                            Text(
+                              label,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: Colors.white.withValues(alpha: 0.86),
+                                fontSize: 11,
+                                fontFamily: 'ABC Diatype',
+                                fontWeight: FontWeight.w600,
+                                height: 1,
+                              ),
+                            ),
+                          ],
                         ),
-                      ],
+                      ),
                     ),
-                  ),
+                  ],
                 ),
-              ],
+              ),
             ),
           ),
         ),
@@ -2438,9 +3567,11 @@ class _ChatComposer extends StatelessWidget {
     required this.sending,
     required this.mediaEnabled,
     required this.recording,
+    required this.stagedAttachments,
     required this.includeBottomInset,
     required this.onSend,
     required this.onPickMedia,
+    required this.onRemoveAttachment,
     required this.onMicStart,
     required this.onMicStop,
   });
@@ -2450,9 +3581,11 @@ class _ChatComposer extends StatelessWidget {
   final bool sending;
   final bool mediaEnabled;
   final bool recording;
+  final List<_PendingVetAttachment> stagedAttachments;
   final bool includeBottomInset;
   final VoidCallback onSend;
   final VoidCallback onPickMedia;
+  final ValueChanged<_PendingVetAttachment> onRemoveAttachment;
   final VoidCallback onMicStart;
   final Future<void> Function({bool send}) onMicStop;
 
@@ -2462,130 +3595,309 @@ class _ChatComposer extends StatelessWidget {
         includeBottomInset ? MediaQuery.paddingOf(context).bottom : 0.0;
     return Padding(
       padding: EdgeInsets.fromLTRB(18, 8, 18, 14 + bottomInset),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: 46, maxHeight: 150),
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(28),
-            border: Border.all(color: Colors.white.withValues(alpha: 0.055)),
-          ),
-          child: Padding(
-            padding:
-                const EdgeInsets.only(left: 18, right: 6, top: 3, bottom: 3),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: controller,
-                    focusNode: focusNode,
-                    enabled: !sending,
-                    cursorColor: Colors.white,
-                    keyboardType: TextInputType.multiline,
-                    textCapitalization: TextCapitalization.sentences,
-                    minLines: 1,
-                    maxLines: 6,
-                    textInputAction: TextInputAction.send,
-                    onSubmitted: (_) => onSend(),
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontFamily: 'ABC Diatype',
-                      fontSize: 14,
-                      fontWeight: FontWeight.w400,
-                      height: 1.25,
-                      letterSpacing: 0,
-                    ),
-                    decoration: InputDecoration(
-                      border: InputBorder.none,
-                      hintText: sending ? 'Pensando...' : 'escribir mensaje...',
-                      hintStyle: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.32),
-                        fontFamily: 'ABC Diatype',
-                        fontSize: 14,
-                        fontWeight: FontWeight.w400,
-                        height: 1.25,
-                        letterSpacing: 0,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (stagedAttachments.isNotEmpty) ...[
+            _ComposerAttachmentTray(
+              attachments: stagedAttachments,
+              sending: sending,
+              onRemove: onRemoveAttachment,
+            ),
+            const SizedBox(height: 8),
+          ],
+          ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 46, maxHeight: 150),
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(28),
+                border:
+                    Border.all(color: Colors.white.withValues(alpha: 0.055)),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.only(
+                    left: 18, right: 6, top: 3, bottom: 3),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: controller,
+                        focusNode: focusNode,
+                        enabled: !sending,
+                        cursorColor: Colors.white,
+                        keyboardType: TextInputType.multiline,
+                        textCapitalization: TextCapitalization.sentences,
+                        minLines: 1,
+                        maxLines: 6,
+                        textInputAction: TextInputAction.send,
+                        onSubmitted: (_) => onSend(),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontFamily: 'ABC Diatype',
+                          fontSize: 14,
+                          fontWeight: FontWeight.w400,
+                          height: 1.25,
+                          letterSpacing: 0,
+                        ),
+                        decoration: InputDecoration(
+                          border: InputBorder.none,
+                          hintText:
+                              sending ? 'Pensando...' : 'escribir mensaje...',
+                          hintStyle: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.32),
+                            fontFamily: 'ABC Diatype',
+                            fontSize: 14,
+                            fontWeight: FontWeight.w400,
+                            height: 1.25,
+                            letterSpacing: 0,
+                          ),
+                        ),
                       ),
                     ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 5),
-                  child: IconButton(
-                    onPressed: mediaEnabled ? onPickMedia : null,
-                    visualDensity: VisualDensity.compact,
-                    style: IconButton.styleFrom(
-                      fixedSize: const Size(32, 32),
-                      padding: EdgeInsets.zero,
-                    ),
-                    icon: SvgPicture.asset(
-                      'assets/icons/image-video.svg',
-                      width: 17,
-                      height: 17,
-                      colorFilter: ColorFilter.mode(
-                        Colors.white
-                            .withValues(alpha: mediaEnabled ? 0.72 : 0.24),
-                        BlendMode.srcIn,
-                      ),
-                    ),
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 5),
-                  child: GestureDetector(
-                    onTapDown: mediaEnabled ? (_) => onMicStart() : null,
-                    onTapUp: mediaEnabled ? (_) => onMicStop() : null,
-                    onTapCancel:
-                        mediaEnabled ? () => onMicStop(send: false) : null,
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 140),
-                      width: 32,
-                      height: 32,
-                      decoration: BoxDecoration(
-                        color: recording ? Colors.white : Colors.transparent,
-                        shape: BoxShape.circle,
-                      ),
-                      child: Icon(
-                        Icons.mic_rounded,
-                        size: 18,
-                        color: recording
-                            ? Colors.black
-                            : Colors.white
+                    const SizedBox(width: 8),
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 5),
+                      child: IconButton(
+                        tooltip: 'Adjuntar imagen o video',
+                        onPressed: mediaEnabled ? onPickMedia : null,
+                        visualDensity: VisualDensity.compact,
+                        style: IconButton.styleFrom(
+                          fixedSize: const Size(44, 44),
+                          padding: EdgeInsets.zero,
+                        ),
+                        icon: SvgPicture.asset(
+                          'assets/icons/image-video.svg',
+                          width: 17,
+                          height: 17,
+                          colorFilter: ColorFilter.mode(
+                            Colors.white
                                 .withValues(alpha: mediaEnabled ? 0.72 : 0.24),
+                            BlendMode.srcIn,
+                          ),
+                        ),
                       ),
                     ),
-                  ),
-                ),
-                const SizedBox(width: 4),
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 1),
-                  child: IconButton.filled(
-                    onPressed: sending ? null : onSend,
-                    style: IconButton.styleFrom(
-                      backgroundColor: Colors.white,
-                      disabledBackgroundColor:
-                          Colors.white.withValues(alpha: 0.25),
-                      foregroundColor: Colors.black,
-                      fixedSize: const Size(38, 38),
-                    ),
-                    icon: sending
-                        ? const SizedBox(
-                            width: 15,
-                            height: 15,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.black,
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 5),
+                      child: Semantics(
+                        button: true,
+                        enabled: mediaEnabled,
+                        label: recording
+                            ? 'Soltar para adjuntar nota de voz'
+                            : 'Mantener presionado para grabar nota de voz',
+                        child: Tooltip(
+                          message: recording ? 'Soltar voz' : 'Grabar voz',
+                          child: GestureDetector(
+                            onTapDown:
+                                mediaEnabled ? (_) => onMicStart() : null,
+                            onTapUp: mediaEnabled ? (_) => onMicStop() : null,
+                            onTapCancel: mediaEnabled
+                                ? () => onMicStop(send: false)
+                                : null,
+                            behavior: HitTestBehavior.opaque,
+                            child: SizedBox(
+                              width: 44,
+                              height: 44,
+                              child: Center(
+                                child: AnimatedContainer(
+                                  duration: const Duration(milliseconds: 140),
+                                  width: 34,
+                                  height: 34,
+                                  decoration: BoxDecoration(
+                                    color: recording
+                                        ? Colors.white
+                                        : Colors.transparent,
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: Icon(
+                                    Icons.mic_rounded,
+                                    size: 18,
+                                    color: recording
+                                        ? Colors.black
+                                        : Colors.white.withValues(
+                                            alpha: mediaEnabled ? 0.72 : 0.24),
+                                  ),
+                                ),
+                              ),
                             ),
-                          )
-                        : const Icon(Icons.arrow_upward_rounded, size: 19),
-                  ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 1),
+                      child: IconButton.filled(
+                        tooltip: 'Enviar mensaje',
+                        onPressed: sending ? null : onSend,
+                        style: IconButton.styleFrom(
+                          backgroundColor: Colors.white,
+                          disabledBackgroundColor:
+                              Colors.white.withValues(alpha: 0.25),
+                          foregroundColor: Colors.black,
+                          fixedSize: const Size(44, 44),
+                        ),
+                        icon: sending
+                            ? const SizedBox(
+                                width: 15,
+                                height: 15,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.black,
+                                ),
+                              )
+                            : const Icon(Icons.arrow_upward_rounded, size: 19),
+                      ),
+                    ),
+                  ],
                 ),
-              ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ComposerAttachmentTray extends StatelessWidget {
+  const _ComposerAttachmentTray({
+    required this.attachments,
+    required this.sending,
+    required this.onRemove,
+  });
+
+  final List<_PendingVetAttachment> attachments;
+  final bool sending;
+  final ValueChanged<_PendingVetAttachment> onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 72,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: attachments.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (context, index) {
+          final attachment = attachments[index];
+          return _ComposerAttachmentChip(
+            attachment: attachment,
+            sending: sending,
+            onRemove: () => onRemove(attachment),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _ComposerAttachmentChip extends StatelessWidget {
+  const _ComposerAttachmentChip({
+    required this.attachment,
+    required this.sending,
+    required this.onRemove,
+  });
+
+  final _PendingVetAttachment attachment;
+  final bool sending;
+  final VoidCallback onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = switch (attachment.kind) {
+      _VetAttachmentKind.image => 'Imagen',
+      _VetAttachmentKind.video => 'Video',
+      _VetAttachmentKind.voice => 'Voz',
+    };
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Container(
+          width: 142,
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.72),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
+          ),
+          child: Row(
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: SizedBox(
+                  width: 44,
+                  height: 44,
+                  child: attachment.kind == _VetAttachmentKind.image
+                      ? Image.file(File(attachment.path), fit: BoxFit.cover)
+                      : ColoredBox(
+                          color: Colors.white.withValues(alpha: 0.10),
+                          child: Icon(
+                            attachment.kind == _VetAttachmentKind.video
+                                ? Icons.play_arrow_rounded
+                                : Icons.mic_rounded,
+                            color: Colors.white,
+                            size: 22,
+                          ),
+                        ),
+                ),
+              ),
+              const SizedBox(width: 9),
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      sending ? 'Subiendo' : 'Listo',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.52),
+                        fontSize: 10,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        Positioned(
+          top: -13,
+          right: -13,
+          child: SizedBox(
+            width: 44,
+            height: 44,
+            child: Center(
+              child: IconButton.filled(
+                tooltip: 'Quitar adjunto',
+                onPressed: sending ? null : onRemove,
+                style: IconButton.styleFrom(
+                  backgroundColor: Colors.white,
+                  disabledBackgroundColor: Colors.white.withValues(alpha: 0.35),
+                  foregroundColor: Colors.black,
+                  fixedSize: const Size(30, 30),
+                  padding: EdgeInsets.zero,
+                ),
+                icon: const Icon(Icons.close_rounded, size: 15),
+              ),
             ),
           ),
         ),
-      ),
+      ],
     );
   }
 }
@@ -2646,7 +3958,8 @@ class _VetChatMessage {
       this.streamOrder,
       this.attachments = const [],
       this.deliveredByOther = false,
-      this.readByOther = false});
+      this.readByOther = false,
+      this.deliveryState});
 
   factory _VetChatMessage.fromJson(Map<String, dynamic> json) {
     return _VetChatMessage(
@@ -2665,15 +3978,24 @@ class _VetChatMessage {
     );
   }
 
-  factory _VetChatMessage.local(
-      {required String role, required String content}) {
+  factory _VetChatMessage.local({
+    required String role,
+    required String content,
+    String? id,
+    String? clientKey,
+    String? deliveryState,
+    List<_VetAttachment> attachments = const [],
+  }) {
     return _VetChatMessage(
-      id: _nextVetAssistantMessageId(),
+      id: id ?? _nextVetAssistantMessageId(),
       senderId: Supabase.instance.client.auth.currentUser?.id,
       role: role,
       content: content,
       createdAt: DateTime.now(),
+      clientKey: clientKey,
       streamOrder: null,
+      attachments: attachments,
+      deliveryState: deliveryState,
     );
   }
 
@@ -2687,10 +4009,13 @@ class _VetChatMessage {
   final List<_VetAttachment> attachments;
   final bool deliveredByOther;
   final bool readByOther;
+  final String? deliveryState;
 
   _VetChatMessage copyWith({
     bool? deliveredByOther,
     bool? readByOther,
+    List<_VetAttachment>? attachments,
+    String? deliveryState,
   }) {
     return _VetChatMessage(
       id: id,
@@ -2700,9 +4025,10 @@ class _VetChatMessage {
       createdAt: createdAt,
       clientKey: clientKey,
       streamOrder: streamOrder,
-      attachments: attachments,
+      attachments: attachments ?? this.attachments,
       deliveredByOther: deliveredByOther ?? this.deliveredByOther,
       readByOther: readByOther ?? this.readByOther,
+      deliveryState: deliveryState ?? this.deliveryState,
     );
   }
 
@@ -2710,10 +4036,22 @@ class _VetChatMessage {
     return copyWith(
       deliveredByOther: previous.deliveredByOther,
       readByOther: previous.readByOther,
+      attachments: attachments.isEmpty && previous.attachments.isNotEmpty
+          ? previous.attachments
+          : null,
     );
   }
 
   String label({String ownerName = 'tutor'}) {
+    if (streamOrder == null && role == 'vet') {
+      return switch (deliveryState) {
+        'failed' => 'Failed',
+        'retrying' => 'Retrying...',
+        'queued' => 'Queued',
+        'sending' => 'Sending...',
+        _ => '',
+      };
+    }
     final ownerLabel = ownerName.trim().isEmpty ? 'tutor' : ownerName.trim();
     if (role == 'vet') {
       final receipt = readByOther
@@ -2755,6 +4093,27 @@ class _PendingVetAttachment {
   final int byteSize;
   final int? durationMs;
 
+  factory _PendingVetAttachment.fromJson(Map<String, dynamic> json) {
+    final kindRaw = json['kind']?.toString().toLowerCase();
+    final kind = switch (kindRaw) {
+      'video' => _VetAttachmentKind.video,
+      'voice' => _VetAttachmentKind.voice,
+      _ => _VetAttachmentKind.image,
+    };
+    return _PendingVetAttachment(
+      kind: kind,
+      path: json['path']?.toString() ?? '',
+      fileName: json['fileName']?.toString() ??
+          json['file_name']?.toString() ??
+          'attachment',
+      contentType: json['contentType']?.toString() ??
+          json['content_type']?.toString() ??
+          'application/octet-stream',
+      byteSize: _asInt(json['byteSize'] ?? json['byte_size']) ?? 0,
+      durationMs: _asInt(json['durationMs'] ?? json['duration_ms']),
+    );
+  }
+
   Map<String, dynamic> toUploadBody() => {
         'kind': kind.name,
         'fileName': fileName,
@@ -2762,6 +4121,233 @@ class _PendingVetAttachment {
         'byteSize': byteSize,
         if (durationMs != null) 'durationMs': durationMs,
       };
+
+  Map<String, dynamic> toJson() => {
+        'kind': kind.name,
+        'path': path,
+        'fileName': fileName,
+        'contentType': contentType,
+        'byteSize': byteSize,
+        if (durationMs != null) 'durationMs': durationMs,
+      };
+
+  _VetAttachment toPreviewAttachment() => _VetAttachment(
+        id: path,
+        kind: kind,
+        contentType: contentType,
+        byteSize: byteSize,
+        durationMs: durationMs,
+        localPath: path,
+        status: 'uploading',
+        uploadProgress: 0,
+      );
+}
+
+class _VetOutboxEntry {
+  const _VetOutboxEntry({
+    required this.sessionId,
+    required this.clientKey,
+    required this.text,
+    required this.attachments,
+    required this.status,
+    required this.attempts,
+    required this.createdAt,
+    required this.updatedAt,
+    this.lastError,
+    this.lastErrorCode,
+    this.nextRetryAt,
+  });
+
+  final String sessionId;
+  final String clientKey;
+  final String text;
+  final List<_PendingVetAttachment> attachments;
+  final String status;
+  final int attempts;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+  final String? lastError;
+  final String? lastErrorCode;
+  final DateTime? nextRetryAt;
+
+  bool get retryDue =>
+      nextRetryAt == null || !nextRetryAt!.isAfter(DateTime.now());
+
+  factory _VetOutboxEntry.fromJson(Map<String, dynamic> json) {
+    return _VetOutboxEntry(
+      sessionId: json['sessionId']?.toString() ?? '',
+      clientKey: json['clientKey']?.toString() ?? '',
+      text: json['text']?.toString() ?? '',
+      attachments: (_asList(json['attachments']) ?? const [])
+          .map(_asMap)
+          .whereType<Map<String, dynamic>>()
+          .map(_PendingVetAttachment.fromJson)
+          .where((attachment) => attachment.path.isNotEmpty)
+          .toList(growable: false),
+      status: json['status']?.toString() ?? 'queued',
+      attempts: _asInt(json['attempts']) ?? 0,
+      createdAt: _parseDateTime(json['createdAt']) ?? DateTime.now(),
+      updatedAt: _parseDateTime(json['updatedAt']) ?? DateTime.now(),
+      lastError: json['lastError']?.toString(),
+      lastErrorCode: json['lastErrorCode']?.toString(),
+      nextRetryAt: _parseDateTime(json['nextRetryAt']),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'sessionId': sessionId,
+        'clientKey': clientKey,
+        'text': text,
+        'attachments': attachments
+            .map((attachment) => attachment.toJson())
+            .toList(growable: false),
+        'status': status,
+        'attempts': attempts,
+        'createdAt': createdAt.toIso8601String(),
+        'updatedAt': updatedAt.toIso8601String(),
+        if (lastError != null) 'lastError': lastError,
+        if (lastErrorCode != null) 'lastErrorCode': lastErrorCode,
+        if (nextRetryAt != null) 'nextRetryAt': nextRetryAt!.toIso8601String(),
+      };
+
+  _VetOutboxEntry copyWith({
+    String? status,
+    int? attempts,
+    DateTime? updatedAt,
+    String? lastError,
+    String? lastErrorCode,
+    DateTime? nextRetryAt,
+  }) {
+    return _VetOutboxEntry(
+      sessionId: sessionId,
+      clientKey: clientKey,
+      text: text,
+      attachments: attachments,
+      status: status ?? this.status,
+      attempts: attempts ?? this.attempts,
+      createdAt: createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      lastError: lastError ?? this.lastError,
+      lastErrorCode: lastErrorCode ?? this.lastErrorCode,
+      nextRetryAt: nextRetryAt ?? this.nextRetryAt,
+    );
+  }
+
+  _VetChatMessage toMessage() => _VetChatMessage.local(
+        role: 'vet',
+        content: text,
+        id: clientKey,
+        clientKey: clientKey,
+        deliveryState: status,
+        attachments: attachments
+            .map((attachment) => attachment.toPreviewAttachment())
+            .toList(growable: false),
+      );
+}
+
+class _VetOutboxStore {
+  static const _fileName = 'vet_consult_chat_outbox.json';
+
+  static Future<File> _file() async {
+    final directory = await getApplicationSupportDirectory();
+    await directory.create(recursive: true);
+    return File('${directory.path}/$_fileName');
+  }
+
+  static Future<List<_VetOutboxEntry>> _readAll() async {
+    try {
+      final file = await _file();
+      if (!await file.exists()) return const [];
+      final decoded = jsonDecode(await file.readAsString());
+      return (_asList(decoded) ?? const [])
+          .map(_asMap)
+          .whereType<Map<String, dynamic>>()
+          .map(_VetOutboxEntry.fromJson)
+          .where((entry) =>
+              entry.sessionId.isNotEmpty && entry.clientKey.isNotEmpty)
+          .toList(growable: false);
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  static Future<void> _writeAll(List<_VetOutboxEntry> entries) async {
+    final file = await _file();
+    await file.writeAsString(jsonEncode(
+        entries.map((entry) => entry.toJson()).toList(growable: false)));
+  }
+
+  static Future<List<_VetOutboxEntry>> entriesForSession(
+      String sessionId) async {
+    final entries = await _readAll();
+    return entries
+        .where((entry) => entry.sessionId == sessionId)
+        .toList(growable: false)
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+  }
+
+  static Future<void> upsert(_VetOutboxEntry entry) async {
+    final entries = await _readAll();
+    final index = entries
+        .indexWhere((candidate) => candidate.clientKey == entry.clientKey);
+    if (index >= 0) {
+      entries[index] = entry;
+    } else {
+      entries.add(entry);
+    }
+    await _writeAll(entries);
+  }
+
+  static Future<void> remove(String clientKey) async {
+    final entries = await _readAll();
+    entries.removeWhere((entry) => entry.clientKey == clientKey);
+    await _writeAll(entries);
+  }
+}
+
+class _VetDraftStore {
+  static const _fileName = 'vet_consult_chat_drafts.json';
+
+  static Future<File> _file() async {
+    final directory = await getApplicationSupportDirectory();
+    await directory.create(recursive: true);
+    return File('${directory.path}/$_fileName');
+  }
+
+  static Future<Map<String, String>> _readAll() async {
+    try {
+      final file = await _file();
+      if (!await file.exists()) return const {};
+      final decoded = jsonDecode(await file.readAsString());
+      final map = _asMap(decoded);
+      if (map == null) return const {};
+      return map.map((key, value) => MapEntry(key, value?.toString() ?? ''));
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  static Future<void> _writeAll(Map<String, String> drafts) async {
+    final file = await _file();
+    await file.writeAsString(jsonEncode(drafts));
+  }
+
+  static Future<String?> read(String sessionId) async {
+    final drafts = await _readAll();
+    return drafts[sessionId];
+  }
+
+  static Future<void> save(String sessionId, String draft) async {
+    final drafts = Map<String, String>.from(await _readAll());
+    if (draft.trim().isEmpty) {
+      drafts.remove(sessionId);
+    } else {
+      drafts[sessionId] = draft;
+    }
+    await _writeAll(drafts);
+  }
+
+  static Future<void> clear(String sessionId) => save(sessionId, '');
 }
 
 class _VetAttachment {
@@ -2772,6 +4358,9 @@ class _VetAttachment {
     required this.byteSize,
     this.durationMs,
     this.downloadUrl,
+    this.localPath,
+    this.status,
+    this.uploadProgress = 0,
   });
 
   factory _VetAttachment.fromJson(Map<String, dynamic> json) {
@@ -2791,6 +4380,7 @@ class _VetAttachment {
       durationMs: _asInt(json['durationMs'] ?? json['duration_ms']),
       downloadUrl:
           json['downloadUrl']?.toString() ?? json['download_url']?.toString(),
+      uploadProgress: _asDouble(json['uploadProgress']) ?? 0,
     );
   }
 
@@ -2800,6 +4390,28 @@ class _VetAttachment {
   final int byteSize;
   final int? durationMs;
   final String? downloadUrl;
+  final String? localPath;
+  final String? status;
+  final double uploadProgress;
+
+  bool get isUploading => status == 'uploading';
+
+  _VetAttachment copyWith({
+    String? status,
+    double? uploadProgress,
+  }) {
+    return _VetAttachment(
+      id: id,
+      kind: kind,
+      contentType: contentType,
+      byteSize: byteSize,
+      durationMs: durationMs,
+      downloadUrl: downloadUrl,
+      localPath: localPath,
+      status: status ?? this.status,
+      uploadProgress: uploadProgress ?? this.uploadProgress,
+    );
+  }
 }
 
 class _VetHandoffBrief {
@@ -2863,6 +4475,12 @@ int? _asInt(Object? value) {
   return int.tryParse(value?.toString() ?? '');
 }
 
+double? _asDouble(Object? value) {
+  if (value is double) return value;
+  if (value is num) return value.toDouble();
+  return double.tryParse(value?.toString() ?? '');
+}
+
 List<String> _stringList(Object? value) {
   final list = _asList(value);
   if (list == null) return const <String>[];
@@ -2920,6 +4538,38 @@ String _vetAttachmentLabel(String label, _VetAttachment attachment) {
   return '$label · ${_formatVetVoiceDuration(Duration(milliseconds: duration))}';
 }
 
+String _vetUploadProgressText(_VetAttachment attachment) {
+  final percent = (attachment.uploadProgress.clamp(0.0, 1.0) * 100).round();
+  return '$percent%';
+}
+
+String _vetChatDateLabel(DateTime date) {
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+  final day = DateTime(date.year, date.month, date.day);
+  final difference = today.difference(day).inDays;
+  if (difference == 0) return 'Hoy';
+  if (difference == 1) return 'Ayer';
+  const months = [
+    'ene',
+    'feb',
+    'mar',
+    'abr',
+    'may',
+    'jun',
+    'jul',
+    'ago',
+    'sep',
+    'oct',
+    'nov',
+    'dic',
+  ];
+  final month = months[(date.month - 1).clamp(0, 11)];
+  return date.year == now.year
+      ? '${date.day} $month'
+      : '${date.day} $month ${date.year}';
+}
+
 String _formatVetVoiceDuration(Duration duration) {
   final seconds = duration.inSeconds;
   final minutes = seconds ~/ 60;
@@ -2942,4 +4592,21 @@ class _VetChatException implements Exception {
 
   @override
   String toString() => message;
+}
+
+class _VetUploadCanceledException implements Exception {
+  const _VetUploadCanceledException();
+
+  @override
+  String toString() => 'upload_canceled';
+}
+
+class _VetUploadCancelToken {
+  bool _canceled = false;
+
+  bool get canceled => _canceled;
+
+  void cancel() {
+    _canceled = true;
+  }
 }

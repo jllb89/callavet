@@ -14,6 +14,7 @@
 - Support: Admin tools for refunds/credits, logout-all, pricing controls; logging for billing events.
 - Performance: Verify pgvector index settings and analyze after embeddings backfill.
 - AI: Apply migration `0051`; set `AI_PROVIDER`, `AI_PROVIDER_BASE_URL`, `AI_API_MODE`, `AI_PROVIDER_API_KEY` or `OPENAI_API_KEY`, `AI_MODEL`, `AI_EMBEDDING_MODEL`, `AI_REASONING_EFFORT`, and `AI_REQUEST_TIMEOUT_MS`; verify feature flags in `ai_feature_flags`; run dry-run and real-provider AI smokes before launch.
+- Chat media processing and chat ops: Apply migrations through `0071`; ensure gateway image includes FFmpeg and ClamAV; set `CHAT_MEDIA_PROCESSING_ENABLED=true`, `CHAT_MEDIA_PROCESSING_RUN_ON_START=true`, `CHAT_MEDIA_PROCESSING_INTERVAL_MS`, `CHAT_MEDIA_PROCESSING_BATCH_SIZE`, `CHAT_MEDIA_MALWARE_SCAN_COMMAND`, and `AI_TRANSCRIPTION_MODEL`; optionally set `CHAT_OPS_ALERT_WEBHOOK_URL` and `CHAT_OPS_ALERT_WEBHOOK_TOKEN` for active reliability/media alert delivery; configure the production OpenTelemetry SDK/exporter for gateway spans; verify `SUPABASE_SERVICE_ROLE_KEY` and AI provider env vars are present for transcription and transcript handoff summaries; run `zsh env/scripts/smoke-chat-media-processing.sh` after deploy.
 - Rollout: Staging smoke tests; cutover plan; feature flags if needed.
 
 ## Phase 5 AI Launch Gates

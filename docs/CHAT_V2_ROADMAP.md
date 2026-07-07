@@ -19,9 +19,20 @@ Already implemented:
 - Read/delivered labels, typing status, and basic online presence.
 - Admin media metrics, transcript export with signed links, audit logs, and orphan pending upload cleanup.
 
-Known gap:
+Implemented in the Phase 0/1 first pass:
 
-- The chat works, but it is still memory-first on the client. It needs a durable local outbox, reconnect catch-up, formal message state machine, upload progress, accessibility pass, and deep telemetry before it should be called world-class.
+- Attachment-safe reconciliation now preserves hydrated media when raw Postgres message events arrive without attachments.
+- Owner and vet chat screens run cursor catch-up on subscribe, foreground/resume, and refresh paths using `afterStreamOrder`.
+- Owner and vet sends now create stable local `clientKey` values, persist pending text/media sends to a durable app-support outbox before network calls, show sending/retrying/failed state, time out stalled sends, and reconcile the local message when REST confirms.
+
+Implemented in the Phase 2/3 first pass:
+
+- Owner and vet media selection now stages images, videos, and voice notes in the composer before send, with remove-before-send and a visible ready/uploading state.
+- Owner and vet Realtime channels now surface reconnect status, schedule backoff reconnects after channel errors, run catch-up after resubscribe, ignore stale typing events, stop typing on send/focus loss/background, and debounce read receipts.
+
+Remaining gap:
+
+- The chat now has a first durable outbox, structured retry metadata with retryable-error backoff, media staging, native image/video compression before upload, real byte-level upload progress, upload cancel/retry controls, reconnect catch-up, client/backend reliability telemetry, gateway OpenTelemetry API spans, admin alert delivery hooks, an admin reliability dashboard, draft restore banners, date/unread markers, an accessibility/haptics pass, a media-processing job queue with FFmpeg/ClamAV hardening, voice transcript summarization into vet handoff context, and chat media/reliability smoke coverage. It still needs a shared repository/sync abstraction, formal Flutter reducer/widget/integration tests, dynamic-text QA, and a normalized Drift/SQLite store before it should be called world-class.
 
 ## Product Principles
 
@@ -58,6 +69,8 @@ Known gap:
 
 ## Phase 0: Correctness Before Manual Testing
 
+Status: implemented in the owner and vet chat screens, with reducer tests still pending.
+
 Purpose: remove the highest-risk reliability defects before deep manual QA.
 
 Implement:
@@ -77,18 +90,23 @@ Acceptance criteria:
 
 ## Phase 1: Durable Outbox and Message State Machine
 
+Status: first-pass implementation complete for owner and vet consult sends using a file-backed app-support outbox, plus file-backed consult draft restore. Retryable failures now persist structured error metadata, jittered next-retry timestamps, and bounded automatic retry scheduling; hard failures such as auth, closed sessions, unsupported media, and size limits remain manual/non-retryable. A future hardening pass should migrate this to `drift`.
+
 Purpose: make sends resilient to app kills, poor network, duplicate taps, and route changes.
 
-Implement:
+Implemented in first pass:
 
-- Add local `drift` tables for chat messages, outbox entries, attachment drafts, upload attempts, and sync cursors.
-- Persist drafts per session.
-- Persist pending text/media sends before any network call.
-- Flush outbox on network regain, app foreground, route entry, and manual retry.
+- Persist pending text/media sends before network calls.
+- Flush outbox on app foreground, route/message load, cursor catch-up, and manual retry.
+- Persist and restore unsent consult text drafts per session.
 - Use stable local IDs and `clientKey` mapping to reconcile local pending messages with server messages.
-- Store send attempt count, next retry time, last error code, and created/updated timestamps.
-- Add exponential retry with jitter for retryable failures.
-- Do not retry non-retryable errors such as unauthorized, session closed, unsupported media type, or hard size limit.
+- Store send attempt count, last error, and created/updated timestamps.
+- Show owner and vet labels for sending, retrying, failed, delivered, and read states.
+
+Remaining implementation work:
+
+- Add local `drift` tables for chat messages, outbox entries, draft rows, attachment drafts, upload attempts, and sync cursors.
+- Add richer retry classification using gateway response codes instead of client-side coarse error mapping.
 
 Acceptance criteria:
 
@@ -99,17 +117,24 @@ Acceptance criteria:
 
 ## Phase 2: Media Upload UX and Staging
 
+Status: implementation complete for owner and vet composer staging, remove-before-send, local previews, pre-upload validation, visible ready/uploading state, native image/video compression before upload, real byte-level upload progress, upload cancellation, and failed-message retry. Remaining hardening work is video thumbnails and richer failed-media reasons.
+
 Purpose: make media feel fast and controlled, especially on slow networks.
 
-Implement:
+Implemented in first pass:
 
 - Pre-send staging tray for selected images, selected video, and recorded voice notes.
 - Remove-before-send for staged media.
-- Per-attachment upload progress where the upload layer supports progress callbacks.
-- Cancel upload and retry upload actions.
 - Client-side validation before signed URL creation: file type, size, duration, and visible error copy.
-- Image compression before upload, preserving enough quality for clinical inspection.
-- Video compression/transcoding path for large videos, using native platform encoders where possible.
+- Local previews for staged images and icon previews for staged video/voice.
+- Per-attachment byte-level upload progress during signed media uploads.
+- Cancel controls for in-flight uploads and inline retry actions for failed consult sends.
+- Better pending media state inside the optimistic bubble while upload/send is in progress.
+- Images are compressed to clinical-inspection-friendly JPEGs before upload when compression reduces size.
+- Videos run through the platform video compressor before upload when compression reduces size, while preserving audio and falling back to the original file if compression fails.
+
+Remaining implementation work:
+
 - Generated thumbnails for local and remote videos.
 - Better failed media state inside the bubble, including reason and retry.
 
@@ -122,17 +147,22 @@ Acceptance criteria:
 
 ## Phase 3: Realtime Reliability and Presence Polish
 
+Status: first-pass implementation complete for owner and vet channel status handling, reconnect backoff, catch-up after resubscribe, stale typing expiry, typing stop events, and read receipt batching. Remaining work is extracting a typed Realtime wrapper and adding deeper reconnect telemetry/tests.
+
 Purpose: make live chat robust when Realtime is imperfect.
 
-Implement:
+Implemented in first pass:
 
-- Typed Realtime event wrapper for `messages`, `receipts`, `typing`, and presence events.
 - Channel status handling for subscribed, closed, errored, timed out, and reconnecting states.
 - Reconnect backoff with cursor catch-up after every successful resubscribe.
-- Presence join/leave micro-events that do not spam the thread.
 - Stale typing expiry based on event timestamp, not only local timers.
 - Typing stop event on send, blur, route exit, and app background.
 - Receipt batching so visible-read updates do not hammer the gateway.
+
+Remaining implementation work:
+
+- Typed Realtime event wrapper for `messages`, `receipts`, `typing`, and presence events.
+- Presence join/leave micro-events that do not spam the thread.
 
 Acceptance criteria:
 
@@ -142,15 +172,23 @@ Acceptance criteria:
 
 ## Phase 4: Observability and Operations
 
+Status: first-pass implementation complete for durable chat telemetry intake, owner/vet client telemetry emission, sanitized correlation IDs, gateway OpenTelemetry API spans, admin chat reliability/media endpoints, and structured alert delivery hooks. Remaining hardening work is production SLO dashboards and exporter/paging configuration.
+
 Purpose: make chat health measurable before users report issues.
 
-Implement:
+Implemented in first pass:
 
-- Gateway OpenTelemetry spans for message create/list/read, attachment upload-url, attachment verify, signed URL refresh, and Broadcast emit.
-- Client telemetry for send latency, ack latency, realtime reconnect count, catch-up count, upload duration, upload failure reason, playback refresh attempts, and read receipt delay.
-- Correlate `clientKey`, message ID, session ID, and actor role in logs without leaking message body or private storage paths.
-- Admin chat reliability dashboard: send failure rate, p95 send latency, p95 first vet response, reconnect recovery count, upload failure rate, stale pending uploads, signed URL refresh failure rate.
-- Alert thresholds for elevated create failures, realtime catch-up spikes, attachment verification failures, and orphaned uploads.
+- Added `chat_telemetry_events` storage with RLS and metadata comments forbidding message bodies/private storage paths.
+- Added `POST /sessions/{sessionId}/telemetry` with rate limiting, participant access checks, sanitized metadata, and admin/audit rejection.
+- Owner and vet clients now emit non-blocking telemetry for send started/completed/failed, upload started/progress/completed/failed, realtime reconnect, catch-up, playback signed URL refresh, and read receipt delay.
+- Client telemetry correlates session, actor role, `clientKey`, message ID, attachment ID, durations, counts, and coarse error codes without sending message text or private paths.
+- Added `GET /admin/ops/chat-reliability` with 24h send/upload/reconnect/catch-up/playback metrics, playback signed URL refresh failure rate, p95 first-vet-response latency, p95 latency summaries, stale pending upload checks, failure reason summaries, and alert flags.
+- Added gateway OpenTelemetry API spans for message create/list/read, attachment upload-url creation, signed upload URL signing, attachment verification, signed download URL refresh, and private Broadcast emit.
+- Added alert delivery wiring for chat reliability and media ops warnings/critical states: active alerts are emitted as structured gateway logs and optionally POSTed to `CHAT_OPS_ALERT_WEBHOOK_URL`/`OPS_ALERT_WEBHOOK_URL` with bearer-token support.
+
+Remaining implementation work:
+
+- Install/configure the production OpenTelemetry SDK/exporter and promote dashboard metrics into production SLOs and paging thresholds.
 
 Acceptance criteria:
 
@@ -160,17 +198,25 @@ Acceptance criteria:
 
 ## Phase 5: Accessibility and UX Finish
 
+Status: first-pass implementation complete for owner and vet accessibility labels, screen-reader announcements, larger primary hit targets, haptics on record/send outcomes, upload cancel/retry semantics, draft restore banners, date separators, and unread markers. Remaining hardening work is widget-level accessibility tests and deeper dynamic-text QA.
+
 Purpose: make the current UI usable, fast, and clear for all users.
 
-Implement:
+Implemented in first pass:
 
-- `Semantics` labels for send, attach, mic hold, cancel upload, retry, play/pause voice, play/pause video, end consult, and survey actions.
-- Screen-reader announcements for new incoming message, typing state, upload failed, send failed, and vet entered chat.
-- Larger hit targets for media, mic, retry, and playback controls while preserving the current look.
+- Owner and vet controls now expose semantic labels/tooltips for back, end consult, send, attach media, hold-to-record voice, remove staged media, and voice/video playback retry/play/pause.
+- Owner survey/service action pills now behave as semantic buttons with selected/enabled state.
+- Owner and vet chat screens announce new incoming messages, remote typing, presence entry/online changes, staged/removed attachments, upload failures, send failures, and voice recording state without reading clinical message bodies aloud.
+- Composer media, mic, send, staged attachment remove, header, and playback controls now use larger 44px touch targets while preserving the existing visual shell.
+- Owner and vet add haptic feedback for hold-to-record start/stop and send success/failure.
+- Owner and vet upload overlays expose labeled cancel controls, and failed consult messages expose labeled retry actions.
+- Owner and vet consults restore unsent text drafts with dismissible banners.
+- Owner and vet consult threads show inline date separators and unread markers after catch-up.
+
+Remaining implementation work:
+
 - Dynamic text checks for all bubble metadata and buttons.
-- Haptic feedback for hold-to-record start/stop and send success/failure where appropriate.
-- Unsent draft restore banner when returning to a consult.
-- Inline date separators and unread marker for long consults.
+- Widget-level accessibility coverage for the new cancel/retry, draft, date, and unread states.
 
 Acceptance criteria:
 
@@ -180,14 +226,21 @@ Acceptance criteria:
 
 ## Phase 6: Testing System
 
+Status: smoke-test first pass implemented for chat realtime/message reliability, admin media metrics, media processing worker trigger, and reliability dashboard metric shape. Formal Flutter reducer/widget/integration tests are still pending.
+
 Purpose: catch delivery regressions before staging/manual testing.
+
+Implemented in first pass:
+
+- Existing `env/scripts/smoke-chat-consult-realtime.sh` covers assigned chat start, AI handoff load, owner/vet message send, duplicate `clientKey` idempotency, cursor sync, read receipts, survey eligibility, and admin chat consultation/media ops endpoints.
+- Added `env/scripts/smoke-chat-media-processing.sh` to verify chat media ops, the processing jobs migration, dry-run and live worker trigger behavior, and the reliability dashboard fields for playback refresh failure rate and first-vet-response latency.
 
 Implement:
 
 - Flutter reducer unit tests for ordering, duplicate handling, receipts, attachment preservation, and local/server reconciliation.
 - Flutter widget tests for message states, media bubbles, retry actions, typing status, and accessibility labels.
 - Integration tests for owner/vet text chat, image upload, video upload/playback, voice upload/playback, signed URL refresh, read receipts, and reconnect catch-up.
-- Bash or Node smoke tests for attachment upload URL, signed upload access, message attach, list hydration, signed URL refresh, remove, and admin transcript export.
+- Bash or Node smoke tests for full attachment upload URL, signed upload access, message attach, list hydration, signed URL refresh, remove, and admin transcript export.
 - Network chaos test plan: airplane mode, app background, app kill, slow network, duplicate taps, expired signed URL, large media, and closed session.
 
 Acceptance criteria:
@@ -198,16 +251,23 @@ Acceptance criteria:
 
 ## Phase 7: Media Intelligence Workers
 
+Status: hardening implementation complete for a durable processing job queue, admin worker trigger, production scheduler, operational metrics, FFmpeg image/video thumbnail generation, FFmpeg server-side voice waveform extraction, ClamAV-compatible malware scanning integration, processing status broadcasts, optional OpenAI-compatible voice transcription, and transcript summarization into vet handoff context.
+
 Purpose: make media clinically useful after delivery.
+
+Implemented in first pass:
+
+- Added `chat_media_processing_jobs` with RLS, per-attachment unique tasks, pending/running/succeeded/failed/skipped state, attempts, result metadata, and automatic enqueueing when attachments become ready.
+- Added a gateway `ChatMediaProcessingService` that claims pending jobs, writes structured per-task processing metadata back onto `message_attachments`, generates image/video thumbnails with FFmpeg, extracts server-side voice waveforms with FFmpeg when no client waveform exists, validates coarse media safety constraints, runs a configured malware scanner, marks unsafe attachments failed, and transcribes voice notes through the configured OpenAI-compatible audio transcription endpoint when provider/storage credentials exist.
+- Added opt-in scheduler controls (`CHAT_MEDIA_PROCESSING_ENABLED`, interval, batch size, stale timeout, and run-on-start) plus Render defaults and gateway image FFmpeg/ClamAV packages.
+- Added `POST /admin/ops/chat-media/process` for dry-run and bounded worker execution, plus chat-media ops metrics/alerts for processing job table readiness, worker config, per-task latency, stale jobs, failed jobs, and failure reasons.
+- Added private consult-room `attachment_processing` status broadcasts for ready/failed worker results without exposing signed URLs or storage paths.
+- Voice note transcriptions now generate factual, non-diagnostic handoff summaries and merge them into `ai_handoffs.summary_text`/structured handoff fields, with a private `handoff_updated` broadcast for clients to refresh.
+- Added smoke coverage for media processing readiness and trigger behavior.
 
 Implement:
 
-- Image and video thumbnail generation worker.
-- Voice waveform extraction from real audio.
-- Voice transcription worker with status updates.
-- Optional AI summarization of transcribed voice notes into vet handoff context.
-- Malware/content safety scan for uploaded media before exposing it broadly.
-- Attachment processing status events for ready/failed worker results.
+- Tune production scanner definitions and scheduler thresholds from live volume.
 
 Acceptance criteria:
 
@@ -242,7 +302,7 @@ Go only when:
 - Text and media sends have durable retry states.
 - Upload progress/cancel/retry exists for slow media.
 - Accessibility labels exist for every custom chat control.
-- Chat reliability telemetry exists in both client and gateway.
+- Chat reliability telemetry and gateway operation spans exist in both client and gateway.
 - Automated tests cover reducer, reconnect, send retry, media lifecycle, and signed URL refresh.
 
 ## Recommended Implementation Order

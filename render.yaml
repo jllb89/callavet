@@ -62,6 +62,22 @@ services:
         value: low
       - key: AI_REQUEST_TIMEOUT_MS
         value: "30000"
+      - key: CHAT_MEDIA_PROCESSING_ENABLED
+        value: "true"
+      - key: CHAT_MEDIA_PROCESSING_RUN_ON_START
+        value: "true"
+      - key: CHAT_MEDIA_PROCESSING_INTERVAL_MS
+        value: "60000"
+      - key: CHAT_MEDIA_PROCESSING_BATCH_SIZE
+        value: "10"
+      - key: CHAT_MEDIA_MALWARE_SCAN_COMMAND
+        value: clamscan
+      - key: AI_TRANSCRIPTION_MODEL
+        value: gpt-4o-transcribe
+      - key: CHAT_OPS_ALERT_WEBHOOK_URL
+        sync: false
+      - key: CHAT_OPS_ALERT_WEBHOOK_TOKEN
+        sync: false
 
   - type: web
     name: cav-webhooks-staging

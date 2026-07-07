@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Headers, HttpCode, HttpException, HttpStatus, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { Span, SpanStatusCode, trace } from '@opentelemetry/api';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import WebSocket from 'ws';
 import { AuthGuard } from '../auth/auth.guard';
@@ -41,6 +42,26 @@ type SessionAttachmentUploadBody = {
 
 type SessionMessageReadBody = {
   lastStreamOrder?: string | number;
+};
+
+type SessionTelemetryBody = {
+  eventType?: string;
+  event_type?: string;
+  clientKey?: string;
+  client_key?: string;
+  messageId?: string;
+  message_id?: string;
+  attachmentId?: string;
+  attachment_id?: string;
+  durationMs?: string | number;
+  duration_ms?: string | number;
+  valueMs?: string | number;
+  value_ms?: string | number;
+  valueCount?: string | number;
+  value_count?: string | number;
+  errorCode?: string;
+  error_code?: string;
+  metadata?: unknown;
 };
 
 type SessionMessageAccess = {
@@ -121,6 +142,7 @@ type MessageAttachmentResponse = {
 export class SessionMessagesController {
   constructor(private readonly db: DbService, private readonly rc: RequestContext) {}
   private supabase?: SupabaseClient;
+  private readonly tracer = trace.getTracer('cav.gateway.chat');
   private readonly uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   private readonly attachmentDownloadExpiresIn = 3600;
   private readonly attachmentContentTypes: Record<MessageAttachmentKind, Set<string>> = {
@@ -164,11 +186,82 @@ export class SessionMessagesController {
     voice: 15 * 1024 * 1024,
   };
   private readonly voiceDurationLimitMs = 5 * 60 * 1000;
+  private readonly telemetryEventTypes = new Set([
+    'send_started',
+    'send_completed',
+    'send_failed',
+    'upload_started',
+    'upload_progress',
+    'upload_completed',
+    'upload_failed',
+    'realtime_reconnect',
+    'realtime_catchup',
+    'playback_refresh',
+    'read_receipt_sent',
+  ]);
 
   private normalizeActorHint(value?: string | string[]) {
     const raw = Array.isArray(value) ? value[0] : value;
     const normalized = String(raw || '').trim().toLowerCase();
     return normalized === 'vet' || normalized === 'user' ? normalized : null;
+  }
+
+  private parseNonNegativeInt(value: unknown, field: string) {
+    if (value == null || value === '') return null;
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed) || parsed < 0) throw new HttpException(`${field}_invalid`, HttpStatus.BAD_REQUEST);
+    return parsed;
+  }
+
+  private normalizeTelemetryBody(body: SessionTelemetryBody) {
+    const eventType = String(body?.eventType || body?.event_type || '').trim().toLowerCase();
+    if (!this.telemetryEventTypes.has(eventType)) throw new HttpException('telemetry_event_type_invalid', HttpStatus.BAD_REQUEST);
+    const clientKey = String(body?.clientKey || body?.client_key || '').trim() || null;
+    if (clientKey && clientKey.length > 128) throw new HttpException('client_key_too_long', HttpStatus.BAD_REQUEST);
+    const messageId = String(body?.messageId || body?.message_id || '').trim() || null;
+    if (messageId && !this.uuidRegex.test(messageId)) throw new HttpException('message_id_invalid', HttpStatus.BAD_REQUEST);
+    const attachmentId = String(body?.attachmentId || body?.attachment_id || '').trim() || null;
+    if (attachmentId && !this.uuidRegex.test(attachmentId)) throw new HttpException('attachment_id_invalid', HttpStatus.BAD_REQUEST);
+    const errorCode = String(body?.errorCode || body?.error_code || '').trim().slice(0, 120) || null;
+    const metadata = this.sanitizeTelemetryMetadata(body?.metadata);
+    return {
+      eventType,
+      clientKey,
+      messageId,
+      attachmentId,
+      durationMs: this.parseNonNegativeInt(body?.durationMs ?? body?.duration_ms, 'duration_ms'),
+      valueMs: this.parseNonNegativeInt(body?.valueMs ?? body?.value_ms, 'value_ms'),
+      valueCount: this.parseNonNegativeInt(body?.valueCount ?? body?.value_count, 'value_count'),
+      errorCode,
+      metadata,
+    };
+  }
+
+  private sanitizeTelemetryMetadata(value: unknown) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+    const input = value as Record<string, unknown>;
+    const allowed = new Set([
+      'actor',
+      'attachmentCount',
+      'attachmentKind',
+      'duplicate',
+      'status',
+      'streamOrder',
+      'cursor',
+      'afterStreamOrder',
+      'progressPercent',
+      'retrying',
+      'reconnectAttempt',
+      'playbackKind',
+    ]);
+    const output: Record<string, unknown> = {};
+    for (const [key, raw] of Object.entries(input)) {
+      if (!allowed.has(key)) continue;
+      if (typeof raw === 'string') output[key] = raw.slice(0, 120);
+      else if (typeof raw === 'number' && Number.isFinite(raw)) output[key] = raw;
+      else if (typeof raw === 'boolean') output[key] = raw;
+    }
+    return output;
   }
 
   private realtimeLog(event: string, metadata: Record<string, any> = {}) {
@@ -179,6 +272,19 @@ export class SessionMessagesController {
       at: new Date().toISOString(),
       ...metadata,
     }));
+  }
+
+  private startChatSpan(name: string, attributes: Record<string, string | number | boolean | null | undefined> = {}) {
+    const cleaned: Record<string, string | number | boolean> = {};
+    for (const [key, value] of Object.entries(attributes)) {
+      if (value !== null && value !== undefined) cleaned[key] = value;
+    }
+    return this.tracer.startSpan(name, { attributes: cleaned });
+  }
+
+  private recordSpanError(span: Span, error: any) {
+    span.recordException(error instanceof Error ? error : new Error(error?.message || String(error || 'unknown_error')));
+    span.setStatus({ code: SpanStatusCode.ERROR, message: error?.message || 'operation_failed' });
   }
 
   private getStorageClient() {
@@ -313,22 +419,44 @@ export class SessionMessagesController {
   }
 
   private async createSignedUploadUrl(bucket: string, storagePath: string) {
+    const span = this.startChatSpan('chat.attachment.upload_url.sign', { bucket });
     const storage = this.getStorageClient().storage.from(bucket) as any;
-    if (typeof storage.createSignedUploadUrl !== 'function') {
-      throw new HttpException('signed_upload_not_supported', HttpStatus.BAD_GATEWAY);
+    try {
+      if (typeof storage.createSignedUploadUrl !== 'function') {
+        throw new HttpException('signed_upload_not_supported', HttpStatus.BAD_GATEWAY);
+      }
+      const { data, error } = await storage.createSignedUploadUrl(storagePath);
+      if (error) throw new HttpException(`signed_upload_failed: ${error.message}`, HttpStatus.BAD_GATEWAY);
+      span.setStatus({ code: SpanStatusCode.OK });
+      return data || {};
+    } catch (error) {
+      this.recordSpanError(span, error);
+      throw error;
+    } finally {
+      span.end();
     }
-    const { data, error } = await storage.createSignedUploadUrl(storagePath);
-    if (error) throw new HttpException(`signed_upload_failed: ${error.message}`, HttpStatus.BAD_GATEWAY);
-    return data || {};
   }
 
   private async signedDownloadUrl(row: MessageAttachmentRow) {
-    const { data, error } = await this.getStorageClient()
-      .storage
-      .from(row.storage_bucket)
-      .createSignedUrl(row.storage_path, this.attachmentDownloadExpiresIn);
-    if (error) return null;
-    return data?.signedUrl || null;
+    const span = this.startChatSpan('chat.attachment.download_url.refresh', {
+      sessionId: row.session_id,
+      attachmentId: row.id,
+      kind: row.kind,
+    });
+    try {
+      const { data, error } = await this.getStorageClient()
+        .storage
+        .from(row.storage_bucket)
+        .createSignedUrl(row.storage_path, this.attachmentDownloadExpiresIn);
+      if (error) return null;
+      span.setStatus({ code: SpanStatusCode.OK });
+      return data?.signedUrl || null;
+    } catch (error) {
+      this.recordSpanError(span, error);
+      throw error;
+    } finally {
+      span.end();
+    }
   }
 
   private async storageObjectByteSize(row: MessageAttachmentRow) {
@@ -347,16 +475,30 @@ export class SessionMessagesController {
   }
 
   private async verifyUploadedAttachments(rows: MessageAttachmentRow[]) {
+    const span = this.startChatSpan('chat.attachment.verify', {
+      attachmentCount: rows.length,
+      sessionId: rows[0]?.session_id,
+      kind: rows[0]?.kind,
+    });
     const verified: Array<MessageAttachmentRow & { actual_byte_size: number }> = [];
-    for (const row of rows) {
-      const actualByteSize = await this.storageObjectByteSize(row);
-      if (!actualByteSize) throw new HttpException('attachment_not_ready', HttpStatus.CONFLICT);
-      if (actualByteSize > this.attachmentByteLimits[row.kind]) {
-        throw new HttpException('attachment_too_large', HttpStatus.BAD_REQUEST);
+    try {
+      for (const row of rows) {
+        const actualByteSize = await this.storageObjectByteSize(row);
+        if (!actualByteSize) throw new HttpException('attachment_not_ready', HttpStatus.CONFLICT);
+        if (actualByteSize > this.attachmentByteLimits[row.kind]) {
+          throw new HttpException('attachment_too_large', HttpStatus.BAD_REQUEST);
+        }
+        verified.push({ ...row, actual_byte_size: actualByteSize });
       }
-      verified.push({ ...row, actual_byte_size: actualByteSize });
+      span.setAttribute('actualByteSizeTotal', verified.reduce((sum, row) => sum + row.actual_byte_size, 0));
+      span.setStatus({ code: SpanStatusCode.OK });
+      return verified;
+    } catch (error) {
+      this.recordSpanError(span, error);
+      throw error;
+    } finally {
+      span.end();
     }
-    return verified;
   }
 
   private async shapeAttachment(row: MessageAttachmentRow): Promise<MessageAttachmentResponse> {
@@ -494,10 +636,19 @@ export class SessionMessagesController {
   }
 
   private async emitRoomBroadcast(q: TxQuery, sessionId: string, event: string, payload: Record<string, any>) {
-    await q(
-      `select public.fn_emit_consult_room_broadcast($1::uuid, $2::text, $3::jsonb)`,
-      [sessionId, event, JSON.stringify(payload)]
-    );
+    const span = this.startChatSpan('chat.broadcast.emit', { sessionId, event });
+    try {
+      await q(
+        `select public.fn_emit_consult_room_broadcast($1::uuid, $2::text, $3::jsonb)`,
+        [sessionId, event, JSON.stringify(payload)]
+      );
+      span.setStatus({ code: SpanStatusCode.OK });
+    } catch (error) {
+      this.recordSpanError(span, error);
+      throw error;
+    } finally {
+      span.end();
+    }
   }
 
   private async commitConsumptionIfNeeded(q: TxQuery, session: SessionMessageAccess) {
@@ -517,10 +668,13 @@ export class SessionMessagesController {
     @Headers('x-cav-actor-role') actorRoleHeader: string | string[] | undefined,
     @Body() body: SessionAttachmentUploadBody,
   ) {
+    const span = this.startChatSpan('chat.attachment.upload_url.create', { sessionId });
     try {
       const upload = this.validateAttachmentUpload(body || {});
       const actorHint = this.normalizeActorHint(actorRoleHeader);
+      span.setAttributes({ kind: upload.kind, contentType: upload.contentType, byteSize: upload.byteSize });
       if (this.db.isStub) {
+        span.setStatus({ code: SpanStatusCode.OK });
         return {
           ok: true,
           sessionId,
@@ -612,6 +766,8 @@ export class SessionMessagesController {
       });
       if (!result) throw new HttpException('attachment_create_failed', HttpStatus.BAD_REQUEST);
       const signed = await this.createSignedUploadUrl(result.storage_bucket, result.storage_path);
+      span.setAttributes({ attachmentId: result.id, role: result.uploaded_by ? 'member' : 'unknown' });
+      span.setStatus({ code: SpanStatusCode.OK });
       this.realtimeLog('attachment.upload_url.created', {
         sessionId,
         attachmentId: result.id,
@@ -648,8 +804,11 @@ export class SessionMessagesController {
         sessionId,
         error: e?.message || 'attachment_upload_url_failed',
       });
+      this.recordSpanError(span, e);
       if (e instanceof HttpException) throw e;
       throw new HttpException(e?.message || 'attachment_upload_url_failed', HttpStatus.BAD_REQUEST);
+    } finally {
+      span.end();
     }
   }
 
@@ -659,9 +818,13 @@ export class SessionMessagesController {
     @Param('attachmentId') attachmentId: string,
     @Headers('x-cav-actor-role') actorRoleHeader?: string | string[],
   ) {
+    const span = this.startChatSpan('chat.attachment.download_url.endpoint', { sessionId, attachmentId });
     try {
       if (!this.uuidRegex.test(attachmentId)) throw new HttpException('attachment_id_invalid', HttpStatus.BAD_REQUEST);
-      if (this.db.isStub) return { ok: true, sessionId, attachment: null, mode: 'stub' } as any;
+      if (this.db.isStub) {
+        span.setStatus({ code: SpanStatusCode.OK });
+        return { ok: true, sessionId, attachment: null, mode: 'stub' } as any;
+      }
       const actorHint = this.normalizeActorHint(actorRoleHeader);
       const result = await this.db.runInTx(async (q) => {
         const session = await this.getSessionAccess(q, sessionId, actorHint);
@@ -687,10 +850,15 @@ export class SessionMessagesController {
         role: result.session.actor_role,
         kind: result.attachment.kind,
       });
+      span.setAttributes({ role: result.session.actor_role, kind: result.attachment.kind });
+      span.setStatus({ code: SpanStatusCode.OK });
       return { ok: true, sessionId, attachment };
     } catch (e: any) {
+      this.recordSpanError(span, e);
       if (e instanceof HttpException) throw e;
       throw new HttpException(e?.message || 'attachment_download_url_failed', HttpStatus.BAD_REQUEST);
+    } finally {
+      span.end();
     }
   }
 
@@ -749,10 +917,13 @@ export class SessionMessagesController {
     @Query('includeDeleted') includeDeletedStr?: string,
     @Query('afterStreamOrder') afterStreamOrderStr?: string,
   ) {
+    const span = this.startChatSpan('chat.messages.list', { sessionId });
     try {
       const limit = Math.min(Math.max(parseInt(limitStr || '50', 10) || 50, 1), 200);
       const offset = Math.max(parseInt(offsetStr || '0', 10) || 0, 0);
+      span.setAttributes({ limit, offset, afterStreamOrder: Number(afterStreamOrderStr || 0) || 0 });
       if (this.db.isStub) {
+        span.setStatus({ code: SpanStatusCode.OK });
         return { ok: true, sessionId, cursor: 0, items: [], receipts: [], mode: 'stub' } as any;
       }
       const actorHint = this.normalizeActorHint(actorRoleHeader);
@@ -817,6 +988,8 @@ export class SessionMessagesController {
         cursor: result.cursor,
         afterStreamOrder: afterStreamOrderStr || null,
       });
+      span.setAttributes({ role: result.session.actor_role, messageCount: result.items.length, receiptCount: result.receipts.length, cursor: result.cursor });
+      span.setStatus({ code: SpanStatusCode.OK });
       return {
         ok: true,
         sessionId,
@@ -842,8 +1015,11 @@ export class SessionMessagesController {
         sessionId,
         error: e?.message || 'list_failed',
       });
+      this.recordSpanError(span, e);
       if (e instanceof HttpException) throw e;
       throw new HttpException(e?.message || 'list_failed', HttpStatus.BAD_REQUEST);
+    } finally {
+      span.end();
     }
   }
 
@@ -855,11 +1031,13 @@ export class SessionMessagesController {
     @Headers('x-cav-actor-role') actorRoleHeader: string | string[] | undefined,
     @Body() body: SessionMessageBody,
   ) {
+    const span = this.startChatSpan('chat.messages.create', { sessionId });
     try {
       const content = (body?.content || '').toString().trim();
       const clientKey = (body?.clientKey || body?.client_key || '').toString().trim() || null;
       const attachmentIds = this.normalizeAttachmentIds(body?.attachments);
       const actorHint = this.normalizeActorHint(actorRoleHeader);
+      span.setAttributes({ contentLength: content.length, attachmentCount: attachmentIds.length, clientKeyPresent: !!clientKey });
       if (!content && attachmentIds.length === 0) {
         throw new HttpException('message_content_or_attachment_required', HttpStatus.BAD_REQUEST);
       }
@@ -870,6 +1048,7 @@ export class SessionMessagesController {
         throw new HttpException('client_key_too_long', HttpStatus.BAD_REQUEST);
       }
       if (this.db.isStub) {
+        span.setStatus({ code: SpanStatusCode.OK });
         return {
           ok: true,
           sessionId,
@@ -969,6 +1148,8 @@ export class SessionMessagesController {
           duplicate: result.duplicate === true,
         });
       }
+      span.setAttributes({ messageId: result.message?.id || '', role: result.message?.role || '', streamOrder: result.message?.stream_order || 0, duplicate: result.duplicate === true, committed: result.committed === true });
+      span.setStatus({ code: SpanStatusCode.OK });
       return { ok: true, sessionId, ...result };
     } catch (e: any) {
       if (Array.isArray(body?.attachments) && body.attachments.length > 0) {
@@ -985,8 +1166,11 @@ export class SessionMessagesController {
         attachmentCount: Array.isArray(body?.attachments) ? body.attachments.length : 0,
         error: e?.message || 'create_failed',
       });
+      this.recordSpanError(span, e);
       if (e instanceof HttpException) throw e;
       throw new HttpException(e?.message || 'create_failed', HttpStatus.BAD_REQUEST);
+    } finally {
+      span.end();
     }
   }
 
@@ -998,12 +1182,15 @@ export class SessionMessagesController {
     @Headers('x-cav-actor-role') actorRoleHeader: string | string[] | undefined,
     @Body() body: SessionMessageReadBody,
   ) {
+    const span = this.startChatSpan('chat.messages.read', { sessionId });
     try {
       const lastStreamOrder = Math.max(Number(body?.lastStreamOrder || 0) || 0, 0);
+      span.setAttribute('lastStreamOrder', Math.floor(lastStreamOrder));
       if (!Number.isFinite(lastStreamOrder) || lastStreamOrder <= 0) {
         throw new HttpException('last_stream_order_required', HttpStatus.BAD_REQUEST);
       }
       if (this.db.isStub) {
+        span.setStatus({ code: SpanStatusCode.OK });
         return { ok: true, sessionId, marked: 0, mode: 'stub' } as any;
       }
       const actorHint = this.normalizeActorHint(actorRoleHeader);
@@ -1049,6 +1236,8 @@ export class SessionMessagesController {
         lastStreamOrder: Math.floor(lastStreamOrder),
         marked: result.marked,
       });
+      span.setAttribute('marked', result.marked);
+      span.setStatus({ code: SpanStatusCode.OK });
       return { ok: true, sessionId, ...result };
     } catch (e: any) {
       this.realtimeLog('messages.read.failed', {
@@ -1056,8 +1245,95 @@ export class SessionMessagesController {
         lastStreamOrder: body?.lastStreamOrder || null,
         error: e?.message || 'mark_read_failed',
       });
+      this.recordSpanError(span, e);
       if (e instanceof HttpException) throw e;
       throw new HttpException(e?.message || 'mark_read_failed', HttpStatus.BAD_REQUEST);
+    } finally {
+      span.end();
+    }
+  }
+
+  @Post(':sessionId/telemetry')
+  @HttpCode(204)
+  @UseGuards(EndpointRateLimitGuard)
+  @RateLimit({ key: 'sessions.telemetry.create', limit: 180, windowMs: 60_000 })
+  async telemetry(
+    @Param('sessionId') sessionId: string,
+    @Headers('x-cav-actor-role') actorRoleHeader: string | string[] | undefined,
+    @Body() body: SessionTelemetryBody,
+  ) {
+    try {
+      const actorHint = this.normalizeActorHint(actorRoleHeader);
+      const event = this.normalizeTelemetryBody(body);
+      if (this.db.isStub) return;
+      await this.db.runInTx(async (q) => {
+        const session = await this.getSessionAccess(q, sessionId, actorHint);
+        if (!session) throw new HttpException('not_found', HttpStatus.NOT_FOUND);
+        if (session.actor_role === 'admin') throw new HttpException('admin_telemetry_not_supported', HttpStatus.FORBIDDEN);
+        await q(
+          `insert into chat_telemetry_events (
+             id,
+             session_id,
+             actor_user_id,
+             actor_role,
+             event_type,
+             client_key,
+             message_id,
+             attachment_id,
+             duration_ms,
+             value_ms,
+             value_count,
+             error_code,
+             metadata,
+             created_at
+           ) values (
+             gen_random_uuid(),
+             $1::uuid,
+             auth.uid(),
+             $2::text,
+             $3::text,
+             $4::text,
+             $5::uuid,
+             $6::uuid,
+             $7::int,
+             $8::int,
+             $9::int,
+             $10::text,
+             $11::jsonb,
+             now()
+           )`,
+          [
+            sessionId,
+            session.actor_role,
+            event.eventType,
+            event.clientKey,
+            event.messageId,
+            event.attachmentId,
+            event.durationMs,
+            event.valueMs,
+            event.valueCount,
+            event.errorCode,
+            JSON.stringify(event.metadata),
+          ]
+        );
+      });
+      this.realtimeLog('telemetry.recorded', {
+        sessionId,
+        eventType: event.eventType,
+        clientKeyPresent: !!event.clientKey,
+        messageIdPresent: !!event.messageId,
+        attachmentIdPresent: !!event.attachmentId,
+        errorCode: event.errorCode || null,
+      });
+      return;
+    } catch (e: any) {
+      this.realtimeLog('telemetry.failed', {
+        sessionId,
+        eventType: body?.eventType || body?.event_type || null,
+        error: e?.message || 'telemetry_failed',
+      });
+      if (e instanceof HttpException) throw e;
+      throw new HttpException(e?.message || 'telemetry_failed', HttpStatus.BAD_REQUEST);
     }
   }
 

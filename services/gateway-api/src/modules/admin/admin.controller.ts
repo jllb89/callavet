@@ -2,6 +2,14 @@ import { BadRequestException, Body, Controller, ForbiddenException, Get, Headers
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { DbService } from '../db/db.service';
 import { RequestContext } from '../auth/request-context.service';
+import { ChatMediaProcessingService } from '../messages/chat-media-processing.service';
+
+type ChatOpsAlert = {
+  key: string;
+  severity: string;
+  value: unknown;
+  threshold: unknown;
+};
 
 function assertAdmin(secretHeader?: string) {
   const expected = process.env.ADMIN_PRICING_SYNC_SECRET || process.env.ADMIN_SECRET || '';
@@ -17,6 +25,7 @@ export class AdminController {
   constructor(
     private readonly db: DbService,
     private readonly rc: RequestContext,
+    private readonly chatMediaProcessing: ChatMediaProcessingService,
   ) {}
 
   private getStorageClient() {
@@ -60,6 +69,45 @@ export class AdminController {
       );
     } catch {
       // Audit logging must never break admin operations.
+    }
+  }
+
+  private async deliverChatOpsAlerts(scope: string, alerts: ChatOpsAlert[], metrics: Record<string, any>) {
+    const activeAlerts = alerts.filter((alert) => alert.severity !== 'ok');
+    if (!activeAlerts.length) return;
+    const payload = {
+      event: 'chat.ops.alerts.triggered',
+      scope,
+      generatedAt: new Date().toISOString(),
+      alerts: activeAlerts,
+      metrics,
+    };
+    console.warn(JSON.stringify(payload));
+
+    const webhookUrl = process.env.CHAT_OPS_ALERT_WEBHOOK_URL || process.env.OPS_ALERT_WEBHOOK_URL || '';
+    if (!webhookUrl) return;
+    try {
+      const headers: Record<string, string> = { 'content-type': 'application/json' };
+      const token = process.env.CHAT_OPS_ALERT_WEBHOOK_TOKEN || process.env.OPS_ALERT_WEBHOOK_TOKEN || '';
+      if (token) headers.authorization = `Bearer ${token}`;
+      const response = await fetch(webhookUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        console.warn(JSON.stringify({
+          event: 'chat.ops.alerts.delivery_failed',
+          scope,
+          status: response.status,
+        }));
+      }
+    } catch (error: any) {
+      console.warn(JSON.stringify({
+        event: 'chat.ops.alerts.delivery_failed',
+        scope,
+        error: error?.message || 'webhook_failed',
+      }));
     }
   }
 
@@ -971,6 +1019,7 @@ export class AdminController {
   async chatMediaOps(@Headers('x-admin-secret') secret: string) {
     assertAdmin(secret);
     const hasAttachments = await this.tableExists('public.message_attachments');
+    const hasProcessingJobs = await this.tableExists('public.chat_media_processing_jobs');
     if (!hasAttachments) {
       return {
         ok: true,
@@ -1001,9 +1050,23 @@ export class AdminController {
         group by kind
         order by kind asc`
     );
+    const processingSummary = hasProcessingJobs
+      ? (await this.db.query<any>(
+          `select count(*)::int as total_jobs,
+                  count(*) filter (where status = 'pending')::int as pending_jobs,
+                  count(*) filter (where status = 'running')::int as running_jobs,
+                  count(*) filter (where status = 'succeeded')::int as succeeded_jobs,
+                  count(*) filter (where status = 'failed')::int as failed_jobs,
+                  count(*) filter (where status = 'skipped')::int as skipped_jobs,
+                  count(*) filter (where status in ('pending', 'failed') and created_at < now() - interval '15 minutes')::int as stale_jobs
+             from chat_media_processing_jobs`
+        )).rows[0] || {}
+      : {};
+    const processingMetrics = await this.chatMediaProcessing.metrics();
     const summary = rows[0] || {};
     const metrics = {
       messageAttachmentsTable: true,
+      processingJobsTable: hasProcessingJobs,
       totalCount: Number(summary.total_count || 0),
       created24h: Number(summary.created_24h || 0),
       pendingCount: Number(summary.pending_count || 0),
@@ -1019,6 +1082,21 @@ export class AdminController {
         totalBytes: Number(row.total_bytes || 0),
         avgByteSize: row.avg_byte_size == null ? null : Number(row.avg_byte_size),
       })),
+      processing: {
+        schedulerEnabled: ['1', 'true', 'yes', 'on'].includes(String(process.env.CHAT_MEDIA_PROCESSING_ENABLED || '').toLowerCase()),
+        ffmpegPath: process.env.CHAT_MEDIA_FFMPEG_PATH || 'ffmpeg',
+        malwareScannerConfigured: !!process.env.CHAT_MEDIA_MALWARE_SCAN_COMMAND,
+        transcriptionConfigured: !!(process.env.AI_PROVIDER_API_KEY || process.env.OPENAI_API_KEY),
+        totalJobs: Number(processingSummary.total_jobs || 0),
+        pendingJobs: Number(processingSummary.pending_jobs || 0),
+        runningJobs: Number(processingSummary.running_jobs || 0),
+        succeededJobs: Number(processingSummary.succeeded_jobs || 0),
+        failedJobs: Number(processingSummary.failed_jobs || 0),
+        skippedJobs: Number(processingSummary.skipped_jobs || 0),
+        staleJobs: Number(processingSummary.stale_jobs || 0),
+        byTask: processingMetrics.byTask,
+        failuresByReason: processingMetrics.failuresByReason,
+      },
     };
     const alerts = [
       {
@@ -1033,8 +1111,194 @@ export class AdminController {
         value: metrics.failedCount,
         threshold: 25,
       },
+      {
+        key: 'chat_media.processing_jobs_table',
+        severity: metrics.processingJobsTable ? 'ok' : 'warning',
+        value: metrics.processingJobsTable ? 1 : 0,
+        threshold: 1,
+      },
+      {
+        key: 'chat_media.processing_stale_jobs',
+        severity: metrics.processing.staleJobs > 25 ? 'warning' : 'ok',
+        value: metrics.processing.staleJobs,
+        threshold: 25,
+      },
+      {
+        key: 'chat_media.processing_failed_jobs',
+        severity: metrics.processing.failedJobs > 25 ? 'warning' : 'ok',
+        value: metrics.processing.failedJobs,
+        threshold: 25,
+      },
     ];
     await this.logAdminAction('admin.ops.chat_media.read', 'message_attachments', null, { metrics, alerts });
+    await this.deliverChatOpsAlerts('chat_media', alerts, metrics);
+    return { ok: true, generatedAt: new Date().toISOString(), metrics, alerts };
+  }
+
+  @Post('ops/chat-media/process')
+  @HttpCode(200)
+  async processChatMedia(
+    @Headers('x-admin-secret') secret: string,
+    @Body() body?: { limit?: number; dryRun?: boolean },
+  ) {
+    assertAdmin(secret);
+    const result = await this.chatMediaProcessing.processPending({
+      limit: body?.limit,
+      dryRun: body?.dryRun,
+    });
+    await this.logAdminAction('admin.ops.chat_media.process', 'chat_media_processing_jobs', null, result);
+    return { ...result, generatedAt: new Date().toISOString() };
+  }
+
+  @Get('ops/chat-reliability')
+  async chatReliabilityOps(@Headers('x-admin-secret') secret: string) {
+    assertAdmin(secret);
+    const hasTelemetry = await this.tableExists('public.chat_telemetry_events');
+    const hasAttachments = await this.tableExists('public.message_attachments');
+    const telemetry = hasTelemetry
+      ? (await this.db.query<any>(
+          `select count(*)::int as events_24h,
+                  count(*) filter (where event_type = 'send_started')::int as send_started_24h,
+                  count(*) filter (where event_type = 'send_completed')::int as send_completed_24h,
+                  count(*) filter (where event_type = 'send_failed')::int as send_failed_24h,
+                  count(*) filter (where event_type = 'upload_completed')::int as upload_completed_24h,
+                  count(*) filter (where event_type = 'upload_failed')::int as upload_failed_24h,
+                  count(*) filter (where event_type = 'realtime_reconnect')::int as reconnects_24h,
+                  count(*) filter (where event_type = 'realtime_catchup')::int as catchups_24h,
+                  count(*) filter (where event_type = 'playback_refresh')::int as playback_refreshes_24h,
+                  count(*) filter (where event_type = 'playback_refresh' and (metadata->>'status') = 'failed')::int as playback_refresh_failures_24h,
+                  count(*) filter (where event_type = 'read_receipt_sent')::int as read_receipts_24h,
+                  percentile_cont(0.95) within group (order by duration_ms) filter (where event_type = 'send_completed' and duration_ms is not null) as p95_send_latency_ms,
+                  percentile_cont(0.95) within group (order by duration_ms) filter (where event_type = 'upload_completed' and duration_ms is not null) as p95_upload_duration_ms,
+                  percentile_cont(0.95) within group (order by value_ms) filter (where event_type = 'read_receipt_sent' and value_ms is not null) as p95_read_receipt_delay_ms
+             from chat_telemetry_events
+            where created_at >= now() - interval '24 hours'`
+        )).rows[0] || {}
+      : {};
+    const responseTimes = (await this.db.query<any>(
+      `with recent_sessions as (
+          select id
+            from chat_sessions
+           where coalesce(mode, 'chat') = 'chat'
+             and created_at >= now() - interval '24 hours'
+        ), first_owner as (
+          select m.session_id, min(m.created_at) as first_owner_at
+            from messages m
+            join recent_sessions rs on rs.id = m.session_id
+           where m.role = 'user'
+           group by m.session_id
+        ), first_vet as (
+          select m.session_id, min(m.created_at) as first_vet_at
+            from messages m
+            join first_owner fo on fo.session_id = m.session_id
+           where m.role = 'vet'
+             and m.created_at >= fo.first_owner_at
+           group by m.session_id
+        )
+        select count(*) filter (where fo.first_owner_at is not null)::int as sessions_with_owner_message_24h,
+               count(*) filter (where fv.first_vet_at is not null)::int as sessions_with_vet_response_24h,
+               percentile_cont(0.95) within group (order by extract(epoch from (fv.first_vet_at - fo.first_owner_at)) * 1000)
+                 filter (where fv.first_vet_at is not null) as p95_first_vet_response_ms
+          from recent_sessions rs
+          left join first_owner fo on fo.session_id = rs.id
+          left join first_vet fv on fv.session_id = fo.session_id`
+    )).rows[0] || {};
+    const uploadFailuresByReason = hasTelemetry
+      ? (await this.db.query<any>(
+          `select coalesce(error_code, 'unknown') as reason,
+                  count(*)::int as count
+             from chat_telemetry_events
+            where event_type in ('upload_failed', 'send_failed')
+              and created_at >= now() - interval '24 hours'
+            group by coalesce(error_code, 'unknown')
+            order by count desc, reason asc
+            limit 8`
+        )).rows
+      : [];
+    const stalePendingUploads = hasAttachments
+      ? await this.safeCount(
+          `select count(*)::int as count
+             from message_attachments
+            where message_id is null
+              and status = 'pending'
+              and created_at < now() - interval '1 hour'`
+        )
+      : 0;
+    const metrics = {
+      chatTelemetryTable: hasTelemetry,
+      messageAttachmentsTable: hasAttachments,
+      events24h: Number(telemetry.events_24h || 0),
+      sendStarted24h: Number(telemetry.send_started_24h || 0),
+      sendCompleted24h: Number(telemetry.send_completed_24h || 0),
+      sendFailed24h: Number(telemetry.send_failed_24h || 0),
+      sendFailureRate24h: Number(telemetry.send_started_24h || 0) > 0
+        ? Number(((Number(telemetry.send_failed_24h || 0) / Number(telemetry.send_started_24h || 0)) * 100).toFixed(2))
+        : 0,
+      p95SendLatencyMs: telemetry.p95_send_latency_ms == null ? null : Number(telemetry.p95_send_latency_ms),
+      uploadCompleted24h: Number(telemetry.upload_completed_24h || 0),
+      uploadFailed24h: Number(telemetry.upload_failed_24h || 0),
+      p95UploadDurationMs: telemetry.p95_upload_duration_ms == null ? null : Number(telemetry.p95_upload_duration_ms),
+      reconnects24h: Number(telemetry.reconnects_24h || 0),
+      catchups24h: Number(telemetry.catchups_24h || 0),
+      playbackRefreshes24h: Number(telemetry.playback_refreshes_24h || 0),
+      playbackRefreshFailures24h: Number(telemetry.playback_refresh_failures_24h || 0),
+      playbackRefreshFailureRate24h: Number(telemetry.playback_refreshes_24h || 0) > 0
+        ? Number(((Number(telemetry.playback_refresh_failures_24h || 0) / Number(telemetry.playback_refreshes_24h || 0)) * 100).toFixed(2))
+        : 0,
+      readReceipts24h: Number(telemetry.read_receipts_24h || 0),
+      p95ReadReceiptDelayMs: telemetry.p95_read_receipt_delay_ms == null ? null : Number(telemetry.p95_read_receipt_delay_ms),
+      ownerMessageSessions24h: Number(responseTimes.sessions_with_owner_message_24h || 0),
+      sessionsWithVetResponse24h: Number(responseTimes.sessions_with_vet_response_24h || 0),
+      p95FirstVetResponseMs: responseTimes.p95_first_vet_response_ms == null ? null : Number(responseTimes.p95_first_vet_response_ms),
+      stalePendingUploads,
+      uploadFailuresByReason: uploadFailuresByReason.map((row) => ({ reason: row.reason, count: Number(row.count || 0) })),
+    };
+    const alerts = [
+      {
+        key: 'chat_reliability.telemetry.missing',
+        severity: hasTelemetry ? 'ok' : 'critical',
+        value: hasTelemetry ? 1 : 0,
+        threshold: 1,
+      },
+      {
+        key: 'chat_reliability.send_failure_rate',
+        severity: metrics.sendFailureRate24h > 10 ? 'critical' : metrics.sendFailureRate24h > 3 ? 'warning' : 'ok',
+        value: metrics.sendFailureRate24h,
+        threshold: 3,
+      },
+      {
+        key: 'chat_reliability.reconnect_spikes',
+        severity: metrics.reconnects24h > 200 ? 'warning' : 'ok',
+        value: metrics.reconnects24h,
+        threshold: 200,
+      },
+      {
+        key: 'chat_reliability.upload_failures',
+        severity: metrics.uploadFailed24h > 25 ? 'warning' : 'ok',
+        value: metrics.uploadFailed24h,
+        threshold: 25,
+      },
+      {
+        key: 'chat_reliability.stale_pending_uploads',
+        severity: metrics.stalePendingUploads > 50 ? 'warning' : 'ok',
+        value: metrics.stalePendingUploads,
+        threshold: 50,
+      },
+      {
+        key: 'chat_reliability.playback_refresh_failure_rate',
+        severity: metrics.playbackRefreshFailureRate24h > 10 ? 'warning' : 'ok',
+        value: metrics.playbackRefreshFailureRate24h,
+        threshold: 10,
+      },
+      {
+        key: 'chat_reliability.first_vet_response_p95_ms',
+        severity: metrics.p95FirstVetResponseMs != null && metrics.p95FirstVetResponseMs > 10 * 60 * 1000 ? 'warning' : 'ok',
+        value: metrics.p95FirstVetResponseMs,
+        threshold: 10 * 60 * 1000,
+      },
+    ];
+    await this.logAdminAction('admin.ops.chat_reliability.read', 'chat_telemetry_events', null, { metrics, alerts });
+    await this.deliverChatOpsAlerts('chat_reliability', alerts, metrics);
     return { ok: true, generatedAt: new Date().toISOString(), metrics, alerts };
   }
 

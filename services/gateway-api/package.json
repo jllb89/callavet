@@ -17,6 +17,7 @@
     "@nestjs/core": "^10.4.7",
     "@nestjs/platform-express": "^10.4.7",
     "@nestjs/websockets": "^10.4.7",
+    "@opentelemetry/api": "^1.9.1",
     "@sendgrid/mail": "^8.1.6",
     "@supabase/supabase-js": "^2.45.0",
     "class-transformer": "^0.5.1",
