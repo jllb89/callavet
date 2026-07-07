@@ -585,61 +585,91 @@ class _VetChatScreenState extends State<VetChatScreen> {
   }
 
   Widget _buildConsultThread(BuildContext context) {
+    final topInset = MediaQuery.paddingOf(context).top;
+    final bottomInset = MediaQuery.paddingOf(context).bottom;
+    final topChromeHeight = topInset + 90;
+    final topFadeHeight = topInset + 132;
+    final bottomFadeHeight = bottomInset + 150;
     final hasHandoff = _handoffBrief != null;
     final itemCount = (hasHandoff ? 1 : 0) + _consultMessages.length;
-    return SafeArea(
-      bottom: false,
-      child: Column(
-        children: [
-          _ChatTopBar(
-            sessionId: widget.sessionId,
-            ownerOnline: _ownerOnline,
-            ownerTyping: _ownerTyping,
-            onBack: () => unawaited(_returnDashboard()),
-            onEnd: _consultClosed ? null : () => unawaited(_endConsult()),
-            ending: _endingConsult,
+    final messageList = _consultLoading && itemCount == 0
+        ? const Center(child: CircularProgressIndicator(color: Colors.white))
+        : _consultLoadError != null && itemCount == 0
+            ? Padding(
+                padding: EdgeInsets.fromLTRB(18, topChromeHeight, 18, 120),
+                child: _ChatStatusView(
+                  icon: Icons.chat_bubble_outline_rounded,
+                  title: 'No pude cargar el chat',
+                  message: _consultLoadError.toString(),
+                  onRetry: _refreshMessages,
+                ),
+              )
+            : itemCount == 0
+                ? Padding(
+                    padding: EdgeInsets.fromLTRB(18, topChromeHeight, 18, 120),
+                    child: const _ChatStatusView(
+                      icon: Icons.forum_outlined,
+                      title: 'Chat listo',
+                      message: 'Aún no hay mensajes en esta consulta.',
+                    ),
+                  )
+                : ListView.builder(
+                    controller: _scrollController,
+                    padding: EdgeInsets.fromLTRB(
+                      18,
+                      topChromeHeight,
+                      18,
+                      bottomInset + 102,
+                    ),
+                    itemCount: itemCount,
+                    itemBuilder: (context, index) {
+                      if (hasHandoff && index == 0) {
+                        return _HandoffBriefCard(handoff: _handoffBrief!);
+                      }
+                      final messageIndex = index - (hasHandoff ? 1 : 0);
+                      return _ChatBubble(
+                          message: _consultMessages[messageIndex]);
+                    },
+                  );
+
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: _MessageOpacityFade(
+            topFadeHeight: topFadeHeight,
+            bottomFadeHeight: bottomFadeHeight,
+            child: messageList,
           ),
-          Expanded(
-            child: _consultLoading && itemCount == 0
-                ? const Center(
-                    child: CircularProgressIndicator(color: Colors.white))
-                : _consultLoadError != null && itemCount == 0
-                    ? _ChatStatusView(
-                        icon: Icons.chat_bubble_outline_rounded,
-                        title: 'No pude cargar el chat',
-                        message: _consultLoadError.toString(),
-                        onRetry: _refreshMessages,
-                      )
-                    : itemCount == 0
-                        ? const _ChatStatusView(
-                            icon: Icons.forum_outlined,
-                            title: 'Chat listo',
-                            message: 'Aún no hay mensajes en esta consulta.',
-                          )
-                        : ListView.builder(
-                            controller: _scrollController,
-                            padding: const EdgeInsets.fromLTRB(18, 8, 18, 18),
-                            itemCount: itemCount,
-                            itemBuilder: (context, index) {
-                              if (hasHandoff && index == 0) {
-                                return _HandoffBriefCard(
-                                    handoff: _handoffBrief!);
-                              }
-                              final messageIndex = index - (hasHandoff ? 1 : 0);
-                              return _ChatBubble(
-                                  message: _consultMessages[messageIndex]);
-                            },
-                          ),
+        ),
+        Positioned(
+          top: 0,
+          left: 0,
+          right: 0,
+          child: SafeArea(
+            bottom: false,
+            child: _ChatTopBar(
+              sessionId: widget.sessionId,
+              ownerOnline: _ownerOnline,
+              ownerTyping: _ownerTyping,
+              onBack: () => unawaited(_returnDashboard()),
+              onEnd: _consultClosed ? null : () => unawaited(_endConsult()),
+              ending: _endingConsult,
+            ),
           ),
-          _ChatComposer(
+        ),
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          child: _ChatComposer(
             controller: _composerController,
             focusNode: _composerFocusNode,
             sending: _sending || _endingConsult || _consultClosed,
             includeBottomInset: true,
             onSend: _sendMessage,
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 

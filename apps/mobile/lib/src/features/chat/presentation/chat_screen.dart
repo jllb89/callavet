@@ -87,6 +87,8 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _endingConsult = false;
   bool _vetOnline = false;
   bool _vetTyping = false;
+  bool _vetEnteredAnnounced = false;
+  String? _inlineConsultSessionId;
   _ActiveSurveyFeedback? _activeSurveyFeedback;
 
   static const _surveyReturnHomeDelay = Duration(seconds: 5);
@@ -110,15 +112,15 @@ class _ChatScreenState extends State<ChatScreen> {
       'initialSurvey=${widget.initialSurvey} '
       'apiBaseUrl=${Environment.apiBaseUrl} dryRun=$_aiChatDryRun',
     );
+    _inputCtrl.addListener(_handleComposerChanged);
     final initialMessage = widget.initialMessage?.trim();
     final hasInitialMessage =
         initialMessage != null && initialMessage.isNotEmpty;
     final initialAssistantMessage = widget.initialAssistantMessage?.trim();
     final hasInitialAssistantMessage =
         initialAssistantMessage != null && initialAssistantMessage.isNotEmpty;
-    final cachedSessionId = _uuidOrNull(widget.sessionId);
+    final cachedSessionId = _consultSessionId;
     if (_isConsultChatRoute && cachedSessionId != null) {
-      _inputCtrl.addListener(_handleComposerChanged);
       unawaited(_loadConsultMessages());
       _startConsultRealtime(cachedSessionId);
       _startConsultRoomSignals(cachedSessionId);
@@ -212,17 +214,26 @@ class _ChatScreenState extends State<ChatScreen> {
     return trimmed == null || trimmed.isEmpty ? 'Jorge' : trimmed;
   }
 
-  bool get _showsHomeIntro => widget.sessionId == 'ai';
+  bool get _showsHomeIntro => widget.sessionId == 'ai' && !_isConsultChatRoute;
 
-  bool get _isConsultChatRoute {
+  String? get _consultSessionId {
+    final rawInlineSessionId = _inlineConsultSessionId;
+    final inlineSessionId =
+        rawInlineSessionId == null ? null : _uuidOrNull(rawInlineSessionId);
+    if (inlineSessionId != null) return inlineSessionId;
     final sessionId = _uuidOrNull(widget.sessionId);
     final hasAssistantMessage =
         widget.initialAssistantMessage?.trim().isNotEmpty == true;
-    return sessionId != null &&
-        !widget.initialSurvey &&
-        !widget.initialRejoinVideo &&
-        !hasAssistantMessage;
+    if (sessionId == null ||
+        widget.initialSurvey ||
+        widget.initialRejoinVideo ||
+        hasAssistantMessage) {
+      return null;
+    }
+    return sessionId;
   }
+
+  bool get _isConsultChatRoute => _consultSessionId != null;
 
   void _sendComposerMessage() {
     final text = _inputCtrl.text.trim();
@@ -250,7 +261,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _loadConsultMessages() async {
-    final sessionId = _uuidOrNull(widget.sessionId);
+    final sessionId = _consultSessionId;
     if (sessionId == null) return;
     _aiChatLog('consult load messages sessionId=$sessionId');
     if (mounted) setState(() => _consultLoading = true);
@@ -268,9 +279,16 @@ class _ChatScreenState extends State<ChatScreen> {
       final status = session?['status']?.toString().toLowerCase();
       if (!mounted) return;
       setState(() {
-        _messages
-          ..clear()
-          ..addAll(_messagesWithReceipts(messages, receipts));
+        final hydratedMessages = _messagesWithReceipts(messages, receipts);
+        if (_inlineConsultSessionId == null) {
+          _messages
+            ..clear()
+            ..addAll(hydratedMessages);
+        } else {
+          _messages.removeWhere((message) => message.streamOrder != null);
+          _messages.addAll(hydratedMessages);
+          _messages.sort(_compareInlineMessages);
+        }
         _consultClosed = _isClosedConsultStatus(status);
       });
       _markVisibleConsultMessagesRead();
@@ -409,7 +427,19 @@ class _ChatScreenState extends State<ChatScreen> {
     final online = channel.presenceState().any((state) => state.presences.any(
           (presence) => presence.payload['role']?.toString() == 'vet',
         ));
-    if (mounted) setState(() => _vetOnline = online);
+    if (mounted) {
+      setState(() {
+        if (online && !_vetOnline && !_vetEnteredAnnounced) {
+          _messages.add(_ChatMessage.assistant(
+            'El veterinario ha entrado al chat.',
+            includeInHistory: false,
+          ));
+          _vetEnteredAnnounced = true;
+        }
+        _vetOnline = online;
+      });
+      if (online) _scrollToBottom();
+    }
   }
 
   void _handleComposerChanged() {
@@ -443,6 +473,42 @@ class _ChatScreenState extends State<ChatScreen> {
     unawaited(_loadConsultMessages());
   }
 
+  void _stopConsultRealtime() {
+    final messagesChannel = _consultMessagesChannel;
+    if (messagesChannel != null) {
+      Supabase.instance.client.removeChannel(messagesChannel);
+      _consultMessagesChannel = null;
+    }
+    final sessionChannel = _consultSessionChannel;
+    if (sessionChannel != null) {
+      Supabase.instance.client.removeChannel(sessionChannel);
+      _consultSessionChannel = null;
+    }
+    final roomChannel = _consultRoomChannel;
+    if (roomChannel != null) {
+      unawaited(roomChannel.untrack());
+      Supabase.instance.client.removeChannel(roomChannel);
+      _consultRoomChannel = null;
+    }
+  }
+
+  void _enterInlineConsult(String sessionId) {
+    _stopConsultRealtime();
+    setState(() {
+      _inlineConsultSessionId = sessionId;
+      _consultClosed = false;
+      _consultLoading = false;
+      _vetOnline = false;
+      _vetTyping = false;
+      _vetEnteredAnnounced = false;
+      _isSending = false;
+    });
+    _startConsultRealtime(sessionId);
+    _startConsultRoomSignals(sessionId);
+    unawaited(_loadConsultMessages());
+    _scrollToBottom();
+  }
+
   void _upsertConsultMessage(_ChatMessage message) {
     if (!mounted) return;
     setState(() {
@@ -453,7 +519,9 @@ class _ChatScreenState extends State<ChatScreen> {
       } else {
         _messages.add(message);
       }
-      _messages.sort(_compareConsultMessages);
+      _messages.sort(_inlineConsultSessionId == null
+          ? _compareConsultMessages
+          : _compareInlineMessages);
     });
     if (!message.isUser) _markVisibleConsultMessagesRead();
     _scrollToBottom();
@@ -466,6 +534,15 @@ class _ChatScreenState extends State<ChatScreen> {
       return aOrder.compareTo(bOrder);
     }
     return a.id.compareTo(b.id);
+  }
+
+  int _compareInlineMessages(_ChatMessage a, _ChatMessage b) {
+    final aOrder = a.streamOrder;
+    final bOrder = b.streamOrder;
+    if (aOrder == null && bOrder == null) return a.id.compareTo(b.id);
+    if (aOrder == null) return -1;
+    if (bOrder == null) return 1;
+    return aOrder.compareTo(bOrder);
   }
 
   List<_ChatMessage> _messagesWithReceipts(
@@ -507,7 +584,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _markVisibleConsultMessagesRead() {
-    final sessionId = _uuidOrNull(widget.sessionId);
+    final sessionId = _consultSessionId;
     if (sessionId == null) return;
     final lastStreamOrder = _messages
         .where((message) => !message.isUser)
@@ -521,7 +598,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _sendConsultMessage(String text) async {
-    final sessionId = _uuidOrNull(widget.sessionId);
+    final sessionId = _consultSessionId;
     if (sessionId == null || _isSending) return;
     if (_consultClosed) {
       setState(() {
@@ -535,21 +612,31 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     final clientKey =
         'owner-${DateTime.now().microsecondsSinceEpoch}-${_nextChatMessageId()}';
+    final optimisticMessage = _ChatMessage.user(text, includeInHistory: false);
     setState(() {
-      _messages.add(_ChatMessage.user(text, includeInHistory: false));
+      _messages.add(optimisticMessage);
       _isSending = true;
     });
     _scrollToBottom();
 
     try {
-      await _postGatewayJson(
+      final response = await _postGatewayJson(
         '/sessions/${Uri.encodeComponent(sessionId)}/messages',
         {
           'content': text,
           'clientKey': clientKey,
         },
       );
-      await _loadConsultMessages();
+      final message = _asMap(response['message']);
+      if (message != null) {
+        if (mounted) {
+          setState(() => _messages.removeWhere(
+              (candidate) => candidate.id == optimisticMessage.id));
+        }
+        _upsertConsultMessage(_ChatMessage.consultFromJson(message));
+      } else {
+        await _loadConsultMessages();
+      }
     } catch (error) {
       _aiChatLog('consult send failed: ${error.runtimeType} $error');
       if (!mounted) return;
@@ -562,7 +649,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _endConsultFromOwner() async {
-    final sessionId = _uuidOrNull(widget.sessionId);
+    final sessionId = _consultSessionId;
     if (sessionId == null || _endingConsult || _consultClosed) return;
     setState(() => _endingConsult = true);
     try {
@@ -586,7 +673,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _startSurveyPrompt() async {
-    final sessionId = _uuidOrNull(widget.sessionId);
+    final sessionId = _consultSessionId;
     if (sessionId == null || _surveyLoading) return;
     if (_messages.any((message) => message.surveyAction != null)) {
       _surveyChatLog('prompt skipped: survey action already visible');
@@ -1413,16 +1500,9 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     _aiChatLog(
-        'completeStartedSession chat session active sessionId=$sessionId; navigating');
+        'completeStartedSession chat session active sessionId=$sessionId; staying inline');
     if (!mounted) return;
-    setState(() {
-      _messages.add(_ChatMessage.assistant(
-          'Chat con veterinario activado. Te llevo a la conversación.',
-          includeInHistory: false));
-      _isSending = false;
-    });
-    _scrollToBottom();
-    context.go('/chat/${Uri.encodeComponent(sessionId)}');
+    _enterInlineConsult(sessionId);
   }
 
   void _cacheSessionMessages(String sessionId) {
