@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
@@ -250,6 +251,22 @@ class _VetChatScreenState extends State<VetChatScreen> {
             }
           },
         )
+        .onBroadcast(
+          event: 'messages',
+          callback: (payload) {
+            final record = _asMap(payload['message']);
+            if (record == null) {
+              _scheduleRefresh();
+              return;
+            }
+            final message = _VetChatMessage.fromJson(record);
+            if (message.id.isEmpty) {
+              _scheduleRefresh();
+              return;
+            }
+            _upsertConsultMessage(message);
+          },
+        )
         .onPresenceSync((_) => _syncOwnerPresence(channel))
         .subscribe((status, [_]) {
       if (status == RealtimeSubscribeStatus.subscribed) {
@@ -479,6 +496,7 @@ class _VetChatScreenState extends State<VetChatScreen> {
           await client.getUrl(Uri.parse('${Environment.apiBaseUrl}$path'));
       request.headers.set(HttpHeaders.acceptHeader, 'application/json');
       request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+      request.headers.set('x-cav-actor-role', 'vet');
       final response =
           await request.close().timeout(const Duration(seconds: 30));
       final rawBody = await utf8.decoder.bind(response).join();
@@ -509,6 +527,7 @@ class _VetChatScreenState extends State<VetChatScreen> {
       request.headers.set(HttpHeaders.acceptHeader, 'application/json');
       request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
       request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+      request.headers.set('x-cav-actor-role', 'vet');
       request.add(utf8.encode(jsonEncode(body)));
       final response =
           await request.close().timeout(const Duration(seconds: 30));
@@ -841,47 +860,41 @@ class _ChatTopBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final shortId =
-        sessionId.length > 8 ? sessionId.substring(0, 8) : sessionId;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 14, 18, 14),
+      padding: const EdgeInsets.fromLTRB(18, 24, 18, 0),
       child: Row(
         children: [
-          IconButton(
-            onPressed: onBack,
-            icon: const Icon(Icons.arrow_back_rounded, color: Colors.white),
-            tooltip: 'volver',
+          GestureDetector(
+            onTap: onBack,
+            behavior: HitTestBehavior.opaque,
+            child: const SizedBox(
+              width: 24,
+              height: 42,
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Icon(
+                  Icons.arrow_back_ios_new_rounded,
+                  color: Colors.white,
+                  size: 22,
+                ),
+              ),
+            ),
           ),
-          const SizedBox(width: 6),
+          const SizedBox(width: 12),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'chat de consulta',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 18,
-                      fontFamily: 'ABC Diatype',
-                      fontWeight: FontWeight.w500),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  ownerTyping
-                      ? 'tutor escribiendo...'
-                      : ownerOnline
-                          ? 'tutor en línea · sesión $shortId'
-                          : 'sesión $shortId',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.48),
-                      fontSize: 12,
-                      fontFamily: 'ABC Diatype'),
-                ),
-              ],
+            child: Text(
+              ownerTyping
+                  ? 'tutor escribiendo...'
+                  : ownerOnline
+                      ? 'tutor en línea'
+                      : 'consulta activa',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.62),
+                fontSize: 12,
+                fontFamily: 'ABCDiatype',
+              ),
             ),
           ),
           TextButton(
@@ -1023,43 +1036,51 @@ class _ChatBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final isVet = message.role == 'vet';
     final isAi = message.role == 'ai';
-    final messageStyle = TextStyle(
-      color: isVet ? Colors.black : Colors.white,
-      fontSize: 14,
-      fontFamily: 'ABC Diatype',
-      height: 1.28,
+    const messageStyle = TextStyle(
+      color: Colors.white,
+      fontSize: 15,
+      fontWeight: FontWeight.w400,
+      height: 1.34,
     );
+    final viewportWidth = MediaQuery.sizeOf(context).width;
+    final widthFactor = isVet ? 0.66 : 0.72;
+    final fixedCap = isVet ? 350.0 : 380.0;
+    final maxBubbleWidth = math.min(viewportWidth * widthFactor, fixedCap);
     return Align(
       alignment: isVet ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
-        constraints: const BoxConstraints(maxWidth: 310),
-        margin: const EdgeInsets.only(bottom: 10),
-        padding: const EdgeInsets.fromLTRB(14, 11, 14, 10),
-        decoration: BoxDecoration(
-          color: isVet
-              ? Colors.white
-              : Colors.white.withValues(alpha: isAi ? 0.12 : 0.07),
-          borderRadius: BorderRadius.circular(18),
-          border: isVet
-              ? null
-              : Border.all(color: Colors.white.withValues(alpha: 0.08)),
-        ),
+        constraints: BoxConstraints(maxWidth: maxBubbleWidth),
+        margin: const EdgeInsets.only(bottom: 14),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment:
+              isVet ? CrossAxisAlignment.end : CrossAxisAlignment.start,
           children: [
-            isAi
-                ? _AiMessageContent(
-                    content: message.content, style: messageStyle)
-                : Text(message.content, style: messageStyle),
-            const SizedBox(height: 6),
+            DecoratedBox(
+              decoration: BoxDecoration(
+                color: isVet ? const Color(0xFF242426) : Colors.black,
+                borderRadius: BorderRadius.only(
+                  topLeft: const Radius.circular(22),
+                  topRight: const Radius.circular(22),
+                  bottomLeft: Radius.circular(isVet ? 22 : 6),
+                  bottomRight: Radius.circular(isVet ? 6 : 22),
+                ),
+              ),
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 18, vertical: 13),
+                child: isAi
+                    ? _AiMessageContent(
+                        content: message.content, style: messageStyle)
+                    : Text(message.content, style: messageStyle),
+              ),
+            ),
+            const SizedBox(height: 4),
             Text(
               message.label,
               style: TextStyle(
-                color: isVet
-                    ? Colors.black.withValues(alpha: 0.45)
-                    : Colors.white.withValues(alpha: 0.42),
+                color: Colors.white.withValues(alpha: 0.38),
                 fontSize: 10,
-                fontFamily: 'ABC Diatype',
+                fontFamily: 'ABCDiatype',
               ),
             ),
           ],

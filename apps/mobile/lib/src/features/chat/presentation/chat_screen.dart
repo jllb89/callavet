@@ -376,6 +376,22 @@ class _ChatScreenState extends State<ChatScreen> {
             }
           },
         )
+        .onBroadcast(
+          event: 'messages',
+          callback: (payload) {
+            final record = _asMap(payload['message']);
+            if (record == null) {
+              _scheduleConsultRefresh();
+              return;
+            }
+            final message = _ChatMessage.consultFromJson(record);
+            if (message.id.isEmpty) {
+              _scheduleConsultRefresh();
+              return;
+            }
+            _upsertConsultMessage(message);
+          },
+        )
         .onPresenceSync((_) => _syncVetPresence(channel))
         .subscribe((status, [_]) {
       if (status == RealtimeSubscribeStatus.subscribed) {
@@ -1446,6 +1462,7 @@ class _ChatScreenState extends State<ChatScreen> {
       request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
       request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
       request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      request.headers.set('x-cav-actor-role', 'user');
       request.add(utf8.encode(jsonEncode(body)));
 
       final response =
@@ -1494,6 +1511,7 @@ class _ChatScreenState extends State<ChatScreen> {
       request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
       request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
       request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      request.headers.set('x-cav-actor-role', 'user');
       request.add(utf8.encode(jsonEncode(body)));
 
       final response =
@@ -1540,6 +1558,7 @@ class _ChatScreenState extends State<ChatScreen> {
           await client.getUrl(uri).timeout(const Duration(seconds: 10));
       request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
       request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      request.headers.set('x-cav-actor-role', 'user');
 
       final response =
           await request.close().timeout(const Duration(seconds: 30));

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpException, HttpStatus, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpException, HttpStatus, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '../auth/auth.guard';
 import { DbService } from '../db/db.service';
 import { EndpointRateLimitGuard } from '../rate-limit/endpoint-rate-limit.guard';
@@ -46,6 +46,12 @@ type SessionMessageRow = {
 export class SessionMessagesController {
   constructor(private readonly db: DbService) {}
 
+  private normalizeActorHint(value?: string | string[]) {
+    const raw = Array.isArray(value) ? value[0] : value;
+    const normalized = String(raw || '').trim().toLowerCase();
+    return normalized === 'vet' || normalized === 'user' ? normalized : null;
+  }
+
   private realtimeLog(event: string, metadata: Record<string, any> = {}) {
     console.log(JSON.stringify({
       scope: 'chat_consultation_realtime',
@@ -56,12 +62,13 @@ export class SessionMessagesController {
     }));
   }
 
-  private async getSessionAccess(q: TxQuery, sessionId: string) {
+  private async getSessionAccess(q: TxQuery, sessionId: string, actorHint?: 'user' | 'vet' | null) {
     const { rows } = await q<SessionMessageAccess>(
       `select s.id,
               s.status,
               s.mode,
               case
+                when s.user_id = auth.uid() and s.vet_id = auth.uid() and $2::text = 'vet' then 'vet'
                 when s.user_id = auth.uid() then 'user'
                 when s.vet_id = auth.uid() then 'vet'
                 else 'admin'
@@ -86,7 +93,7 @@ export class SessionMessagesController {
         where s.id = $1::uuid
           and (s.user_id = auth.uid() or s.vet_id = auth.uid() or is_admin())
         limit 1`,
-      [sessionId]
+      [sessionId, actorHint || null]
     );
     return rows[0] || null;
   }
@@ -128,6 +135,7 @@ export class SessionMessagesController {
   @Get(':sessionId/messages')
   async list(
     @Param('sessionId') sessionId: string,
+    @Headers('x-cav-actor-role') actorRoleHeader?: string | string[],
     @Query('limit') limitStr?: string,
     @Query('offset') offsetStr?: string,
     @Query('since') since?: string,
@@ -142,8 +150,9 @@ export class SessionMessagesController {
       if (this.db.isStub) {
         return { ok: true, sessionId, cursor: 0, items: [], receipts: [], mode: 'stub' } as any;
       }
+      const actorHint = this.normalizeActorHint(actorRoleHeader);
       const result = await this.db.runInTx(async (q) => {
-        const session = await this.getSessionAccess(q, sessionId);
+        const session = await this.getSessionAccess(q, sessionId, actorHint);
         if (!session) throw new HttpException('not_found', HttpStatus.NOT_FOUND);
         const includeDeleted = ['1','true','yes'].includes((includeDeletedStr || '').toLowerCase());
         const filters: string[] = ['session_id = $1::uuid'];
@@ -232,10 +241,15 @@ export class SessionMessagesController {
   @Post(':sessionId/messages')
   @UseGuards(EndpointRateLimitGuard)
   @RateLimit({ key: 'sessions.messages.create', limit: 30, windowMs: 60_000 })
-  async create(@Param('sessionId') sessionId: string, @Body() body: SessionMessageBody) {
+  async create(
+    @Param('sessionId') sessionId: string,
+    @Headers('x-cav-actor-role') actorRoleHeader: string | string[] | undefined,
+    @Body() body: SessionMessageBody,
+  ) {
     try {
       const content = (body?.content || '').toString().trim();
       const clientKey = (body?.clientKey || body?.client_key || '').toString().trim() || null;
+      const actorHint = this.normalizeActorHint(actorRoleHeader);
       if (!content) {
         throw new HttpException('content_required', HttpStatus.BAD_REQUEST);
       }
@@ -255,7 +269,7 @@ export class SessionMessagesController {
         } as any;
       }
       const result = await this.db.runInTx(async (q) => {
-        const session = await this.getSessionAccess(q, sessionId);
+        const session = await this.getSessionAccess(q, sessionId, actorHint);
         if (!session) throw new HttpException('not_found', HttpStatus.NOT_FOUND);
         if (session.actor_role === 'admin') throw new HttpException('admin_send_not_supported', HttpStatus.FORBIDDEN);
         const status = String(session.status || '').toLowerCase();
@@ -294,7 +308,9 @@ export class SessionMessagesController {
         );
         const committed = await this.commitConsumptionIfNeeded(q, session);
         await this.markSenderRead(q, inserted.id);
-        return { message: this.normalizeMessage(inserted), duplicate: false, committed };
+        const message = this.normalizeMessage(inserted);
+        await this.emitRoomBroadcast(q, sessionId, 'messages', { sessionId, message });
+        return { message, duplicate: false, committed };
       });
       this.realtimeLog('messages.send.completed', {
         sessionId,
@@ -321,7 +337,11 @@ export class SessionMessagesController {
   @Post(':sessionId/messages/read')
   @UseGuards(EndpointRateLimitGuard)
   @RateLimit({ key: 'sessions.messages.read', limit: 60, windowMs: 60_000 })
-  async markRead(@Param('sessionId') sessionId: string, @Body() body: SessionMessageReadBody) {
+  async markRead(
+    @Param('sessionId') sessionId: string,
+    @Headers('x-cav-actor-role') actorRoleHeader: string | string[] | undefined,
+    @Body() body: SessionMessageReadBody,
+  ) {
     try {
       const lastStreamOrder = Math.max(Number(body?.lastStreamOrder || 0) || 0, 0);
       if (!Number.isFinite(lastStreamOrder) || lastStreamOrder <= 0) {
@@ -330,8 +350,9 @@ export class SessionMessagesController {
       if (this.db.isStub) {
         return { ok: true, sessionId, marked: 0, mode: 'stub' } as any;
       }
+      const actorHint = this.normalizeActorHint(actorRoleHeader);
       const result = await this.db.runInTx(async (q) => {
-        const session = await this.getSessionAccess(q, sessionId);
+        const session = await this.getSessionAccess(q, sessionId, actorHint);
         if (!session) throw new HttpException('not_found', HttpStatus.NOT_FOUND);
         if (session.actor_role === 'admin') throw new HttpException('admin_read_not_supported', HttpStatus.FORBIDDEN);
         const { rows } = await q<{ message_id: string; user_id: string; delivered_at: string; read_at: string }>(
@@ -339,7 +360,7 @@ export class SessionMessagesController {
              select m.id as message_id
                from messages m
               where m.session_id = $1::uuid
-                and m.sender_id <> auth.uid()
+                and m.role <> $3::text
                 and m.deleted_at is null
                 and m.stream_order <= $2::bigint
            ), upserted as (
@@ -352,7 +373,7 @@ export class SessionMessagesController {
              returning message_id, user_id, delivered_at, read_at
            )
            select message_id, user_id, delivered_at, read_at from upserted`,
-          [sessionId, Math.floor(lastStreamOrder)]
+          [sessionId, Math.floor(lastStreamOrder), session.actor_role]
         );
         if (rows.length) {
           await this.emitRoomBroadcast(q, sessionId, 'receipts', {
