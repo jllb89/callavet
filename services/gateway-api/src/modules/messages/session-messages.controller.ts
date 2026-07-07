@@ -502,7 +502,8 @@ export class SessionMessagesController {
   }
 
   private async shapeAttachment(row: MessageAttachmentRow): Promise<MessageAttachmentResponse> {
-    const downloadUrl = row.status === 'ready' ? await this.signedDownloadUrl(row) : null;
+    const status = String(row.status || '').toLowerCase();
+    const downloadUrl = status !== 'removed' && status !== 'failed' ? await this.signedDownloadUrl(row) : null;
     return {
       id: row.id,
       message_id: row.message_id,
@@ -837,7 +838,7 @@ export class SessionMessagesController {
             where id = $2::uuid
               and session_id = $1::uuid
               and deleted_at is null
-              and status = 'ready'
+              and status not in ('removed', 'failed')
             limit 1`,
           [sessionId, attachmentId]
         );

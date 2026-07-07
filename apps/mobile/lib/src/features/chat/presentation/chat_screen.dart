@@ -3305,6 +3305,9 @@ class _MessageBubble extends StatelessWidget {
     final isVoiceOnly = trimmedText.isEmpty &&
         message.attachments.length == 1 &&
         message.attachments.first.kind == _ConsultAttachmentKind.voice;
+    final isSingleImageOnly = trimmedText.isEmpty &&
+        message.attachments.length == 1 &&
+        message.attachments.first.kind == _ConsultAttachmentKind.image;
     final isEmptyPlaceholder = trimmedText.isEmpty && !message.hasAttachments;
     const messageTextStyle = TextStyle(
       color: textColor,
@@ -3326,12 +3329,13 @@ class _MessageBubble extends StatelessWidget {
                 isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
             children: [
               if (!isEmptyPlaceholder)
-                if (isVoiceOnly)
+                if (isVoiceOnly || isSingleImageOnly)
                   _ConsultAttachmentStrip(
                     attachments: message.attachments,
                     clientKey: message.clientKey,
                     onCancelUpload: onCancelUpload,
                     onRefreshAttachment: onRefreshAttachment,
+                    flushSingleImage: isSingleImageOnly,
                   )
                 else
                   DecoratedBox(
@@ -3445,12 +3449,14 @@ class _ConsultAttachmentStrip extends StatelessWidget {
     required this.attachments,
     required this.clientKey,
     required this.onCancelUpload,
+    this.flushSingleImage = false,
     this.onRefreshAttachment,
   });
 
   final List<_ConsultAttachment> attachments;
   final String? clientKey;
   final ValueChanged<String> onCancelUpload;
+  final bool flushSingleImage;
   final Future<_ConsultAttachment?> Function(_ConsultAttachment attachment)?
       onRefreshAttachment;
 
@@ -3467,6 +3473,7 @@ class _ConsultAttachmentStrip extends StatelessWidget {
                   clientKey: clientKey,
                   onCancelUpload: onCancelUpload,
                   onRefreshAttachment: onRefreshAttachment,
+                  flushImage: flushSingleImage && attachments.length == 1,
                 ),
               ))
           .toList(growable: false),
@@ -3479,14 +3486,66 @@ class _ConsultAttachmentPreview extends StatelessWidget {
     required this.attachment,
     required this.clientKey,
     required this.onCancelUpload,
+    this.flushImage = false,
     this.onRefreshAttachment,
   });
 
   final _ConsultAttachment attachment;
   final String? clientKey;
   final ValueChanged<String> onCancelUpload;
+  final bool flushImage;
   final Future<_ConsultAttachment?> Function(_ConsultAttachment attachment)?
       onRefreshAttachment;
+
+  Future<void> _openImage(BuildContext context) async {
+    final source = attachment.localPath ??
+        (onRefreshAttachment == null
+            ? attachment.downloadUrl
+            : (await onRefreshAttachment!(attachment))?.downloadUrl ??
+                attachment.downloadUrl);
+    if (!context.mounted || source == null || source.isEmpty) return;
+    await showDialog<void>(
+      context: context,
+      barrierColor: Colors.black.withValues(alpha: 0.92),
+      builder: (context) {
+        final image = attachment.localPath != null
+            ? Image.file(File(source), fit: BoxFit.contain)
+            : Image.network(source, fit: BoxFit.contain);
+        return GestureDetector(
+          onTap: () => Navigator.of(context).pop(),
+          child: DecoratedBox(
+            decoration: const BoxDecoration(color: Colors.black),
+            child: SafeArea(
+              child: Stack(
+                children: [
+                  Center(
+                    child: InteractiveViewer(
+                      minScale: 1,
+                      maxScale: 4,
+                      child: image,
+                    ),
+                  ),
+                  Positioned(
+                    top: 12,
+                    right: 12,
+                    child: IconButton.filled(
+                      tooltip: 'Cerrar imagen',
+                      onPressed: () => Navigator.of(context).pop(),
+                      style: IconButton.styleFrom(
+                        backgroundColor: Colors.white.withValues(alpha: 0.12),
+                        foregroundColor: Colors.white,
+                      ),
+                      icon: const Icon(Icons.close_rounded),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -3502,23 +3561,26 @@ class _ConsultAttachmentPreview extends StatelessWidget {
       final image = localPath != null
           ? Image.file(File(localPath), fit: BoxFit.cover)
           : Image.network(url!, fit: BoxFit.cover);
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(14),
-        child: SizedBox(
-          width: 220,
-          height: 160,
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              image,
-              if (attachment.isUploading)
-                _AttachmentUploadOverlay(
-                  attachment: attachment,
-                  onCancel: clientKey == null
-                      ? null
-                      : () => onCancelUpload(clientKey!),
-                ),
-            ],
+      return GestureDetector(
+        onTap: () => _openImage(context),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(14),
+          child: SizedBox(
+            width: flushImage ? double.infinity : 220,
+            height: flushImage ? 210 : 160,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                image,
+                if (attachment.isUploading)
+                  _AttachmentUploadOverlay(
+                    attachment: attachment,
+                    onCancel: clientKey == null
+                        ? null
+                        : () => onCancelUpload(clientKey!),
+                  ),
+              ],
+            ),
           ),
         ),
       );
@@ -3535,7 +3597,7 @@ class _ConsultAttachmentPreview extends StatelessWidget {
         onRefreshAttachment: onRefreshAttachment,
       );
     }
-    return Container(
+    final bubble = Container(
       constraints: const BoxConstraints(minWidth: 180),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
@@ -3547,9 +3609,11 @@ class _ConsultAttachmentPreview extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Icon(
-            attachment.kind == _ConsultAttachmentKind.voice
-                ? Icons.mic_rounded
-                : Icons.play_arrow_rounded,
+            attachment.kind == _ConsultAttachmentKind.image
+                ? Icons.image_rounded
+                : attachment.kind == _ConsultAttachmentKind.voice
+                    ? Icons.mic_rounded
+                    : Icons.play_arrow_rounded,
             color: Colors.white,
             size: 19,
           ),
@@ -3570,6 +3634,9 @@ class _ConsultAttachmentPreview extends StatelessWidget {
         ],
       ),
     );
+    return attachment.kind == _ConsultAttachmentKind.image
+        ? GestureDetector(onTap: () => _openImage(context), child: bubble)
+        : bubble;
   }
 }
 
@@ -3813,7 +3880,6 @@ class _ConsultVoiceNoteBubbleState extends State<_ConsultVoiceNoteBubble> {
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.08),
         borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
       ),
       child: Row(
         children: [
@@ -4611,7 +4677,7 @@ class _ChatComposer extends StatelessWidget {
               animation: focusNode,
               builder: (context, child) {
                 return _ComposerFrame(
-                  active: focusNode.hasFocus || sending,
+                  active: focusNode.hasFocus || sending || recording,
                   thinking: sending,
                   child: child!,
                 );

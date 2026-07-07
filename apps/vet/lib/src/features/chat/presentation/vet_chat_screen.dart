@@ -2345,120 +2345,22 @@ class _HandoffBriefFrame extends StatefulWidget {
   State<_HandoffBriefFrame> createState() => _HandoffBriefFrameState();
 }
 
-class _HandoffBriefFrameState extends State<_HandoffBriefFrame>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 14000),
-    );
-    if (widget.active) _controller.repeat();
-  }
-
-  @override
-  void didUpdateWidget(covariant _HandoffBriefFrame oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.active && !_controller.isAnimating) {
-      _controller.repeat();
-    } else if (!widget.active && _controller.isAnimating) {
-      _controller.stop();
-    }
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
+class _HandoffBriefFrameState extends State<_HandoffBriefFrame> {
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, child) {
-        final phase = _controller.value * math.pi * 2;
-        final pulse =
-            widget.active ? 0.74 + (math.sin(phase * 0.82) + 1) * 0.11 : 1.0;
-        final drift = widget.active
-            ? math.sin(phase) * 6.0 + math.sin(phase * 2.15) * 1.5
-            : 0.0;
-        return Container(
-          width: double.infinity,
-          margin: widget.margin,
-          decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.08),
-            borderRadius: BorderRadius.circular(18),
-            boxShadow: widget.active
-                ? [
-                    BoxShadow(
-                      color: const Color(0xFF57546F)
-                          .withValues(alpha: 0.12 * pulse),
-                      blurRadius: 22,
-                      spreadRadius: -8,
-                      offset: Offset(drift, 0),
-                    ),
-                  ]
-                : null,
-          ),
-          child: CustomPaint(
-            foregroundPainter: _HandoffBriefOutlinePainter(
-              progress: _controller.value,
-              active: widget.active,
-            ),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(15, 13, 15, 14),
-              child: child,
-            ),
-          ),
-        );
-      },
-      child: widget.child,
+    return Container(
+      width: double.infinity,
+      margin: widget.margin,
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(15, 13, 15, 14),
+        child: widget.child,
+      ),
     );
-  }
-}
-
-class _HandoffBriefOutlinePainter extends CustomPainter {
-  const _HandoffBriefOutlinePainter({
-    required this.progress,
-    required this.active,
-  });
-
-  final double progress;
-  final bool active;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final rect = Offset.zero & size;
-    final rrect =
-        RRect.fromRectAndRadius(rect.deflate(0.7), const Radius.circular(18));
-    final paint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = active ? 1.15 : 1;
-
-    if (active) {
-      paint.shader = SweepGradient(
-        transform: GradientRotation(progress * math.pi * 2),
-        colors: const [
-          Color(0xCCFFFFFF),
-          Color(0x88648FD8),
-          Color(0x995A5578),
-          Color(0xCCFFFFFF),
-        ],
-      ).createShader(rect);
-    } else {
-      paint.color = Colors.white.withValues(alpha: 0.10);
-    }
-
-    canvas.drawRRect(rrect, paint);
-  }
-
-  @override
-  bool shouldRepaint(covariant _HandoffBriefOutlinePainter oldDelegate) {
-    return oldDelegate.progress != progress || oldDelegate.active != active;
   }
 }
 
@@ -2534,6 +2436,9 @@ class _ChatBubble extends StatelessWidget {
     final isVoiceOnly = trimmedContent.isEmpty &&
         message.attachments.length == 1 &&
         message.attachments.first.kind == _VetAttachmentKind.voice;
+    final isSingleImageOnly = trimmedContent.isEmpty &&
+        message.attachments.length == 1 &&
+        message.attachments.first.kind == _VetAttachmentKind.image;
     final isEmptyPlaceholder =
         trimmedContent.isEmpty && message.attachments.isEmpty;
     return Align(
@@ -2546,12 +2451,13 @@ class _ChatBubble extends StatelessWidget {
               isVet ? CrossAxisAlignment.end : CrossAxisAlignment.start,
           children: [
             if (!isEmptyPlaceholder)
-              if (isVoiceOnly)
+              if (isVoiceOnly || isSingleImageOnly)
                 _VetAttachmentStrip(
                   attachments: message.attachments,
                   clientKey: message.clientKey,
                   onCancelUpload: onCancelUpload,
                   onRefreshAttachment: onRefreshAttachment,
+                  flushSingleImage: isSingleImageOnly,
                 )
               else
                 DecoratedBox(
@@ -2628,12 +2534,14 @@ class _VetAttachmentStrip extends StatelessWidget {
     required this.attachments,
     required this.clientKey,
     required this.onCancelUpload,
+    this.flushSingleImage = false,
     this.onRefreshAttachment,
   });
 
   final List<_VetAttachment> attachments;
   final String? clientKey;
   final ValueChanged<String>? onCancelUpload;
+  final bool flushSingleImage;
   final Future<_VetAttachment?> Function(_VetAttachment attachment)?
       onRefreshAttachment;
 
@@ -2650,6 +2558,7 @@ class _VetAttachmentStrip extends StatelessWidget {
                   clientKey: clientKey,
                   onCancelUpload: onCancelUpload,
                   onRefreshAttachment: onRefreshAttachment,
+                  flushImage: flushSingleImage && attachments.length == 1,
                 ),
               ))
           .toList(growable: false),
@@ -2662,14 +2571,66 @@ class _VetAttachmentPreview extends StatelessWidget {
     required this.attachment,
     required this.clientKey,
     required this.onCancelUpload,
+    this.flushImage = false,
     this.onRefreshAttachment,
   });
 
   final _VetAttachment attachment;
   final String? clientKey;
   final ValueChanged<String>? onCancelUpload;
+  final bool flushImage;
   final Future<_VetAttachment?> Function(_VetAttachment attachment)?
       onRefreshAttachment;
+
+  Future<void> _openImage(BuildContext context) async {
+    final source = attachment.localPath ??
+        (onRefreshAttachment == null
+            ? attachment.downloadUrl
+            : (await onRefreshAttachment!(attachment))?.downloadUrl ??
+                attachment.downloadUrl);
+    if (!context.mounted || source == null || source.isEmpty) return;
+    await showDialog<void>(
+      context: context,
+      barrierColor: Colors.black.withValues(alpha: 0.92),
+      builder: (context) {
+        final image = attachment.localPath != null
+            ? Image.file(File(source), fit: BoxFit.contain)
+            : Image.network(source, fit: BoxFit.contain);
+        return GestureDetector(
+          onTap: () => Navigator.of(context).pop(),
+          child: DecoratedBox(
+            decoration: const BoxDecoration(color: Colors.black),
+            child: SafeArea(
+              child: Stack(
+                children: [
+                  Center(
+                    child: InteractiveViewer(
+                      minScale: 1,
+                      maxScale: 4,
+                      child: image,
+                    ),
+                  ),
+                  Positioned(
+                    top: 12,
+                    right: 12,
+                    child: IconButton.filled(
+                      tooltip: 'Cerrar imagen',
+                      onPressed: () => Navigator.of(context).pop(),
+                      style: IconButton.styleFrom(
+                        backgroundColor: Colors.white.withValues(alpha: 0.12),
+                        foregroundColor: Colors.white,
+                      ),
+                      icon: const Icon(Icons.close_rounded),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -2685,23 +2646,26 @@ class _VetAttachmentPreview extends StatelessWidget {
       final image = localPath != null
           ? Image.file(File(localPath), fit: BoxFit.cover)
           : Image.network(url!, fit: BoxFit.cover);
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(14),
-        child: SizedBox(
-          width: 220,
-          height: 160,
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              image,
-              if (attachment.isUploading)
-                _VetAttachmentUploadOverlay(
-                  attachment: attachment,
-                  onCancel: clientKey == null || onCancelUpload == null
-                      ? null
-                      : () => onCancelUpload!(clientKey!),
-                ),
-            ],
+      return GestureDetector(
+        onTap: () => _openImage(context),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(14),
+          child: SizedBox(
+            width: flushImage ? double.infinity : 220,
+            height: flushImage ? 210 : 160,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                image,
+                if (attachment.isUploading)
+                  _VetAttachmentUploadOverlay(
+                    attachment: attachment,
+                    onCancel: clientKey == null || onCancelUpload == null
+                        ? null
+                        : () => onCancelUpload!(clientKey!),
+                  ),
+              ],
+            ),
           ),
         ),
       );
@@ -2718,7 +2682,7 @@ class _VetAttachmentPreview extends StatelessWidget {
         onRefreshAttachment: onRefreshAttachment,
       );
     }
-    return Container(
+    final bubble = Container(
       constraints: const BoxConstraints(minWidth: 180),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
@@ -2730,9 +2694,11 @@ class _VetAttachmentPreview extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Icon(
-            attachment.kind == _VetAttachmentKind.voice
-                ? Icons.mic_rounded
-                : Icons.play_arrow_rounded,
+            attachment.kind == _VetAttachmentKind.image
+                ? Icons.image_rounded
+                : attachment.kind == _VetAttachmentKind.voice
+                    ? Icons.mic_rounded
+                    : Icons.play_arrow_rounded,
             color: Colors.white,
             size: 19,
           ),
@@ -2754,6 +2720,9 @@ class _VetAttachmentPreview extends StatelessWidget {
         ],
       ),
     );
+    return attachment.kind == _VetAttachmentKind.image
+        ? GestureDetector(onTap: () => _openImage(context), child: bubble)
+        : bubble;
   }
 }
 
@@ -2997,7 +2966,6 @@ class _VetVoiceNoteBubbleState extends State<_VetVoiceNoteBubble> {
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.08),
         borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
       ),
       child: Row(
         children: [
@@ -3672,12 +3640,33 @@ class _ChatComposer extends StatelessWidget {
           ],
           ConstrainedBox(
             constraints: const BoxConstraints(minHeight: 46, maxHeight: 150),
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(28),
-                border:
-                    Border.all(color: Colors.white.withValues(alpha: 0.055)),
-              ),
+            child: AnimatedBuilder(
+              animation: focusNode,
+              builder: (context, child) {
+                final active = focusNode.hasFocus || sending || recording;
+                return AnimatedContainer(
+                  duration: const Duration(milliseconds: 180),
+                  curve: Curves.easeOutCubic,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: active ? 0.09 : 0.04),
+                    borderRadius: BorderRadius.circular(active ? 24 : 28),
+                    border: Border.all(
+                      color:
+                          Colors.white.withValues(alpha: active ? 0.16 : 0.055),
+                    ),
+                    boxShadow: active
+                        ? [
+                            BoxShadow(
+                              color: Colors.white.withValues(alpha: 0.06),
+                              blurRadius: 18,
+                              spreadRadius: -10,
+                            ),
+                          ]
+                        : null,
+                  ),
+                  child: child,
+                );
+              },
               child: Padding(
                 padding: const EdgeInsets.only(
                     left: 18, right: 6, top: 3, bottom: 3),
