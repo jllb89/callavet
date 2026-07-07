@@ -202,7 +202,9 @@ class _VetChatScreenState extends State<VetChatScreen>
       final receipts = _asList(messagesResponse['receipts']) ?? const [];
       if (!mounted) return;
       setState(() {
-        final hydratedMessages = _messagesWithReceipts(messages, receipts);
+        final hydratedMessages = _messagesWithReceipts(messages, receipts)
+            .map(_mergeExistingConsultMessageMedia)
+            .toList(growable: false);
         final serverClientKeys = hydratedMessages
             .map((message) => message.clientKey)
             .whereType<String>()
@@ -694,6 +696,14 @@ class _VetChatScreenState extends State<VetChatScreen>
       _markVisibleMessagesRead();
     }
     _scrollToBottom();
+  }
+
+  _VetChatMessage _mergeExistingConsultMessageMedia(_VetChatMessage message) {
+    final index = _consultMessages.indexWhere((existing) =>
+        existing.id == message.id ||
+        (message.clientKey != null && existing.clientKey == message.clientKey));
+    if (index < 0) return message;
+    return message.withReceiptFrom(_consultMessages[index]);
   }
 
   List<_VetChatMessage> _messagesWithReceipts(
@@ -2345,22 +2355,103 @@ class _HandoffBriefFrame extends StatefulWidget {
   State<_HandoffBriefFrame> createState() => _HandoffBriefFrameState();
 }
 
-class _HandoffBriefFrameState extends State<_HandoffBriefFrame> {
+class _HandoffBriefFrameState extends State<_HandoffBriefFrame>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 14000),
+    );
+    if (widget.active) _controller.repeat();
+  }
+
+  @override
+  void didUpdateWidget(covariant _HandoffBriefFrame oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.active && !_controller.isAnimating) {
+      _controller.repeat();
+    } else if (!widget.active && _controller.isAnimating) {
+      _controller.stop();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      margin: widget.margin,
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(15, 13, 15, 14),
-        child: widget.child,
-      ),
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) {
+        return Container(
+          width: double.infinity,
+          margin: widget.margin,
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(18),
+          ),
+          child: CustomPaint(
+            foregroundPainter: _HandoffBriefOutlinePainter(
+              progress: _controller.value,
+              active: widget.active,
+            ),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(15, 13, 15, 14),
+              child: child,
+            ),
+          ),
+        );
+      },
+      child: widget.child,
     );
+  }
+}
+
+class _HandoffBriefOutlinePainter extends CustomPainter {
+  const _HandoffBriefOutlinePainter({
+    required this.progress,
+    required this.active,
+  });
+
+  final double progress;
+  final bool active;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    final rrect =
+        RRect.fromRectAndRadius(rect.deflate(0.7), const Radius.circular(18));
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = active ? 1.15 : 1;
+
+    if (active) {
+      paint.shader = SweepGradient(
+        transform: GradientRotation(progress * math.pi * 2),
+        colors: const [
+          Color(0xCCFFFFFF),
+          Color(0x88648FD8),
+          Color(0x995A5578),
+          Color(0xCCFFFFFF),
+        ],
+      ).createShader(rect);
+    } else {
+      paint.color = Colors.white.withValues(alpha: 0.10);
+    }
+
+    canvas.drawRRect(rrect, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _HandoffBriefOutlinePainter oldDelegate) {
+    return oldDelegate.progress != progress || oldDelegate.active != active;
   }
 }
 
@@ -3643,28 +3734,10 @@ class _ChatComposer extends StatelessWidget {
             child: AnimatedBuilder(
               animation: focusNode,
               builder: (context, child) {
-                final active = focusNode.hasFocus || sending || recording;
-                return AnimatedContainer(
-                  duration: const Duration(milliseconds: 180),
-                  curve: Curves.easeOutCubic,
-                  decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: active ? 0.09 : 0.04),
-                    borderRadius: BorderRadius.circular(active ? 24 : 28),
-                    border: Border.all(
-                      color:
-                          Colors.white.withValues(alpha: active ? 0.16 : 0.055),
-                    ),
-                    boxShadow: active
-                        ? [
-                            BoxShadow(
-                              color: Colors.white.withValues(alpha: 0.06),
-                              blurRadius: 18,
-                              spreadRadius: -10,
-                            ),
-                          ]
-                        : null,
-                  ),
-                  child: child,
+                return _ComposerFrame(
+                  active: focusNode.hasFocus || sending || recording,
+                  thinking: sending,
+                  child: child!,
                 );
               },
               child: Padding(
@@ -3814,6 +3887,131 @@ class _ChatComposer extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+class _ComposerFrame extends StatefulWidget {
+  const _ComposerFrame({
+    required this.child,
+    required this.active,
+    required this.thinking,
+  });
+
+  final Widget child;
+  final bool active;
+  final bool thinking;
+
+  @override
+  State<_ComposerFrame> createState() => _ComposerFrameState();
+}
+
+class _ComposerFrameState extends State<_ComposerFrame>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 14000),
+    );
+    if (widget.active) _controller.repeat();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ComposerFrame oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.active && !_controller.isAnimating) {
+      _controller.repeat();
+    } else if (!widget.active && _controller.isAnimating) {
+      _controller.stop();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) {
+        final phase = _controller.value * math.pi * 2;
+        final pulse =
+            widget.active ? 0.72 + (math.sin(phase * 0.82) + 1) * 0.12 : 1.0;
+        final drift = widget.active
+            ? math.sin(phase) * 7.5 + math.sin(phase * 2.15) * 2.0
+            : 0.0;
+        return DecoratedBox(
+          decoration: BoxDecoration(
+            color: Colors.transparent,
+            borderRadius: BorderRadius.circular(28),
+            boxShadow: widget.active
+                ? [
+                    BoxShadow(
+                      color: const Color(0xFF57546F).withValues(
+                          alpha: (widget.thinking ? 0.12 : 0.075) * pulse),
+                      blurRadius: widget.thinking ? 22 : 14,
+                      spreadRadius: -8,
+                      offset: Offset(drift, 0),
+                    ),
+                  ]
+                : null,
+          ),
+          child: CustomPaint(
+            foregroundPainter: _ComposerOutlinePainter(
+              progress: _controller.value,
+              thinking: widget.thinking,
+            ),
+            child: child,
+          ),
+        );
+      },
+      child: widget.child,
+    );
+  }
+}
+
+class _ComposerOutlinePainter extends CustomPainter {
+  const _ComposerOutlinePainter(
+      {required this.progress, required this.thinking});
+
+  final double progress;
+  final bool thinking;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    final rrect =
+        RRect.fromRectAndRadius(rect.deflate(0.7), const Radius.circular(28));
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = thinking ? 1.15 : 1;
+
+    if (thinking) {
+      paint.shader = SweepGradient(
+        transform: GradientRotation(progress * math.pi * 2),
+        colors: const [
+          Color(0xCCFFFFFF),
+          Color(0x88648FD8),
+          Color(0x995A5578),
+          Color(0xCCFFFFFF),
+        ],
+      ).createShader(rect);
+    } else {
+      paint.color = Colors.white.withValues(alpha: 0.055);
+    }
+
+    canvas.drawRRect(rrect, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _ComposerOutlinePainter oldDelegate) {
+    return oldDelegate.progress != progress || oldDelegate.thinking != thinking;
   }
 }
 
@@ -4054,9 +4252,7 @@ class _VetChatMessage {
     return copyWith(
       deliveredByOther: previous.deliveredByOther,
       readByOther: previous.readByOther,
-      attachments: attachments.isEmpty && previous.attachments.isNotEmpty
-          ? previous.attachments
-          : null,
+      attachments: _mergeVetAttachments(attachments, previous.attachments),
     );
   }
 
@@ -4439,6 +4635,49 @@ class _VetAttachment {
       uploadProgress: uploadProgress ?? this.uploadProgress,
     );
   }
+
+  _VetAttachment withMediaFrom(_VetAttachment previous) {
+    return _VetAttachment(
+      id: id,
+      kind: kind,
+      contentType: contentType,
+      byteSize: byteSize,
+      durationMs: durationMs ?? previous.durationMs,
+      downloadUrl:
+          _vetNonEmpty(downloadUrl) ?? _vetNonEmpty(previous.downloadUrl),
+      localPath: _vetNonEmpty(localPath) ?? _vetNonEmpty(previous.localPath),
+      status: status ?? previous.status,
+      uploadProgress:
+          uploadProgress > 0 ? uploadProgress : previous.uploadProgress,
+    );
+  }
+}
+
+List<_VetAttachment>? _mergeVetAttachments(
+    List<_VetAttachment> current, List<_VetAttachment> previous) {
+  if (current.isEmpty && previous.isNotEmpty) return previous;
+  if (current.isEmpty || previous.isEmpty) return null;
+  final previousById = {
+    for (final attachment in previous) attachment.id: attachment
+  };
+  var changed = false;
+  final merged = current.map((attachment) {
+    final prior = previousById[attachment.id];
+    if (prior == null) return attachment;
+    final next = attachment.withMediaFrom(prior);
+    if (next.downloadUrl != attachment.downloadUrl ||
+        next.localPath != attachment.localPath ||
+        next.uploadProgress != attachment.uploadProgress) {
+      changed = true;
+    }
+    return next;
+  }).toList(growable: false);
+  return changed ? merged : null;
+}
+
+String? _vetNonEmpty(String? value) {
+  final trimmed = value?.trim();
+  return trimmed == null || trimmed.isEmpty ? null : value;
 }
 
 class _VetHandoffBrief {

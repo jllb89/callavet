@@ -350,7 +350,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       final vetName = session?['vetName']?.toString().trim();
       if (!mounted) return;
       setState(() {
-        final hydratedMessages = _messagesWithReceipts(messages, receipts);
+        final hydratedMessages = _messagesWithReceipts(messages, receipts)
+            .map(_mergeExistingConsultMessageMedia)
+            .toList(growable: false);
         final serverClientKeys = hydratedMessages
             .map((message) => message.clientKey)
             .whereType<String>()
@@ -826,6 +828,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _markVisibleConsultMessagesRead();
     }
     _scrollToBottom();
+  }
+
+  _ChatMessage _mergeExistingConsultMessageMedia(_ChatMessage message) {
+    final index = _messages.indexWhere((existing) =>
+        existing.id == message.id ||
+        (message.clientKey != null && existing.clientKey == message.clientKey));
+    if (index < 0) return message;
+    return message.withReceiptFrom(_messages[index]);
   }
 
   int _compareConsultMessages(_ChatMessage a, _ChatMessage b) {
@@ -5408,6 +5418,23 @@ class _ConsultAttachment {
       uploadProgress: uploadProgress ?? this.uploadProgress,
     );
   }
+
+  _ConsultAttachment withMediaFrom(_ConsultAttachment previous) {
+    return _ConsultAttachment(
+      id: id,
+      kind: kind,
+      contentType: contentType,
+      byteSize: byteSize,
+      width: width ?? previous.width,
+      height: height ?? previous.height,
+      durationMs: durationMs ?? previous.durationMs,
+      downloadUrl: _nonEmpty(downloadUrl) ?? _nonEmpty(previous.downloadUrl),
+      localPath: _nonEmpty(localPath) ?? _nonEmpty(previous.localPath),
+      status: status ?? previous.status,
+      uploadProgress:
+          uploadProgress > 0 ? uploadProgress : previous.uploadProgress,
+    );
+  }
 }
 
 class _ChatMessage {
@@ -5567,11 +5594,37 @@ class _ChatMessage {
     return copyWith(
       deliveredByOther: previous.deliveredByOther,
       readByOther: previous.readByOther,
-      attachments: attachments.isEmpty && previous.attachments.isNotEmpty
-          ? previous.attachments
-          : null,
+      attachments: _mergeConsultAttachments(attachments, previous.attachments),
     );
   }
+}
+
+List<_ConsultAttachment>? _mergeConsultAttachments(
+    List<_ConsultAttachment> current, List<_ConsultAttachment> previous) {
+  if (current.isEmpty && previous.isNotEmpty) return previous;
+  if (current.isEmpty || previous.isEmpty) return null;
+  final previousById = {
+    for (final attachment in previous) attachment.id: attachment
+  };
+  var changed = false;
+  final merged = current.map((attachment) {
+    final prior = previousById[attachment.id];
+    if (prior == null) return attachment;
+    final next = attachment.withMediaFrom(prior);
+    if (!identical(next, attachment) &&
+        (next.downloadUrl != attachment.downloadUrl ||
+            next.localPath != attachment.localPath ||
+            next.uploadProgress != attachment.uploadProgress)) {
+      changed = true;
+    }
+    return next;
+  }).toList(growable: false);
+  return changed ? merged : null;
+}
+
+String? _nonEmpty(String? value) {
+  final trimmed = value?.trim();
+  return trimmed == null || trimmed.isEmpty ? null : value;
 }
 
 enum _SurveyStep { prompt, vetScore, appScore, feedback }
