@@ -128,6 +128,7 @@ type AiChatTurnState = {
   clinicalSignal: boolean;
   caseDetailSignal: boolean;
   explicitCareRequest: boolean;
+  wantsScheduling: boolean;
 };
 
 type PromptVersion = {
@@ -1250,15 +1251,15 @@ export class AiService {
       'For urgent intake, do not lead with service-choice buttons or summary drafting. First ask the triage questions, then explain that the answers will help route to the right veterinarian faster.',
       'Ask the urgent triage question set only once. If the user has already answered those first urgent intake questions, do not ask another triage set or another generic follow-up.',
       'If the latest user message includes a concrete horse/case detail and asks to talk, connect, chat, call, video, or consult with a veterinarian, route immediately with tools instead of asking a generic preference question.',
-      'After the user answers the first urgent intake questions, decide the specialty, urgency, and service type from the available information. Then use tools to route: recommend_specialty, find_vets for that specialty, check_service_access for the recommended service, and get_available_slots only if scheduled_video is the best next step.',
+      'After the user answers the first urgent intake questions, decide the specialty, urgency, and service type from the available information. Then use tools to route: recommend_specialty, find_vets for that specialty, check_service_access for the recommended service, and get_available_slots when scheduled_video or scheduled_chat is the best next step.',
       'After urgent intake answers, present the next action as chat, immediate video, scheduled video, or scheduled chat. If red flags remain, bias toward immediate video/local emergency care; if stable but needs review, choose chat, scheduled chat, or scheduled video based on service access and availability.',
       'Before recommending a service, gather the minimum missing context for a useful vet handoff: affected horse, main concern, onset/duration, severity, appetite/water, relevant history/medications, and red flags. Ask at most one concise follow-up at a time.',
-      'Do not immediately ask the user to choose a product. Decide whether chat, immediate video, or scheduled video is best based on urgency, symptoms, context, and entitlement signals; then explain the recommendation briefly.',
+      'Do not immediately ask the user to choose a product. Decide whether chat, immediate video, scheduled video, or scheduled chat is best based on urgency, symptoms, context, and entitlement signals; then explain the recommendation briefly.',
       'Prepare the conversation so a later veterinarian handoff can include a concise contextualization, not a diagnosis.',
       'Populate caseSummary, handoffSummary, and routingRationale whenever there is concrete case detail. Keep them concise, factual, and non-diagnostic; use null only when there is not enough detail.',
       'Set commerceRecommendation from entitlement context/tool results: included when the recommended service is available, one_off when allowance is exhausted but a one-time service is appropriate, upgrade_plan when there is no active subscription or a plan upgrade is the clearest next step, ask_more while context is missing, and none when no service should be offered.',
       'Use function tools to choose an existing specialty, find approved vets, check service access, and inspect availability.',
-      'When the user wants scheduling, first clarify whether they prefer chat or video if that is not already clear, then get available slots, present concrete options, and call schedule_video or schedule_chat only after the user confirms one exact slot. If the requested slot is no longer available, ask the user to choose another returned slot.',
+      'When the user wants scheduling, first clarify whether they prefer chat or video if that is not already clear. Once the mode is clear, call check_service_access for that mode before offering slots. If access is exhausted, return nextStep payment, commerceRecommendation one_off, and recommendedService scheduled_chat or scheduled_video so the app can sell the one-time consultation before scheduling. If access is available, call get_available_slots, present concrete options, and call schedule_video or schedule_chat only after the user confirms one exact slot. If the requested slot is no longer available, ask the user to choose another returned slot.',
       'Do not invent specialty IDs, vet IDs, appointment slots, entitlements, prices, or session IDs.',
       'Before recommending chat or video activation, call check_service_access for the relevant service type.',
       'Keep final responses short, warm, and action-oriented. If context is insufficient, ask a targeted question instead of showing all service choices.',
@@ -1318,6 +1319,10 @@ export class AiService {
     );
     const clinicalSignal = this.hasClinicalSignal(latestMessage);
     const caseDetailSignal = clinicalSignal || this.hasCaseDetailSignal(latestMessage);
+    const latestText = this.normalizeCareText(latestMessage);
+    const priorSchedulingQuestion = /agendar|agenda|programar|prefieres.*(chat|video)|chat o.*video|video o.*chat/i.test(latestPriorAssistant);
+    const wantsScheduling = /agendar|agenda|programar|cita|manana|mañana|tarde|fecha|horario|slot|disponible/.test(latestText)
+      || (priorSchedulingQuestion && /chat|video|videollamada|llamada|mensaje|mensajes/.test(latestText));
     return {
       urgentIntakeAlreadyAsked,
       afterUrgentIntakeAnswer,
@@ -1325,6 +1330,7 @@ export class AiService {
       clinicalSignal,
       caseDetailSignal,
       explicitCareRequest: caseDetailSignal && this.wantsCareRequest(latestMessage),
+      wantsScheduling,
     };
   }
 
@@ -1850,13 +1856,15 @@ export class AiService {
       }
     }
     const serviceAccess = this.latestServiceAccessToolResult(toolResults);
-    if (state.explicitCareRequest && serviceAccess) {
+    if ((state.explicitCareRequest || state.wantsScheduling) && serviceAccess) {
       const serviceType = String(serviceAccess.serviceType || '').toLowerCase();
       if ((serviceType === 'chat' || serviceType === 'video') && !normalized.recommendedService) {
-        normalized.recommendedService = serviceType;
+        normalized.recommendedService = state.wantsScheduling ? `scheduled_${serviceType}` : serviceType;
       }
       if ((serviceType === 'chat' || serviceType === 'video') && !normalized.actionLabel) {
-        normalized.actionLabel = this.fallbackActionLabel(serviceType, serviceAccess.canUse === true);
+        normalized.actionLabel = state.wantsScheduling && serviceAccess.canUse === true
+          ? (serviceType === 'video' ? 'Agendar video' : 'Agendar chat')
+          : this.fallbackActionLabel(serviceType, serviceAccess.canUse === true);
       }
       if (!normalized.commerceRecommendation) {
         normalized.commerceRecommendation = this.fallbackCommerceRecommendation(serviceAccess);
@@ -2206,9 +2214,13 @@ export class AiService {
       const hasSpecialty = toolResults.some((result) => result.name === 'recommend_specialty');
       const hasVets = toolResults.some((result) => result.name === 'find_vets');
       const hasAccess = toolResults.some((result) => result.name === 'check_service_access');
+      const hasSlots = toolResults.some((result) => result.name === 'get_available_slots');
+      const serviceAccess = this.latestServiceAccessToolResult(toolResults);
+      const accessExhausted = serviceAccess && serviceAccess.canUse === false;
+      const needsSchedulingTools = state.wantsScheduling && (!hasSpecialty || !hasVets || !hasAccess || (!accessExhausted && !hasSlots));
       const needsRoutingTools = state.afterUrgentIntakeAnswer
         ? (!hasSpecialty || !hasVets)
-        : state.explicitCareRequest && (!hasSpecialty || !hasVets || !hasAccess);
+        : (state.explicitCareRequest && (!hasSpecialty || !hasVets || !hasAccess)) || needsSchedulingTools;
       const body: Record<string, any> = {
         model: cfg.model,
         store: false,

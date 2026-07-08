@@ -52,34 +52,48 @@ export class EntitlementService {
               coalesce(su.included_chats, p.included_chats, 0)::int as included_chats,
               coalesce(su.included_videos, p.included_videos, 0)::int as included_videos,
               coalesce(su.consumed_chats, 0)::int as consumed_chats,
-              coalesce(su.consumed_videos, 0)::int as consumed_videos
+              coalesce(su.consumed_videos, 0)::int as consumed_videos,
+              coalesce(oc.remaining_units, 0)::int as overage_remaining
          from user_subscriptions us
          join subscription_plans p on p.id = us.plan_id
     left join subscription_usage su
            on su.subscription_id = us.id
           and su.period_start = us.current_period_start
           and su.period_end = us.current_period_end
+    left join lateral (
+              select sum(oc.remaining_units)::int as remaining_units
+                from overage_credits oc
+                join overage_items oi on oi.id = oc.overage_item_id
+               where oc.user_id = us.user_id
+                 and coalesce(oi.metadata->>'type', '') = $2
+                 and oc.remaining_units > 0
+                 and (oc.expires_at is null or oc.expires_at > now())
+           ) oc on true
         where us.user_id = $1::uuid
           and ${this.activeSubscriptionSql('us')}
         order by us.current_period_end desc nulls last
         limit 1`,
-      [userId]
+      [userId, serviceType]
     );
     const row = rows[0];
     if (!row) return { ok: true, serviceType, canUse: false, reason: 'no_active_subscription' };
 
     const included = serviceType === 'chat' ? Number(row.included_chats || 0) : Number(row.included_videos || 0);
     const consumed = serviceType === 'chat' ? Number(row.consumed_chats || 0) : Number(row.consumed_videos || 0);
+    const overageRemaining = Number(row.overage_remaining || 0);
+    const includedRemaining = Math.max(included - consumed, 0);
+    const canUse = includedRemaining > 0 || overageRemaining > 0;
     return {
       ok: true,
       serviceType,
-      canUse: consumed < included,
-      reason: consumed < included ? 'available' : `no_${serviceType}_entitlement_left`,
+      canUse,
+      reason: canUse ? 'available' : `no_${serviceType}_entitlement_left`,
       subscriptionId: row.subscription_id,
       planCode: row.plan_code,
       included,
       consumed,
-      remaining: Math.max(included - consumed, 0),
+      overageRemaining,
+      remaining: includedRemaining + overageRemaining,
     };
   }
 

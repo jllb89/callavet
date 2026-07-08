@@ -2298,7 +2298,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final text = switch (service) {
       'video' => 'Quiero una videollamada ahora con un veterinario.',
       'scheduled_video' =>
-        'Quiero agendar una consulta con un veterinario.',
+        'Quiero agendar una videollamada con un veterinario.',
       'scheduled_chat' =>
         'Quiero agendar una consulta por chat con un veterinario.',
       _ => 'Quiero continuar por chat con un veterinario.',
@@ -2306,9 +2306,37 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _sendUserMessage(text);
   }
 
+  String _serviceKind(String service) =>
+      service == 'video' || service == 'scheduled_video' ? 'video' : 'chat';
+
+  bool _isScheduledService(String service) =>
+      service == 'scheduled_video' || service == 'scheduled_chat';
+
   Future<void> _activateService(String service, _AiChatTurnResult result,
       {bool addUserBubble = true}) async {
-    if (service == 'scheduled_video' || service == 'scheduled_chat') {
+    if (_isScheduledService(service)) {
+      final kind = _serviceKind(service);
+      if (!await _hasServiceAvailability(kind)) {
+        final exhaustedResult = result.withEntitlement(
+          serviceType: kind,
+          canUse: false,
+          remaining: 0,
+          reason: 'no_${kind}_entitlement_left',
+          commerceServiceOverride: service,
+        );
+        if (!mounted) return;
+        setState(() {
+          _messages.add(_ChatMessage.assistant(
+            kind == 'video'
+                ? 'Para agendar una videollamada, primero necesitas una videollamada disponible. Puedes comprar una consulta única y después sigo con la agenda.'
+                : 'Para agendar una consulta por chat, primero necesitas un chat disponible. Puedes comprar una consulta única y después sigo con la agenda.',
+            result: exhaustedResult,
+            includeInHistory: false,
+          ));
+        });
+        _scrollToBottom();
+        return;
+      }
       _sendQuickReply(service);
       return;
     }
@@ -2316,7 +2344,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _aiChatLog('activateService ignored while busy service=$service');
       return;
     }
-    final kind = service == 'video' ? 'video' : 'chat';
+    final kind = _serviceKind(service);
     _aiChatLog(
       'activateService start kind=$kind petId=${result.petId} vetId=${result.vetId} specialtyId=${result.specialtyId}',
     );
@@ -2374,9 +2402,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _aiChatLog('purchaseSingleSession ignored while busy service=$service');
       return;
     }
-    final kind = service == 'video' || service == 'scheduled_video'
-      ? 'video'
-      : 'chat';
+    final kind = _serviceKind(service);
     _aiChatLog('purchaseSingleSession start kind=$kind');
     setState(() {
       _messages.add(_ChatMessage.user(kind == 'video'
@@ -2393,6 +2419,21 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       });
       _aiChatLog(
           'purchaseSingleSession dev grant response keys=${grant.keys.join(',')}');
+      if (_isScheduledService(service)) {
+        if (!mounted) return;
+        setState(() {
+          _messages.add(_ChatMessage.assistant(
+            kind == 'video'
+                ? 'Listo, ya tienes una videollamada única disponible. Sigo con la agenda.'
+                : 'Listo, ya tienes un chat único disponible. Sigo con la agenda.',
+            includeInHistory: false,
+          ));
+          _isSending = false;
+        });
+        _scrollToBottom();
+        _sendQuickReply(service);
+        return;
+      }
       final start = await _startSession(kind, result);
       if (start['overage'] == true) {
         if (!mounted) return;
@@ -4754,7 +4795,6 @@ class _HandoffPanel extends StatelessWidget {
       );
     }
     final recommended = payload.recommendedService;
-    if (recommended == null) return const SizedBox.shrink();
     if (result.entitlementExhaustedForRecommendedService) {
       final service = result.commerceService;
         final recommendedService = payload.recommendedService == 'scheduled_video'
@@ -4794,6 +4834,7 @@ class _HandoffPanel extends StatelessWidget {
         ],
       );
     }
+    if (recommended == null) return const SizedBox.shrink();
     final scheduledService = recommended == 'scheduled_chat'
       ? 'scheduled_chat'
       : 'scheduled_video';
@@ -6334,10 +6375,11 @@ class _AiChatTurnResult {
   final _ScheduledAppointment? scheduledAppointment;
 
   String get commerceService {
-    if (commerceServiceOverride == 'video' ||
-        commerceServiceOverride == 'chat') {
+    if (commerceServiceOverride == 'video' || commerceServiceOverride == 'chat') {
       return commerceServiceOverride!;
     }
+    if (commerceServiceOverride == 'scheduled_video') return 'video';
+    if (commerceServiceOverride == 'scheduled_chat') return 'chat';
     final recommended = payload.recommendedService == 'scheduled_video'
         ? 'video'
       : payload.recommendedService == 'scheduled_chat'
@@ -6412,6 +6454,7 @@ class _AiChatTurnResult {
     required int remaining,
     String? reason,
     bool upgradeUnavailable = false,
+    String? commerceServiceOverride,
   }) {
     return _AiChatTurnResult(
       payload: payload,
@@ -6424,7 +6467,8 @@ class _AiChatTurnResult {
       serviceAccessType: serviceType,
       serviceCanUse: canUse,
       serviceAccessReason: reason,
-      commerceServiceOverride: serviceType == 'video' ? 'video' : 'chat',
+        commerceServiceOverride: commerceServiceOverride ??
+          (serviceType == 'video' ? 'video' : 'chat'),
       upgradePlan: upgradePlan,
       upgradeUnavailable: upgradeUnavailable,
       remaining: remaining,
@@ -6674,6 +6718,8 @@ class _ChatSubscriptionUsage {
     required this.consumedChats,
     required this.includedVideos,
     required this.consumedVideos,
+    required this.overageChats,
+    required this.overageVideos,
   });
 
   factory _ChatSubscriptionUsage.fromJson(Map<String, dynamic> json) {
@@ -6682,6 +6728,8 @@ class _ChatSubscriptionUsage {
       consumedChats: _toInt(json['consumed_chats']) ?? 0,
       includedVideos: _toInt(json['included_videos']) ?? 0,
       consumedVideos: _toInt(json['consumed_videos']) ?? 0,
+      overageChats: _toInt(json['overage_chats']) ?? 0,
+      overageVideos: _toInt(json['overage_videos']) ?? 0,
     );
   }
 
@@ -6689,6 +6737,8 @@ class _ChatSubscriptionUsage {
   final int consumedChats;
   final int includedVideos;
   final int consumedVideos;
+  final int overageChats;
+  final int overageVideos;
 
   int remainingForPlan(_ChatSubscriptionPlan plan, String service) {
     final included =
@@ -6697,8 +6747,9 @@ class _ChatSubscriptionUsage {
     return math.max(included - consumed, 0);
   }
 
-  int get remainingChats => math.max(includedChats - consumedChats, 0);
-  int get remainingVideos => math.max(includedVideos - consumedVideos, 0);
+  int get remainingChats => math.max(includedChats - consumedChats, 0) + overageChats;
+  int get remainingVideos =>
+      math.max(includedVideos - consumedVideos, 0) + overageVideos;
 
   String get aiSummary =>
       '$consumedChats de $includedChats chats consumidos y $consumedVideos de $includedVideos videollamadas consumidas';
