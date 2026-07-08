@@ -2220,6 +2220,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       'conversationId': _conversationId,
       'message': message,
       'messages': history,
+      'clientUtcOffsetMinutes': DateTime.now().timeZoneOffset.inMinutes,
       if (metadata != null && metadata.isNotEmpty) 'messageMetadata': metadata,
       if (sessionId != null) 'sessionId': sessionId,
       if (_aiChatDryRun) 'dryRun': true,
@@ -2308,7 +2309,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         'Quiero agendar una consulta por chat con un veterinario.',
       _ => 'Quiero continuar por chat con un veterinario.',
     };
-    _sendUserMessage(text);
+    _sendUserMessage(
+      text,
+      metadata: _isScheduledService(service)
+          ? {
+              'schedulingMode': _serviceKind(service),
+              'clientUtcOffsetMinutes': DateTime.now().timeZoneOffset.inMinutes,
+            }
+          : null,
+    );
   }
 
   String _serviceKind(String service) =>
@@ -4861,7 +4870,7 @@ class _HandoffPanel extends StatelessWidget {
         runSpacing: 8,
         children: [
           _ServiceButton(
-            label: 'actualizar a ${upgradePlan.displayName}',
+            label: 'Mejorar plan',
             selected: true,
             enabled: !sending,
             onTap: () => onPlanUpgradeConfirmed(upgradePlan, result),
@@ -4901,7 +4910,7 @@ class _HandoffPanel extends StatelessWidget {
             ),
           if (!result.upgradeUnavailable)
             _ServiceButton(
-              label: 'Mejorar mi plan',
+              label: 'Mejorar plan',
               selected: false,
               enabled: !sending,
               onTap: () => onUpgradeSelected(result),
@@ -4932,16 +4941,14 @@ class _HandoffPanel extends StatelessWidget {
 
   String _serviceLabel(String service) {
     return switch (service) {
-      'video' => 'Iniciar videollamada con especialista',
-      'scheduled_video' || 'scheduled_chat' => 'Agendar consulta',
-      _ => 'Iniciar chat con veterinario',
+      'video' => 'Video ahora',
+      'scheduled_video' || 'scheduled_chat' => 'Agendar',
+      _ => 'Chat ahora',
     };
   }
 
   String _commerceServiceLabel(String service) {
-    return service == 'video'
-        ? 'Comprar consulta por videollamada'
-        : 'Comprar consulta por chat';
+    return service == 'video' ? 'Comprar video' : 'Comprar chat';
   }
 }
 
@@ -6740,11 +6747,19 @@ class _AiSchedulingOption {
   });
 
   factory _AiSchedulingOption.fromJson(Map<String, dynamic> json) {
+    final stage = json['stage']?.toString();
+    final start = json['start']?.toString();
+    final value = json['value']?.toString() ?? '';
     return _AiSchedulingOption(
-      label: json['label']?.toString() ?? '',
-      value: json['value']?.toString() ?? '',
-      stage: json['stage']?.toString(),
-      start: json['start']?.toString(),
+      label: _schedulingOptionLabel(
+        label: json['label']?.toString() ?? '',
+        value: value,
+        stage: stage,
+        start: start,
+      ),
+      value: value,
+      stage: stage,
+      start: start,
       end: json['end']?.toString(),
       mode: json['mode']?.toString(),
     );
@@ -6762,6 +6777,7 @@ class _AiSchedulingOption {
   Map<String, dynamic> selectionMetadata(_AiChatPayload payload) => {
         'schedulingStage': stage ?? payload.schedulingStage,
         'schedulingMode': mode ?? payload.schedulingMode,
+        'clientUtcOffsetMinutes': DateTime.now().timeZoneOffset.inMinutes,
         if (stage == 'date_range') 'schedulingRange': value,
         if (stage == 'day') 'schedulingDay': value,
         if (stage == 'daypart') 'schedulingDaypart': value,
@@ -6781,6 +6797,46 @@ class _AiSchedulingOption {
         if (end != null) 'end': end,
         if (mode != null) 'mode': mode,
       };
+}
+
+String _schedulingOptionLabel({
+  required String label,
+  required String value,
+  required String? stage,
+  required String? start,
+}) {
+  if (stage == 'slot' && start != null && start.trim().isNotEmpty) {
+    final parsed = DateTime.tryParse(start.trim());
+    if (parsed != null) return _formatLocalHour(parsed.toLocal());
+  }
+  if (stage == 'day' && value.trim().isNotEmpty) {
+    final parsed = DateTime.tryParse(value.trim());
+    if (parsed != null) return _formatLocalDay(parsed);
+  }
+  return label.trim();
+}
+
+String _formatLocalHour(DateTime value) {
+  final hour24 = value.hour;
+  final minute = value.minute;
+  final suffix = hour24 >= 12 ? 'pm' : 'am';
+  final hour12 = hour24 % 12 == 0 ? 12 : hour24 % 12;
+  return minute == 0
+      ? '$hour12 $suffix'
+      : '$hour12:${minute.toString().padLeft(2, '0')} $suffix';
+}
+
+String _formatLocalDay(DateTime value) {
+  const weekdays = [
+    'lunes',
+    'martes',
+    'miércoles',
+    'jueves',
+    'viernes',
+    'sábado',
+    'domingo',
+  ];
+  return '${weekdays[value.weekday - 1]} ${value.day}';
 }
 
 class _AiChatPayload {

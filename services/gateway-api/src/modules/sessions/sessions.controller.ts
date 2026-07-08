@@ -405,6 +405,8 @@ export class SessionsController {
           const { rows: candidateRows } = await q<{ id: string }>(
             `select v.id
                from vets v
+          left join ratings r
+                 on r.vet_id = v.id
           left join vet_consult_locks l
                  on l.vet_id = v.id
                 and l.released_at is null
@@ -412,7 +414,8 @@ export class SessionsController {
               where v.is_approved = true
                 and ($1::uuid is null or array_position(coalesce(v.specialties, '{}'::uuid[]), $1::uuid) is not null)
                 and l.vet_id is null
-              order by v.rating_average desc nulls last, v.rating_count desc nulls last, v.created_at asc
+              group by v.id, v.created_at
+              order by coalesce(avg(r.score), 0) desc, count(r.id) desc, v.created_at asc
               limit 1`,
             [specialtyId]
           );

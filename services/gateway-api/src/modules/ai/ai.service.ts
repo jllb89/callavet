@@ -58,6 +58,7 @@ type AiChatMessageInput = {
     schedulingRange?: string | null;
     schedulingDay?: string | null;
     schedulingDaypart?: string | null;
+    clientUtcOffsetMinutes?: number | null;
   };
 };
 
@@ -66,6 +67,7 @@ type AiChatTurnInput = {
   petId?: string;
   sessionId?: string;
   message?: string;
+  clientUtcOffsetMinutes?: number;
   messageMetadata?: AiChatMessageInput['metadata'];
   messages?: AiChatMessageInput[];
   dryRun?: boolean;
@@ -140,6 +142,7 @@ type AiChatTurnState = {
   schedulingRange: string | null;
   schedulingDay: string | null;
   schedulingDaypart: string | null;
+  clientUtcOffsetMinutes: number;
 };
 
 type PromptVersion = {
@@ -1263,14 +1266,14 @@ export class AiService {
       'Ask the urgent triage question set only once. If the user has already answered those first urgent intake questions, do not ask another triage set or another generic follow-up.',
       'If the latest user message includes a concrete horse/case detail and asks to talk, connect, chat, call, video, or consult with a veterinarian, route immediately with tools instead of asking a generic preference question.',
       'After the user answers the first urgent intake questions, decide the specialty, urgency, and service type from the available information. Then use tools to route: recommend_specialty, find_vets for that specialty, check_service_access for the recommended service, and get_available_slots when scheduled_video or scheduled_chat is the best next step.',
-      'After urgent intake answers, present the next action as chat, immediate video, scheduled video, or scheduled chat. If red flags remain, bias toward immediate video/local emergency care; if stable but needs review, choose chat, scheduled chat, or scheduled video based on service access and availability.',
+      'After urgent intake answers, present the next action as chat, immediate video, scheduled video, or scheduled chat. Stay neutral across the available actions the app will render. Unless the user explicitly asks to schedule or says they want a later time, recommend immediate chat or immediate video as the primary service, and leave scheduling as a separate selectable option.',
       'Before recommending a service, gather the minimum missing context for a useful vet handoff: affected horse, main concern, onset/duration, severity, appetite/water, relevant history/medications, and red flags. Ask at most one concise follow-up at a time.',
       'Do not immediately ask the user to choose a product. Decide whether chat, immediate video, scheduled video, or scheduled chat is best based on urgency, symptoms, context, and entitlement signals; then explain the recommendation briefly.',
       'Prepare the conversation so a later veterinarian handoff can include a concise contextualization, not a diagnosis.',
       'Populate caseSummary, handoffSummary, and routingRationale whenever there is concrete case detail. Keep them concise, factual, and non-diagnostic; use null only when there is not enough detail.',
       'Set commerceRecommendation from entitlement context/tool results: included when the recommended service is available, one_off when allowance is exhausted but a one-time service is appropriate, upgrade_plan when there is no active subscription or a plan upgrade is the clearest next step, ask_more while context is missing, and none when no service should be offered.',
       'Use function tools to choose an existing specialty, find approved vets, check service access, and inspect availability.',
-      'When the user wants scheduling, first clarify whether they prefer chat or video if that is not already clear. Once the mode is clear, call check_service_access for that mode before offering slots. If access is exhausted, return nextStep payment, commerceRecommendation one_off, and recommendedService scheduled_chat or scheduled_video so the app can sell the one-time consultation before scheduling. If access is available, call get_available_slots, present concrete options, and call schedule_video or schedule_chat only after the user confirms one exact slot. If the requested slot is no longer available, ask the user to choose another returned slot.',
+      'Only enter scheduling when the user explicitly selects scheduling, asks to agendar/programar, or chooses a structured scheduling option. When the user wants scheduling, first clarify whether they prefer chat or video if that is not already clear. Once the mode is clear, call check_service_access for that mode before offering slots. If access is exhausted, return nextStep payment, commerceRecommendation one_off, and recommendedService scheduled_chat or scheduled_video so the app can sell the one-time consultation before scheduling. If access is available, call get_available_slots, present concrete options, and call schedule_video or schedule_chat only after the user confirms one exact slot. If the requested slot is no longer available, ask the user to choose another returned slot.',
       'If the prior assistant message listed numbered appointment slots and the latest user reply chooses a number or clearly confirms one listed option, call schedule_video or schedule_chat using the exact ISO slot from that numbered option. Do not ask triage questions again during slot selection.',
       'Do not invent specialty IDs, vet IDs, appointment slots, entitlements, prices, or session IDs.',
       'Before recommending chat or video activation, call check_service_access for the relevant service type.',
@@ -1312,7 +1315,13 @@ export class AiService {
     return normalized.slice(-12);
   }
 
-  private chatTurnState(messages: Array<{ role: 'user' | 'assistant'; content: string; metadata?: AiChatMessageInput['metadata'] }>): AiChatTurnState {
+  private normalizeClientUtcOffsetMinutes(value: unknown) {
+    const offset = Number(value);
+    if (!Number.isFinite(offset)) return 0;
+    return Math.min(Math.max(Math.trunc(offset), -14 * 60), 14 * 60);
+  }
+
+  private chatTurnState(messages: Array<{ role: 'user' | 'assistant'; content: string; metadata?: AiChatMessageInput['metadata'] }>, inputClientUtcOffsetMinutes = 0): AiChatTurnState {
     const priorMessages = messages.slice(0, -1);
     const latestMessage = messages[messages.length - 1]?.content || '';
     const latestMetadata = messages[messages.length - 1]?.metadata || {};
@@ -1342,6 +1351,7 @@ export class AiService {
     const priorSchedulingRange = String((latestMetadata as any).schedulingRange || (latestPriorMetadata as any).schedulingRange || '').trim().toLowerCase() || null;
     const priorSchedulingDay = String((latestMetadata as any).schedulingDay || (latestPriorMetadata as any).schedulingDay || '').trim() || null;
     const priorSchedulingDaypart = String((latestMetadata as any).schedulingDaypart || (latestPriorMetadata as any).schedulingDaypart || '').trim().toLowerCase() || null;
+    const clientUtcOffsetMinutes = this.normalizeClientUtcOffsetMinutes((latestMetadata as any).clientUtcOffsetMinutes ?? (latestPriorMetadata as any).clientUtcOffsetMinutes ?? inputClientUtcOffsetMinutes);
     const wantsScheduling = /agendar|agenda|programar|cita|horario|slot|disponible/.test(latestText)
       || !!priorSchedulingStage
       || (priorSchedulingQuestion && /chat|video|videollamada|llamada|mensaje|mensajes|perfecto|ok|okay|si|sí|va|dale|confirmo|confirmar|^[1-5]$|opcion|opción|primera|segunda|tercera/.test(latestText));
@@ -1364,6 +1374,7 @@ export class AiService {
       schedulingRange: selectedRange,
       schedulingDay: priorSchedulingDay,
       schedulingDaypart: selectedDaypart,
+      clientUtcOffsetMinutes,
     };
   }
 
@@ -1577,17 +1588,22 @@ export class AiService {
     return accessType === 'chat' ? 'chat' : 'video';
   }
 
-  private formatSlotForUser(start: unknown, end: unknown, index: number) {
-    const normalizeDate = (value: unknown) => {
-      if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString();
-      const date = new Date(String(value || '').trim());
-      return Number.isNaN(date.getTime()) ? String(value || '').trim() : date.toISOString();
-    };
-    const startText = normalizeDate(start);
-    const endText = normalizeDate(end);
-    return endText
-      ? `${index + 1}. ${startText} a ${endText}`
-      : `${index + 1}. ${startText}`;
+  private localDateFromUtc(value: unknown, offsetMinutes: number) {
+    const date = value instanceof Date ? value : new Date(String(value || '').trim());
+    if (Number.isNaN(date.getTime())) return null;
+    return new Date(date.getTime() + offsetMinutes * 60 * 1000);
+  }
+
+  private formatSlotTimeForUser(start: unknown, offsetMinutes: number) {
+    const local = this.localDateFromUtc(start, offsetMinutes);
+    if (!local) return String(start || '').trim();
+    const hour24 = local.getUTCHours();
+    const minute = local.getUTCMinutes();
+    const suffix = hour24 >= 12 ? 'pm' : 'am';
+    const hour12 = hour24 % 12 || 12;
+    return minute === 0
+      ? `${hour12} ${suffix}`
+      : `${hour12}:${String(minute).padStart(2, '0')} ${suffix}`;
   }
 
   private forceSchedulingSlotOffer(payload: any, state: AiChatTurnState, toolResults: Array<{ name: string; output: any }>) {
@@ -1600,9 +1616,10 @@ export class AiService {
     if (!slots.length) return null;
     const mode = state.schedulingMode === 'chat' ? 'chat' : this.schedulingModeFromContext(payload, toolResults);
     const serviceLabel = mode === 'chat' ? 'chat' : 'videollamada';
+    const slotLabels = slots.map((slot) => this.formatSlotTimeForUser(slot.start, state.clientUtcOffsetMinutes));
     return {
       ...payload,
-      message: `Tengo estos horarios disponibles para agendar la ${serviceLabel}. Responde con el número del horario que prefieres.\n${slots.map((slot, index) => this.formatSlotForUser(slot.start, slot.end, index)).join('\n')}`,
+      message: `Tengo estos horarios disponibles para agendar la ${serviceLabel}. Elige el horario que prefieres.`,
       nextStep: 'interview',
       recommendedService: null,
       actionLabel: 'Elegir horario',
@@ -1614,7 +1631,7 @@ export class AiService {
       schedulingDay: state.schedulingDay,
       schedulingDaypart: state.schedulingDaypart,
       schedulingOptions: slots.map((slot, index) => ({
-        label: this.formatSlotForUser(slot.start, slot.end, index).replace(/^\d+[.)]\s*/, ''),
+        label: slotLabels[index],
         value: String(index + 1),
         stage: 'slot',
         start: slot.start,
@@ -1622,8 +1639,8 @@ export class AiService {
         mode,
       })),
       displayBlocks: [
-        { type: 'paragraph', text: `Tengo estos horarios disponibles para agendar la ${serviceLabel}. Responde con el número del horario que prefieres.`, items: [] },
-        { type: 'numbered_list', text: null, items: slots.map((slot, index) => this.formatSlotForUser(slot.start, slot.end, index).replace(/^\d+[.)]\s*/, '')) },
+        { type: 'paragraph', text: `Tengo estos horarios disponibles para agendar la ${serviceLabel}. Elige el horario que prefieres.`, items: [] },
+        { type: 'numbered_list', text: null, items: slotLabels },
       ],
       actionUxWarnings: Array.from(new Set([...(Array.isArray(payload?.actionUxWarnings) ? payload.actionUxWarnings : []), 'scheduled_slots_forced'])).slice(0, 12),
       actionUxRepaired: true,
@@ -1658,12 +1675,20 @@ export class AiService {
     };
   }
 
-  private schedulingTodayDate() {
-    return new Date().toISOString().slice(0, 10);
+  private localDateValue(date: Date) {
+    return date.toISOString().slice(0, 10);
   }
 
-  private schedulingDayOptions(range: string | null) {
-    const base = new Date();
+  private localNowForScheduling(state: AiChatTurnState) {
+    return new Date(Date.now() + state.clientUtcOffsetMinutes * 60 * 1000);
+  }
+
+  private schedulingTodayDate(state: AiChatTurnState) {
+    return this.localDateValue(this.localNowForScheduling(state));
+  }
+
+  private schedulingDayOptions(range: string | null, state: AiChatTurnState) {
+    const base = this.localNowForScheduling(state);
     base.setUTCHours(12, 0, 0, 0);
     let startOffset = 0;
     if (range === 'next_week') {
@@ -1673,13 +1698,12 @@ export class AiService {
     const formatter = new Intl.DateTimeFormat('es-MX', {
       weekday: 'long',
       day: 'numeric',
-      month: 'short',
       timeZone: 'UTC',
     });
     return Array.from({ length: 7 }, (_, index) => {
       const day = new Date(base.getTime() + (startOffset + index) * 24 * 60 * 60 * 1000);
-      const value = day.toISOString().slice(0, 10);
-      const label = formatter.format(day).replace(/^./, (char) => char.toUpperCase());
+      const value = this.localDateValue(day);
+      const label = formatter.format(day).replace(',', '');
       return { label, value };
     });
   }
@@ -1718,11 +1742,11 @@ export class AiService {
           schedulingStage: 'day',
           schedulingMode: mode,
           schedulingRange: state.schedulingRange,
-          schedulingOptions: this.schedulingDayOptions(state.schedulingRange).map((option) => ({ ...option, stage: 'day', mode })),
+          schedulingOptions: this.schedulingDayOptions(state.schedulingRange, state).map((option) => ({ ...option, stage: 'day', mode })),
           displayBlocks: [{ type: 'paragraph', text: 'Bien. ¿Qué día te funciona mejor?', items: [] }],
         };
       }
-      const today = this.schedulingTodayDate();
+      const today = this.schedulingTodayDate(state);
       return {
         ...payload,
         message: 'Bien. ¿Qué horario te funciona mejor?',
@@ -2068,6 +2092,15 @@ export class AiService {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload;
     const normalized = { ...payload };
     const scheduledAppointmentCreated = toolResults.some((result) => result.name === 'schedule_video' || result.name === 'schedule_chat');
+    if (!state.wantsScheduling) {
+      const recommended = String(normalized.recommendedService || '').trim().toLowerCase();
+      if (recommended === 'scheduled_video' || recommended === 'scheduled_chat') {
+        normalized.recommendedService = recommended === 'scheduled_video' ? 'video' : 'chat';
+        normalized.actionLabel = normalized.recommendedService === 'video' ? 'Iniciar video' : 'Iniciar chat';
+        normalized.actionUxWarnings = Array.from(new Set([...(Array.isArray(normalized.actionUxWarnings) ? normalized.actionUxWarnings : []), 'scheduled_recommendation_normalized'])).slice(0, 12);
+        normalized.actionUxRepaired = true;
+      }
+    }
     if (state.wantsScheduling && !scheduledAppointmentCreated) {
       const choicePrompt = this.forceSchedulingChoicePrompt(normalized, state);
       if (choicePrompt) return this.normalizeChatDisplayPayload(choicePrompt, false);
@@ -2261,9 +2294,10 @@ export class AiService {
       : state.schedulingDaypart === 'evening'
         ? [18, 24]
         : [12, 18];
+    const offsetMs = state.clientUtcOffsetMinutes * 60 * 1000;
     return {
-      since: new Date(Date.UTC(year, month, day, hours[0], 0, 0)).toISOString(),
-      until: new Date(Date.UTC(year, month, day, hours[1], 0, 0)).toISOString(),
+      since: new Date(Date.UTC(year, month, day, hours[0], 0, 0) - offsetMs).toISOString(),
+      until: new Date(Date.UTC(year, month, day, hours[1], 0, 0) - offsetMs).toISOString(),
     };
   }
 
@@ -2385,7 +2419,7 @@ export class AiService {
   private async chatTurnFallback(input: AiChatTurnInput, context: AiChatTurnContext, error: any) {
     const messages = this.normalizeChatMessages(input);
     const latestMessage = messages[messages.length - 1]?.content || '';
-    const state = this.chatTurnState(messages);
+    const state = this.chatTurnState(messages, input.clientUtcOffsetMinutes);
     const toolResults: Array<{ name: string; output: any }> = [];
     const providerError = String(error?.message || error || 'ai_chat_provider_unavailable').slice(0, 240);
     const shouldRoute = state.caseDetailSignal || state.explicitCareRequest;
@@ -2511,7 +2545,7 @@ export class AiService {
     const cfg = this.providerConfig(undefined, !!input.dryRun);
     const messages = this.normalizeChatMessages(input);
     const latestMessage = messages[messages.length - 1]?.content || '';
-    const state = this.chatTurnState(messages);
+    const state = this.chatTurnState(messages, input.clientUtcOffsetMinutes);
     if (input.dryRun) return this.chatTurnDryRun(context, latestMessage);
     if (!cfg.apiKey) throw new ServiceUnavailableException('ai_provider_not_configured');
     if (cfg.apiMode !== 'responses') throw new ServiceUnavailableException('ai_chat_turn_requires_responses_api');
