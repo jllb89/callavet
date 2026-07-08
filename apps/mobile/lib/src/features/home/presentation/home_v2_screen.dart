@@ -43,10 +43,12 @@ class HomeV2Screen extends StatefulWidget {
     super.key,
     this.initialActiveConsultId,
     this.initialActiveConsultMode,
+    this.initialActiveConsultVetName,
   });
 
   final String? initialActiveConsultId;
   final String? initialActiveConsultMode;
+  final String? initialActiveConsultVetName;
 
   @override
   State<HomeV2Screen> createState() => _HomeV2ScreenState();
@@ -87,6 +89,7 @@ class _HomeV2ScreenState extends State<HomeV2Screen>
     final consult = _ActiveConsult.fallback(
       id: id,
       mode: mode == 'video' ? 'video' : 'chat',
+      vetName: widget.initialActiveConsultVetName,
     );
     _activeConsults
       ..clear()
@@ -576,9 +579,7 @@ class _ActiveConsult {
     required this.id,
     required this.mode,
     required this.status,
-    required this.petName,
-    required this.priority,
-    required this.specialtyName,
+    required this.vetName,
   });
 
   factory _ActiveConsult.fromJson(Map<String, dynamic> json) {
@@ -586,60 +587,34 @@ class _ActiveConsult {
       id: json['id']?.toString() ?? '',
       mode: json['mode']?.toString().toLowerCase() ?? 'chat',
       status: json['status']?.toString().toLowerCase() ?? '',
-      petName: _cleanLabel(json['pet_name']) ??
-          _cleanLabel(json['petName']) ??
-          'Consulta',
-      priority: _cleanLabel(json['priority']) ?? 'rutina',
-      specialtyName: _cleanLabel(json['specialty_name']) ??
-          _cleanLabel(json['specialtyName']) ??
-          'general',
+      vetName: _cleanLabel(json['vet_name']) ??
+          _cleanLabel(json['vetName']) ??
+          'tu veterinario',
     );
   }
 
   factory _ActiveConsult.fallback({
     required String id,
     required String mode,
+    String? vetName,
   }) {
     return _ActiveConsult(
       id: id,
       mode: mode,
       status: 'active',
-      petName: 'Consulta',
-      priority: 'routine',
-      specialtyName: 'general',
+      vetName: _cleanLabel(vetName) ?? 'tu veterinario',
     );
   }
 
   final String id;
   final String mode;
   final String status;
-  final String petName;
-  final String priority;
-  final String specialtyName;
+  final String vetName;
 
   bool get isActive =>
       id.isNotEmpty &&
       !_terminalConsultStatuses.contains(status) &&
       (mode == 'chat' || mode == 'video');
-
-  String get priorityLabel {
-    if (priority == 'emergency') return 'urgente';
-    if (priority == 'urgent') return 'urgente';
-    if (priority == 'routine') return 'rutina';
-    return _shortLabel(priority, maxLength: 9);
-  }
-
-  String get specialtyLabel {
-    final normalized = specialtyName.toLowerCase();
-    if (normalized.contains('gastro')) return 'gastro';
-    if (normalized.contains('urgenc')) return 'crítico';
-    if (normalized.contains('general')) return 'general';
-    if (normalized.contains('deport')) return 'sport';
-    if (normalized.contains('cojera') || normalized.contains('ortop')) {
-      return 'cojera';
-    }
-    return _shortLabel(specialtyName, maxLength: 9).toLowerCase();
-  }
 }
 
 class _PendingSurvey {
@@ -970,87 +945,32 @@ class _ActiveConsultStrip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final consult = consults.first;
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      clipBehavior: Clip.none,
-      child: Row(
-        children: [
-          _ActivePetPill(consult: consult),
-          const SizedBox(width: 14),
-          _ActiveConsultActionPill(
-            mode: consult.mode,
-            onTap: () => onSelected(consult),
-          ),
-          const SizedBox(width: 14),
-          _ActiveMetaPill(label: consult.priorityLabel),
-          const SizedBox(width: 14),
-          _ActiveMetaPill(label: consult.specialtyLabel),
-        ],
-      ),
-    );
-  }
-}
-
-class _ActivePetPill extends StatelessWidget {
-  const _ActivePetPill({required this.consult});
-
-  final _ActiveConsult consult;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      height: 51,
-      constraints: const BoxConstraints(minWidth: 111, maxWidth: 150),
-      padding: const EdgeInsets.symmetric(horizontal: 20),
-      decoration: BoxDecoration(
-        color: Colors.black,
-        borderRadius: BorderRadius.circular(40),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            consult.mode == 'video'
-                ? Icons.videocam_rounded
-                : Icons.chat_bubble_outline_rounded,
-            color: Colors.white,
-            size: 17,
-          ),
-          const SizedBox(width: 14),
-          Flexible(
-            child: Text(
-              consult.petName,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 13,
-                fontFamily: 'ABCDiatype',
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-        ],
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: _ActiveConsultActionPill(
+        consult: consult,
+        onTap: () => onSelected(consult),
       ),
     );
   }
 }
 
 class _ActiveConsultActionPill extends StatelessWidget {
-  const _ActiveConsultActionPill({required this.mode, required this.onTap});
+  const _ActiveConsultActionPill({required this.consult, required this.onTap});
 
-  final String mode;
+  final _ActiveConsult consult;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    final isVideo = mode == 'video';
+    final isVideo = consult.mode == 'video';
+    final vet = _shortLabel(consult.vetName, maxLength: 18);
     return GestureDetector(
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
       child: Container(
         height: 51,
-        constraints: const BoxConstraints(minWidth: 116, maxWidth: 142),
+        constraints: const BoxConstraints(minWidth: 220, maxWidth: 340),
         padding: const EdgeInsets.symmetric(horizontal: 18),
         decoration: BoxDecoration(
           color: Colors.white,
@@ -1067,7 +987,7 @@ class _ActiveConsultActionPill extends StatelessWidget {
             const SizedBox(width: 10),
             Flexible(
               child: Text(
-                isVideo ? 'unirse' : 'abrir chat',
+                'consulta activa con MVZ $vet',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
@@ -1079,37 +999,6 @@ class _ActiveConsultActionPill extends StatelessWidget {
               ),
             ),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-class _ActiveMetaPill extends StatelessWidget {
-  const _ActiveMetaPill({required this.label});
-
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      height: 30,
-      constraints: const BoxConstraints(minWidth: 68, maxWidth: 116),
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        color: Colors.black,
-        borderRadius: BorderRadius.circular(40),
-      ),
-      child: Text(
-        label,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 13,
-          fontFamily: 'ABCDiatype',
-          fontWeight: FontWeight.w500,
         ),
       ),
     );

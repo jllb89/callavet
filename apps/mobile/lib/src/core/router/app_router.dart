@@ -97,6 +97,7 @@ class AppRouter {
           HomeV2Screen(
             initialActiveConsultId: state.uri.queryParameters['activeConsult'],
             initialActiveConsultMode: state.uri.queryParameters['mode'],
+            initialActiveConsultVetName: state.uri.queryParameters['vetName'],
           ),
         ),
       ),

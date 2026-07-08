@@ -265,9 +265,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (!mounted) return;
     final activeSessionId = _consultSessionId;
     if (activeSessionId != null && !_consultClosed) {
+      final vetName = _consultVetName.trim();
       final query = Uri(queryParameters: {
         'activeConsult': activeSessionId,
         'mode': 'chat',
+        if (vetName.isNotEmpty && vetName != 'vet') 'vetName': vetName,
       }).query;
       context.go('/home?$query');
       return;
@@ -452,6 +454,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         'outbox': outboxEntries.length,
         'status': status,
       });
+      _hydrateMissingConsultAttachmentMedia();
       _markVisibleConsultMessagesRead();
       unawaited(_flushConsultOutbox(sessionId));
       if (_consultClosed) unawaited(_startSurveyPrompt());
@@ -905,6 +908,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       'streamOrder': message.streamOrder,
       'attachments': message.attachments.length,
     });
+    _hydrateMissingConsultAttachmentMedia(
+      _messages.where((candidate) => candidate.id == message.id),
+    );
     if (message.streamOrder != null && message.clientKey != null) {
       unawaited(_ConsultOutboxStore.remove(message.clientKey!));
     }
@@ -1505,6 +1511,53 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         },
       );
       return null;
+    }
+  }
+
+  bool _needsConsultAttachmentHydration(_ConsultAttachment attachment) {
+    if (attachment.localPath != null || attachment.isUploading) return false;
+    if (attachment.id.trim().isEmpty) return false;
+    return switch (attachment.kind) {
+      _ConsultAttachmentKind.image =>
+        _consultDisplayImageUrl(attachment) == null,
+      _ConsultAttachmentKind.video ||
+      _ConsultAttachmentKind.voice =>
+        _nonEmpty(attachment.downloadUrl) == null,
+    };
+  }
+
+  void _hydrateMissingConsultAttachmentMedia([Iterable<_ChatMessage>? source]) {
+    final pending = <MapEntry<String, _ConsultAttachment>>[];
+    for (final message in source ?? _messages) {
+      for (final attachment in message.attachments) {
+        if (_needsConsultAttachmentHydration(attachment)) {
+          pending.add(MapEntry(message.id, attachment));
+        }
+      }
+    }
+    if (pending.isEmpty) return;
+    _aiChatLog('attachment hydrate requested count=${pending.length}');
+    for (final entry in pending.take(12)) {
+      final messageId = entry.key;
+      final original = entry.value;
+      unawaited(
+        _refreshConsultAttachmentDownloadUrl(original).then((refreshed) {
+          if (!mounted || refreshed == null) return;
+          setState(() {
+            final messageIndex =
+                _messages.indexWhere((message) => message.id == messageId);
+            if (messageIndex < 0) return;
+            final message = _messages[messageIndex];
+            _messages[messageIndex] = message.copyWith(
+              attachments: message.attachments
+                  .map((attachment) => attachment.id == original.id
+                      ? refreshed.withMediaFrom(attachment)
+                      : attachment)
+                  .toList(growable: false),
+            );
+          });
+        }),
+      );
     }
   }
 

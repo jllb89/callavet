@@ -249,6 +249,7 @@ class _VetChatScreenState extends State<VetChatScreen>
         'outbox': outboxEntries.length,
         'status': status,
       });
+      _hydrateMissingVetAttachmentMedia();
       _markVisibleMessagesRead();
       unawaited(_flushOutbox());
       _scrollToBottom();
@@ -709,6 +710,9 @@ class _VetChatScreenState extends State<VetChatScreen>
       'streamOrder': message.streamOrder,
       'attachments': message.attachments.length,
     });
+    _hydrateMissingVetAttachmentMedia(
+      _consultMessages.where((candidate) => candidate.id == message.id),
+    );
     if (message.streamOrder != null && message.clientKey != null) {
       unawaited(_VetOutboxStore.remove(message.clientKey!));
     }
@@ -1302,6 +1306,53 @@ class _VetChatScreenState extends State<VetChatScreen>
         },
       );
       return null;
+    }
+  }
+
+  bool _needsVetAttachmentHydration(_VetAttachment attachment) {
+    if (attachment.localPath != null || attachment.isUploading) return false;
+    if (attachment.id.trim().isEmpty) return false;
+    return switch (attachment.kind) {
+      _VetAttachmentKind.image => _vetDisplayImageUrl(attachment) == null,
+      _VetAttachmentKind.video ||
+      _VetAttachmentKind.voice =>
+        _vetNonEmpty(attachment.downloadUrl) == null,
+    };
+  }
+
+  void _hydrateMissingVetAttachmentMedia([Iterable<_VetChatMessage>? source]) {
+    final pending = <MapEntry<String, _VetAttachment>>[];
+    for (final message in source ?? _consultMessages) {
+      for (final attachment in message.attachments) {
+        if (_needsVetAttachmentHydration(attachment)) {
+          pending.add(MapEntry(message.id, attachment));
+        }
+      }
+    }
+    if (pending.isEmpty) return;
+    debugPrint(
+        '[VetChat] attachment hydrate requested count=${pending.length}');
+    for (final entry in pending.take(12)) {
+      final messageId = entry.key;
+      final original = entry.value;
+      unawaited(
+        _refreshVetAttachmentDownloadUrl(original).then((refreshed) {
+          if (!mounted || refreshed == null) return;
+          setState(() {
+            final messageIndex = _consultMessages
+                .indexWhere((message) => message.id == messageId);
+            if (messageIndex < 0) return;
+            final message = _consultMessages[messageIndex];
+            _consultMessages[messageIndex] = message.copyWith(
+              attachments: message.attachments
+                  .map((attachment) => attachment.id == original.id
+                      ? refreshed.withMediaFrom(attachment)
+                      : attachment)
+                  .toList(growable: false),
+            );
+          });
+        }),
+      );
     }
   }
 
