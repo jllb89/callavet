@@ -1361,6 +1361,7 @@ class _UpcomingAppointmentsList extends StatelessWidget {
               child: _UpcomingConsultPill(
                 name: appointment.name,
                 time: appointment.formattedStart,
+                mode: appointment.mode,
                 onJoin: appointment.canJoinVideo
                     ? () => onJoinVideo(appointment.videoJoinTarget)
                   : appointment.canOpenChat
@@ -1377,17 +1378,21 @@ class _UpcomingAppointmentsList extends StatelessWidget {
 
 class _UpcomingConsultPill extends StatelessWidget {
   const _UpcomingConsultPill(
-      {required this.name, required this.time, this.onJoin});
+      {required this.name, required this.time, required this.mode, this.onJoin});
 
   final String name;
   final String time;
+  final String mode;
   final VoidCallback? onJoin;
 
   @override
   Widget build(BuildContext context) {
+    final icon = mode == 'chat'
+        ? Icons.chat_bubble_rounded
+        : Icons.videocam_rounded;
     return Container(
       height: 51,
-      padding: const EdgeInsets.only(left: 21, right: 18),
+      padding: const EdgeInsets.only(left: 9, right: 18),
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.06),
         borderRadius: BorderRadius.circular(40),
@@ -1395,8 +1400,8 @@ class _UpcomingConsultPill extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.videocam_outlined, color: Colors.white, size: 19),
-          const SizedBox(width: 18),
+          _RoundConsultIconButton(icon: icon, onTap: onJoin),
+          const SizedBox(width: 14),
           Text(
             name,
             style: const TextStyle(
@@ -1417,20 +1422,17 @@ class _UpcomingConsultPill extends StatelessWidget {
               fontWeight: FontWeight.w300,
             ),
           ),
-          if (onJoin != null) ...[
-            const SizedBox(width: 12),
-            _RoundVideoIconButton(onTap: onJoin!),
-          ],
         ],
       ),
     );
   }
 }
 
-class _RoundVideoIconButton extends StatelessWidget {
-  const _RoundVideoIconButton({required this.onTap});
+class _RoundConsultIconButton extends StatelessWidget {
+  const _RoundConsultIconButton({required this.icon, this.onTap});
 
-  final VoidCallback onTap;
+  final IconData icon;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -1444,8 +1446,7 @@ class _RoundVideoIconButton extends StatelessWidget {
           color: Colors.white,
           shape: BoxShape.circle,
         ),
-        child:
-            const Icon(Icons.videocam_rounded, color: Colors.black, size: 18),
+        child: Icon(icon, color: Colors.black, size: 18),
       ),
     );
   }

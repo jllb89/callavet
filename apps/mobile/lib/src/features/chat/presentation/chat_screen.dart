@@ -4977,27 +4977,24 @@ class _ServiceButton extends StatelessWidget {
         behavior: HitTestBehavior.opaque,
         child: ConstrainedBox(
           constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: AnimatedOpacity(
-              duration: const Duration(milliseconds: 160),
-              opacity: enabled ? 1 : 0.45,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(30),
-                ),
-                child: Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 13, vertical: 9),
-                  child: Text(
-                    label,
-                    style: const TextStyle(
-                      color: Colors.black,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
-                      height: 1,
-                    ),
+          child: AnimatedOpacity(
+            duration: const Duration(milliseconds: 160),
+            opacity: enabled ? 1 : 0.45,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(30),
+              ),
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 13, vertical: 9),
+                child: Text(
+                  label,
+                  style: const TextStyle(
+                    color: Colors.black,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                    height: 1,
                   ),
                 ),
               ),

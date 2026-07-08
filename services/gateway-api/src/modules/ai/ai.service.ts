@@ -1269,6 +1269,7 @@ export class AiService {
       'After urgent intake answers, present the next action as chat, immediate video, scheduled video, or scheduled chat. Stay neutral across the available actions the app will render. Unless the user explicitly asks to schedule or says they want a later time, recommend immediate chat or immediate video as the primary service, and leave scheduling as a separate selectable option.',
       'Before recommending a service, gather the minimum missing context for a useful vet handoff: affected horse, main concern, onset/duration, severity, appetite/water, relevant history/medications, and red flags. Ask at most one concise follow-up at a time.',
       'Do not immediately ask the user to choose a product. Decide whether chat, immediate video, scheduled video, or scheduled chat is best based on urgency, symptoms, context, and entitlement signals; then explain the recommendation briefly.',
+      'In assistant prose, focus on the horse problem, urgency, and specialist direction. Do not say variants of "también puedo ayudarte a elegir entre chat y video", "elige entre chat y video", or similar service-type coaching. The app renders service actions separately as tags.',
       'Prepare the conversation so a later veterinarian handoff can include a concise contextualization, not a diagnosis.',
       'Populate caseSummary, handoffSummary, and routingRationale whenever there is concrete case detail. Keep them concise, factual, and non-diagnostic; use null only when there is not enough detail.',
       'Set commerceRecommendation from entitlement context/tool results: included when the recommended service is available, one_off when allowance is exhausted but a one-time service is appropriate, upgrade_plan when there is no active subscription or a plan upgrade is the clearest next step, ask_more while context is missing, and none when no service should be offered.',
@@ -2307,6 +2308,25 @@ export class AiService {
     return { ...args, since: window.since, until: window.until };
   }
 
+  private schedulingFallbackVetId(toolResults: Array<{ name: string; output: any }>) {
+    const vetsOutput = this.latestFindVetsToolResult(toolResults);
+    const vets = Array.isArray(vetsOutput?.vets) ? vetsOutput.vets : [];
+    for (const vet of vets) {
+      const vetId = this.normalizeOptionalToolUuid(vet?.id, 'vetId');
+      if (vetId) return vetId;
+    }
+    return null;
+  }
+
+  private schedulingSlotToolArgs(args: Record<string, any>, state: AiChatTurnState, toolResults: Array<{ name: string; output: any }>) {
+    const windowedArgs = this.applySchedulingSlotWindow(args, state);
+    if (!state.wantsScheduling) return windowedArgs;
+    const requestedVetId = this.normalizeOptionalToolUuid(windowedArgs.vetId, 'vetId');
+    const fallbackVetId = this.schedulingFallbackVetId(toolResults);
+    const vetId = requestedVetId || fallbackVetId;
+    return vetId ? { ...windowedArgs, vetId } : null;
+  }
+
   private async ensureDeterministicSchedulingSlots(state: AiChatTurnState, toolResults: Array<{ name: string; output: any }>) {
     if (!state.wantsScheduling || state.schedulingStage !== 'daypart') return;
     if (this.latestSlotsToolResult(toolResults)) return;
@@ -2351,7 +2371,7 @@ export class AiService {
     return { ok: true, appointment };
   }
 
-  private async executeChatTool(call: AiChatToolCall, context: AiChatTurnContext, state: AiChatTurnState) {
+  private async executeChatTool(call: AiChatToolCall, context: AiChatTurnContext, state: AiChatTurnState, toolResults: Array<{ name: string; output: any }>) {
     const args = this.parseToolArguments(call.arguments);
     switch (call.name) {
       case 'recommend_specialty':
@@ -2361,7 +2381,10 @@ export class AiService {
       case 'check_service_access':
         return this.checkServiceAccessTool(args, context);
       case 'get_available_slots':
-        return this.getAvailableSlotsTool(this.applySchedulingSlotWindow(args, state));
+        const slotArgs = this.schedulingSlotToolArgs(args, state, toolResults);
+        return slotArgs
+          ? this.getAvailableSlotsTool(slotArgs)
+          : { ok: true, vetId: null, durationMin: 30, slots: [] };
       case 'schedule_video':
         return this.scheduleVideoTool(args);
       case 'schedule_chat':
@@ -2590,7 +2613,7 @@ export class AiService {
 
       for (const toolCall of toolCalls) {
         responseInput.push(this.chatTurnFunctionCallInput(toolCall));
-        const result = await this.executeChatTool(toolCall, context, state);
+        const result = await this.executeChatTool(toolCall, context, state, toolResults);
         toolResults.push({ name: toolCall.name, output: result });
         responseInput.push({
           type: 'function_call_output',

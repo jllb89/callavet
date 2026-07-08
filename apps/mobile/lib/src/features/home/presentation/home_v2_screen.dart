@@ -1206,60 +1206,72 @@ class _UpcomingAgendaPill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final vet = _shortLabel(appointment.vetName, maxLength: 18);
-    final pet = _shortLabel(appointment.petName, maxLength: 14);
     final canOpen = appointment.canOpenVideo || appointment.canOpenChat;
+    final icon = appointment.canOpenChat
+        ? Icons.chat_bubble_rounded
+        : Icons.videocam_rounded;
     return GestureDetector(
       onTap: canOpen ? onTap : null,
       behavior: HitTestBehavior.opaque,
       child: Container(
-        height: 56,
+        height: 51,
         constraints: const BoxConstraints(minWidth: 260, maxWidth: 360),
-        padding: const EdgeInsets.symmetric(horizontal: 18),
+        padding: const EdgeInsets.only(left: 9, right: 18),
         decoration: BoxDecoration(
-          color: Colors.black,
+          color: Colors.white.withValues(alpha: 0.06),
           borderRadius: BorderRadius.circular(40),
-          border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.event_available_rounded,
-                color: Colors.white, size: 17),
-            const SizedBox(width: 12),
+            _AgendaActionIcon(icon: icon),
+            const SizedBox(width: 14),
             Flexible(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'MVZ $vet · ${appointment.formattedStart}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 13,
-                      fontFamily: 'ABCDiatype',
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    pet,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.52),
-                      fontSize: 11,
-                      fontFamily: 'ABCDiatype',
-                      fontWeight: FontWeight.w400,
-                    ),
-                  ),
-                ],
+              child: Text(
+                'MVZ $vet',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 13,
+                  fontFamily: 'ABCDiatype',
+                  fontWeight: FontWeight.w400,
+                  height: 1.85,
+                ),
+              ),
+            ),
+            const SizedBox(width: 18),
+            Text(
+              appointment.formattedStart,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 10,
+                fontFamily: 'ABCDiatype',
+                fontWeight: FontWeight.w300,
               ),
             ),
           ],
         ),
       ),
+    );
+  }
+}
+
+class _AgendaActionIcon extends StatelessWidget {
+  const _AgendaActionIcon({required this.icon});
+
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 34,
+      height: 34,
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        shape: BoxShape.circle,
+      ),
+      child: Icon(icon, color: Colors.black, size: 18),
     );
   }
 }
