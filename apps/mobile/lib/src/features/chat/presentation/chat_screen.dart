@@ -4976,7 +4976,7 @@ class _ServiceButton extends StatelessWidget {
         onTap: enabled ? onTap : null,
         behavior: HitTestBehavior.opaque,
         child: ConstrainedBox(
-          constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+          constraints: const BoxConstraints(minWidth: 44),
           child: AnimatedOpacity(
             duration: const Duration(milliseconds: 160),
             opacity: enabled ? 1 : 0.45,
@@ -4985,16 +4985,22 @@ class _ServiceButton extends StatelessWidget {
                 color: Colors.white,
                 borderRadius: BorderRadius.circular(30),
               ),
-              child: Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 13, vertical: 9),
-                child: Text(
-                  label,
-                  style: const TextStyle(
-                    color: Colors.black,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    height: 1,
+              child: SizedBox(
+                height: 44,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 13),
+                  child: Align(
+                    alignment: Alignment.center,
+                    widthFactor: 1,
+                    child: Text(
+                      label,
+                      style: const TextStyle(
+                        color: Colors.black,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                        height: 1,
+                      ),
+                    ),
                   ),
                 ),
               ),
@@ -6803,6 +6809,8 @@ String _schedulingOptionLabel({
   required String? start,
 }) {
   if (stage == 'slot' && start != null && start.trim().isNotEmpty) {
+    final trimmedLabel = label.trim();
+    if (trimmedLabel.isNotEmpty) return trimmedLabel;
     final parsed = DateTime.tryParse(start.trim());
     if (parsed != null) return _formatLocalHour(parsed.toLocal());
   }

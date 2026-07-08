@@ -173,6 +173,9 @@ type AiContext = {
   input: Record<string, any>;
 };
 
+const SCHEDULING_TIME_ZONE = 'America/Mexico_City';
+const SCHEDULING_SLOT_DURATION_MIN = 30;
+
 @Injectable()
 export class AiService {
   constructor(
@@ -1316,6 +1319,14 @@ export class AiService {
     return normalized.slice(-12);
   }
 
+  private routingSymptomsFromMessages(messages: Array<{ role: 'user' | 'assistant'; content: string }>) {
+    return messages
+      .filter((message) => message.role === 'user')
+      .map((message) => message.content)
+      .join('\n')
+      .slice(-3000);
+  }
+
   private normalizeClientUtcOffsetMinutes(value: unknown) {
     const offset = Number(value);
     if (!Number.isFinite(offset)) return 0;
@@ -1388,8 +1399,11 @@ export class AiService {
     }
   }
 
-  private async recommendSpecialtyTool(args: Record<string, any>, context: AiChatTurnContext) {
-    const symptoms = String(args.symptoms || '').trim();
+  private async recommendSpecialtyTool(args: Record<string, any>, context: AiChatTurnContext, fallbackSymptoms = '') {
+    const symptoms = [args.symptoms, fallbackSymptoms]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+      .join('\n');
     const toolPetId = this.normalizeOptionalToolUuid(args.petId, 'petId');
     let selectedPetId = context.petId || null;
     let ignoredPetId: string | null = null;
@@ -1425,24 +1439,25 @@ export class AiService {
         where nullif(btrim(name), '') is not null
         order by lower(btrim(name)), coalesce(is_active, true) desc, length(coalesce(description, '')) desc, id asc`
     );
-    const haystack = symptoms.toLowerCase();
+    const haystack = this.normalizeCareText(symptoms);
     const appetiteConcern = /no quiere comer|no come|dej[oó] de comer|apetito|anorex|desde antier|desde ayer|colic|cólico|diarrea/.test(haystack);
     const emergencyConcern = /no se levanta|respira|sangre|sangrado|dolor fuerte|suda|rueda|se echa|emergencia|urgente/.test(haystack);
+    const lamenessConcern = /cojea|cojera|cojo|renque|renguea|renguera|claudica|pata|extremidad|casco|tendon|articular/.test(haystack);
     const boostedTerms = [
-      { terms: ['no quiere comer', 'no come', 'dejo de comer', 'dejó de comer', 'apetito', 'colico', 'cólico', 'diarrea', 'gastro'], targets: ['gastro', 'interna', 'internal', 'urgenc', 'critical', 'crítico'] },
-      { terms: ['cojea', 'cojera', 'lameness', 'renguera', 'pata', 'tendon', 'tendón', 'articular'], targets: ['cojera', 'ortopedia', 'lameness', 'orthopedic', 'deportiva', 'rehabilit'] },
+      { terms: ['no quiere comer', 'no come', 'dejo de comer', 'dejó de comer', 'apetito', 'colico', 'cólico', 'diarrea', 'gastro'], targets: ['gastro', 'interna', 'internal', 'urgenc', 'critical', 'critico'] },
+      { terms: ['cojea', 'cojera', 'lameness', 'renque', 'renguera', 'renguea', 'pata', 'tendon', 'tendón', 'articular', 'casco', 'marcha'], targets: ['cojera', 'ortopedia', 'lameness', 'orthopedic', 'deportiva', 'rehabilit', 'musculoesquelet'] },
       { terms: ['piel', 'dermat', 'alergia', 'comezon', 'comezón', 'picazón', 'rash', 'herida superficial'], targets: ['dermat', 'piel'] },
       { terms: ['ojo', 'vision', 'visión', 'lagrimeo', 'cornea', 'córnea'], targets: ['oftal', 'ophthalm', 'ojo'] },
       { terms: ['diente', 'boca', 'masticar', 'dent'], targets: ['odonto', 'dent'] },
       { terms: ['parto', 'preñada', 'prenada', 'gestacion', 'gestación', 'fertilidad', 'reprodu'], targets: ['repro', 'fertilidad'] },
-      { terms: ['sangre', 'no se levanta', 'respira', 'emergencia', 'urgente', 'dolor fuerte'], targets: ['urgenc', 'emergency', 'critical', 'crítico', 'general'] },
+      { terms: ['sangre', 'no se levanta', 'respira', 'emergencia', 'urgente', 'dolor fuerte'], targets: ['urgenc', 'emergency', 'critical', 'critico', 'general'] },
       { terms: ['vacuna', 'vacunar', 'chequeo', 'revision', 'revisión', 'preventivo'], targets: ['general', 'prevent'] },
       { terms: ['dieta', 'alimento', 'forraje', 'suplemento', 'peso', 'nutric'], targets: ['nutri', 'aliment'] },
     ];
     const isActiveSpecialty = (specialty: any) => specialty?.is_active !== false;
     const scored = rows.map((specialty) => {
-      const name = String(specialty.name || '').toLowerCase();
-      const description = String(specialty.description || '').toLowerCase();
+      const name = this.normalizeCareText(specialty.name || '');
+      const description = this.normalizeCareText(specialty.description || '');
       const terms = `${name} ${description}`.split(/[^a-z0-9áéíóúüñ]+/i).filter((term) => term.length > 3);
       const baseScore = terms.reduce((sum, term) => sum + (haystack.includes(term.toLowerCase()) ? 1 : 0), 0) + (haystack.includes(name) ? 5 : 0);
       const boost = boostedTerms.reduce((sum, group) => {
@@ -1450,10 +1465,11 @@ export class AiService {
         const specialtyMatches = group.targets.some((target) => name.includes(target) || description.includes(target));
         return sum + (symptomMatches && specialtyMatches ? 4 : 0);
       }, 0);
-      const clinicalBoost = (appetiteConcern && name.includes('gastro')) ? 10
-        : (appetiteConcern && (name.includes('urgenc') || description.includes('cólico'))) ? 8
+      const clinicalBoost = (lamenessConcern && (name.includes('ortopedia') || name.includes('cojera') || description.includes('musculoesquelet') || description.includes('tendon') || description.includes('casco'))) ? 12
+        : (appetiteConcern && name.includes('gastro')) ? 10
+        : (appetiteConcern && (name.includes('urgenc') || description.includes('colico'))) ? 8
           : (appetiteConcern && name.includes('interna')) ? 6
-            : (emergencyConcern && (name.includes('urgenc') || description.includes('estabilización'))) ? 10
+            : (emergencyConcern && (name.includes('urgenc') || description.includes('estabilizacion'))) ? 10
               : (appetiteConcern && name.includes('medicina general')) ? 1
                 : 0;
       const score = baseScore + boost + clinicalBoost;
@@ -1492,7 +1508,7 @@ export class AiService {
 
   private fallbackIntakeQuestions(latestMessage: string, context: AiChatTurnContext) {
     const text = this.normalizeCareText(latestMessage);
-    if (/cojea|cojera|cojo|renquea|renguea|claudica|pata|extremidad|casco|tendon/.test(text)) {
+    if (/cojea|cojera|cojo|renque|renguea|claudica|pata|extremidad|casco|tendon/.test(text)) {
       return [
         '¿Desde cuándo cojea y fue de golpe o empezó poco a poco?',
         '¿Apoya la pata o casi no la usa?',
@@ -1521,7 +1537,7 @@ export class AiService {
 
   private hasClinicalSignal(text: string) {
     const normalized = this.normalizeCareText(text);
-    return /no quiere comer|no come|dejo de comer|apetito|colic|colico|dolor|fiebre|no se levanta|respira|respiracion|hinchazon|babea|baba|sangre|herida|cojea|cojera|cojo|renquea|renguea|claudica|pata|extremidad|casco|tendon|tos|diarrea|vomito|mal aliento|descarga|secrecion|decaido|suda|inquieto|abdomen|mandibula|tragar/.test(normalized);
+    return /no quiere comer|no come|dejo de comer|apetito|colic|colico|dolor|fiebre|no se levanta|respira|respiracion|hinchazon|babea|baba|sangre|herida|cojea|cojera|cojo|renque|renguea|claudica|pata|extremidad|casco|tendon|tos|diarrea|vomito|mal aliento|descarga|secrecion|decaido|suda|inquieto|abdomen|mandibula|tragar/.test(normalized);
   }
 
   private hasCaseDetailSignal(latestMessage: string) {
@@ -1589,17 +1605,54 @@ export class AiService {
     return accessType === 'chat' ? 'chat' : 'video';
   }
 
-  private localDateFromUtc(value: unknown, offsetMinutes: number) {
-    const date = value instanceof Date ? value : new Date(String(value || '').trim());
-    if (Number.isNaN(date.getTime())) return null;
-    return new Date(date.getTime() + offsetMinutes * 60 * 1000);
+  private timeZoneParts(value: Date, timeZone = SCHEDULING_TIME_ZONE) {
+    const values: Record<string, string> = {};
+    const formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    });
+    for (const part of formatter.formatToParts(value)) {
+      if (part.type !== 'literal') values[part.type] = part.value;
+    }
+    const hour = Number(values.hour || 0);
+    return {
+      year: Number(values.year || 0),
+      month: Number(values.month || 0),
+      day: Number(values.day || 0),
+      hour: hour === 24 ? 0 : hour,
+      minute: Number(values.minute || 0),
+      second: Number(values.second || 0),
+    };
   }
 
-  private formatSlotTimeForUser(start: unknown, offsetMinutes: number) {
-    const local = this.localDateFromUtc(start, offsetMinutes);
-    if (!local) return String(start || '').trim();
-    const hour24 = local.getUTCHours();
-    const minute = local.getUTCMinutes();
+  private mexicoCityDateValue(value = new Date()) {
+    const parts = this.timeZoneParts(value);
+    return `${parts.year}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`;
+  }
+
+  private mexicoCityLocalToUtcIso(year: number, month: number, day: number, hour: number, minute: number) {
+    const targetUtcMs = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
+    let utcMs = targetUtcMs;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const parts = this.timeZoneParts(new Date(utcMs));
+      const zonedUtcMs = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second, 0);
+      utcMs += targetUtcMs - zonedUtcMs;
+    }
+    return new Date(utcMs).toISOString();
+  }
+
+  private formatSlotTimeForUser(start: unknown) {
+    const date = start instanceof Date ? start : new Date(String(start || '').trim());
+    if (Number.isNaN(date.getTime())) return null;
+    const parts = this.timeZoneParts(date);
+    const hour24 = parts.hour;
+    const minute = parts.minute;
     const suffix = hour24 >= 12 ? 'pm' : 'am';
     const hour12 = hour24 % 12 || 12;
     return minute === 0
@@ -1617,7 +1670,7 @@ export class AiService {
     if (!slots.length) return null;
     const mode = state.schedulingMode === 'chat' ? 'chat' : this.schedulingModeFromContext(payload, toolResults);
     const serviceLabel = mode === 'chat' ? 'chat' : 'videollamada';
-    const slotLabels = slots.map((slot) => this.formatSlotTimeForUser(slot.start, state.clientUtcOffsetMinutes));
+    const slotLabels = slots.map((slot) => this.formatSlotTimeForUser(slot.start));
     return {
       ...payload,
       message: `Tengo estos horarios disponibles para agendar la ${serviceLabel}. Elige el horario que prefieres.`,
@@ -1680,16 +1733,13 @@ export class AiService {
     return date.toISOString().slice(0, 10);
   }
 
-  private localNowForScheduling(state: AiChatTurnState) {
-    return new Date(Date.now() + state.clientUtcOffsetMinutes * 60 * 1000);
+  private schedulingTodayDate() {
+    return this.mexicoCityDateValue();
   }
 
-  private schedulingTodayDate(state: AiChatTurnState) {
-    return this.localDateValue(this.localNowForScheduling(state));
-  }
-
-  private schedulingDayOptions(range: string | null, state: AiChatTurnState) {
-    const base = this.localNowForScheduling(state);
+  private schedulingDayOptions(range: string | null) {
+    const [year, month, day] = this.schedulingTodayDate().split('-').map((part) => Number(part));
+    const base = new Date(Date.UTC(year, month - 1, day, 12, 0, 0, 0));
     base.setUTCHours(12, 0, 0, 0);
     let startOffset = 0;
     if (range === 'next_week') {
@@ -1743,11 +1793,11 @@ export class AiService {
           schedulingStage: 'day',
           schedulingMode: mode,
           schedulingRange: state.schedulingRange,
-          schedulingOptions: this.schedulingDayOptions(state.schedulingRange, state).map((option) => ({ ...option, stage: 'day', mode })),
+          schedulingOptions: this.schedulingDayOptions(state.schedulingRange).map((option) => ({ ...option, stage: 'day', mode })),
           displayBlocks: [{ type: 'paragraph', text: 'Bien. ¿Qué día te funciona mejor?', items: [] }],
         };
       }
-      const today = this.schedulingTodayDate(state);
+      const today = this.schedulingTodayDate();
       return {
         ...payload,
         message: 'Bien. ¿Qué horario te funciona mejor?',
@@ -2212,18 +2262,25 @@ export class AiService {
               avail as (
                 select d.day,
                        va.start_time as start_t,
-                       va.end_time as end_t
+                       va.end_time as end_t,
+                       coalesce(nullif(va.timezone, ''), 'America/Mexico_City') as tz
                   from days d
                   join vet_availability va on va.weekday = extract(dow from d.day) and va.vet_id = v.id
               ),
               ranges as (
-                select make_timestamptz(extract(year from a.day)::int, extract(month from a.day)::int, extract(day from a.day)::int, extract(hour from a.start_t)::int, extract(minute from a.start_t)::int, 0) as start_at,
-                       make_timestamptz(extract(year from a.day)::int, extract(month from a.day)::int, extract(day from a.day)::int, extract(hour from a.end_t)::int, extract(minute from a.end_t)::int, 0) as end_at
+                select make_timestamptz(extract(year from a.day)::int, extract(month from a.day)::int, extract(day from a.day)::int, extract(hour from a.start_t)::int, extract(minute from a.start_t)::int, 0, a.tz) as start_at,
+                       make_timestamptz(extract(year from a.day)::int, extract(month from a.day)::int, extract(day from a.day)::int, extract(hour from a.end_t)::int, extract(minute from a.end_t)::int, 0, a.tz) as end_at
                   from avail a
+              ),
+              aligned_ranges as (
+                select date_trunc('hour', r.start_at)
+                         + make_interval(secs => ceil(extract(epoch from (r.start_at - date_trunc('hour', r.start_at))) / 1800) * 1800) as start_at,
+                       r.end_at
+                  from ranges r
               ),
               slots as (
                 select gs as slot_start, gs + make_interval(mins => (select dur from params)) as slot_end
-                  from ranges r,
+                  from aligned_ranges r,
                        generate_series(r.start_at, r.end_at - make_interval(mins => (select dur from params)), make_interval(mins => (select dur from params))) as gs
               ),
               booked as (
@@ -2288,17 +2345,17 @@ export class AiService {
     const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(state.schedulingDay);
     if (!match) return null;
     const year = Number(match[1]);
-    const month = Number(match[2]) - 1;
+    const month = Number(match[2]);
     const day = Number(match[3]);
-    const hours = state.schedulingDaypart === 'morning'
-      ? [6, 12]
-      : state.schedulingDaypart === 'evening'
-        ? [18, 24]
-        : [12, 18];
-    const offsetMs = state.clientUtcOffsetMinutes * 60 * 1000;
+    const windows: Record<string, { start: [number, number]; until: [number, number] }> = {
+      morning: { start: [7, 0], until: [12, 0] },
+      afternoon: { start: [12, 0], until: [19, 0] },
+      evening: { start: [19, 0], until: [21, 30] },
+    };
+    const window = windows[state.schedulingDaypart] || windows.afternoon;
     return {
-      since: new Date(Date.UTC(year, month, day, hours[0], 0, 0) - offsetMs).toISOString(),
-      until: new Date(Date.UTC(year, month, day, hours[1], 0, 0) - offsetMs).toISOString(),
+      since: this.mexicoCityLocalToUtcIso(year, month, day, window.start[0], window.start[1]),
+      until: this.mexicoCityLocalToUtcIso(year, month, day, window.until[0], window.until[1]),
     };
   }
 
@@ -2338,7 +2395,7 @@ export class AiService {
     for (const vet of vets) {
       const vetId = String(vet?.id || '').trim();
       if (!vetId) continue;
-      const slots = await this.getAvailableSlotsTool(this.applySchedulingSlotWindow({ vetId, since: null, until: null, durationMin: 30 }, state));
+      const slots = await this.getAvailableSlotsTool(this.applySchedulingSlotWindow({ vetId, since: null, until: null, durationMin: SCHEDULING_SLOT_DURATION_MIN }, state));
       if (Array.isArray(slots?.slots) && slots.slots.length > 0) {
         toolResults.push({ name: 'get_available_slots', output: slots });
         return;
@@ -2371,11 +2428,11 @@ export class AiService {
     return { ok: true, appointment };
   }
 
-  private async executeChatTool(call: AiChatToolCall, context: AiChatTurnContext, state: AiChatTurnState, toolResults: Array<{ name: string; output: any }>) {
+  private async executeChatTool(call: AiChatToolCall, context: AiChatTurnContext, state: AiChatTurnState, toolResults: Array<{ name: string; output: any }>, fallbackSymptoms = '') {
     const args = this.parseToolArguments(call.arguments);
     switch (call.name) {
       case 'recommend_specialty':
-        return this.recommendSpecialtyTool(args, context);
+        return this.recommendSpecialtyTool(args, context, fallbackSymptoms);
       case 'find_vets':
         return this.findVetsTool(args);
       case 'check_service_access':
@@ -2448,7 +2505,7 @@ export class AiService {
     const shouldRoute = state.caseDetailSignal || state.explicitCareRequest;
 
     if (shouldRoute) {
-      const specialty = await this.recommendSpecialtyTool({ symptoms: latestMessage, petId: context.petId }, context);
+      const specialty = await this.recommendSpecialtyTool({ symptoms: latestMessage, petId: context.petId }, context, this.routingSymptomsFromMessages(messages));
       toolResults.push({ name: 'recommend_specialty', output: specialty });
 
       const specialtyId = specialty?.specialty?.id || null;
@@ -2568,6 +2625,7 @@ export class AiService {
     const cfg = this.providerConfig(undefined, !!input.dryRun);
     const messages = this.normalizeChatMessages(input);
     const latestMessage = messages[messages.length - 1]?.content || '';
+    const routingSymptoms = this.routingSymptomsFromMessages(messages);
     const state = this.chatTurnState(messages, input.clientUtcOffsetMinutes);
     if (input.dryRun) return this.chatTurnDryRun(context, latestMessage);
     if (!cfg.apiKey) throw new ServiceUnavailableException('ai_provider_not_configured');
@@ -2613,7 +2671,7 @@ export class AiService {
 
       for (const toolCall of toolCalls) {
         responseInput.push(this.chatTurnFunctionCallInput(toolCall));
-        const result = await this.executeChatTool(toolCall, context, state, toolResults);
+        const result = await this.executeChatTool(toolCall, context, state, toolResults, routingSymptoms);
         toolResults.push({ name: toolCall.name, output: result });
         responseInput.push({
           type: 'function_call_output',

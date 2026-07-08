@@ -252,9 +252,9 @@ export class AppointmentSchedulingService {
       `select true as ok
          from vet_availability va
         where va.vet_id = $1::uuid
-          and va.weekday = extract(dow from ($2::timestamptz at time zone coalesce(nullif(va.timezone, ''), 'UTC')))::int
-          and (($2::timestamptz at time zone coalesce(nullif(va.timezone, ''), 'UTC'))::time >= va.start_time)
-          and (($3::timestamptz at time zone coalesce(nullif(va.timezone, ''), 'UTC'))::time <= va.end_time)
+          and va.weekday = extract(dow from ($2::timestamptz at time zone coalesce(nullif(va.timezone, ''), 'America/Mexico_City')))::int
+          and (($2::timestamptz at time zone coalesce(nullif(va.timezone, ''), 'America/Mexico_City'))::time >= va.start_time)
+          and (($3::timestamptz at time zone coalesce(nullif(va.timezone, ''), 'America/Mexico_City'))::time <= va.end_time)
         limit 1`,
       [vetId, startsAt, endsAt]
     );
@@ -286,7 +286,7 @@ export class AppointmentSchedulingService {
        select d.day,
               va.start_time as start_t,
               va.end_time as end_t,
-              coalesce(nullif(va.timezone, ''), 'UTC') as tz
+              coalesce(nullif(va.timezone, ''), 'America/Mexico_City') as tz
          from days d
          join vet_availability va on va.weekday = extract(dow from d.day) and va.vet_id = (select vet_id from params)
      ),
@@ -295,9 +295,15 @@ export class AppointmentSchedulingService {
               make_timestamptz(extract(year from a.day)::int, extract(month from a.day)::int, extract(day from a.day)::int, extract(hour from a.end_t)::int, extract(minute from a.end_t)::int, 0, a.tz) as end_at
          from avail a
      ),
+     aligned_ranges as (
+       select date_trunc('hour', r.start_at)
+                + make_interval(secs => ceil(extract(epoch from (r.start_at - date_trunc('hour', r.start_at))) / 1800) * 1800) as start_at,
+              r.end_at
+         from ranges r
+     ),
      slots as (
        select gs as slot_start, gs + make_interval(mins => (select dur from params)) as slot_end
-         from ranges r,
+         from aligned_ranges r,
               generate_series(r.start_at, r.end_at - make_interval(mins => (select dur from params)), make_interval(mins => (select dur from params))) as gs
      ),
      booked as (
