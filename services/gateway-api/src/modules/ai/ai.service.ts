@@ -1342,7 +1342,7 @@ export class AiService {
     const priorSchedulingRange = String((latestMetadata as any).schedulingRange || (latestPriorMetadata as any).schedulingRange || '').trim().toLowerCase() || null;
     const priorSchedulingDay = String((latestMetadata as any).schedulingDay || (latestPriorMetadata as any).schedulingDay || '').trim() || null;
     const priorSchedulingDaypart = String((latestMetadata as any).schedulingDaypart || (latestPriorMetadata as any).schedulingDaypart || '').trim().toLowerCase() || null;
-    const wantsScheduling = /agendar|agenda|programar|cita|manana|mañana|tarde|fecha|horario|slot|disponible/.test(latestText)
+    const wantsScheduling = /agendar|agenda|programar|cita|horario|slot|disponible/.test(latestText)
       || !!priorSchedulingStage
       || (priorSchedulingQuestion && /chat|video|videollamada|llamada|mensaje|mensajes|perfecto|ok|okay|si|sí|va|dale|confirmo|confirmar|^[1-5]$|opcion|opción|primera|segunda|tercera/.test(latestText));
     const selectedRange = priorSchedulingStage === 'date_range'
@@ -1554,6 +1554,20 @@ export class AiService {
     return null;
   }
 
+  private latestSlotsToolResult(toolResults: Array<{ name: string; output: any }>) {
+    for (const result of [...toolResults].reverse()) {
+      if (result.name === 'get_available_slots') return result.output || {};
+    }
+    return null;
+  }
+
+  private latestFindVetsToolResult(toolResults: Array<{ name: string; output: any }>) {
+    for (const result of [...toolResults].reverse()) {
+      if (result.name === 'find_vets') return result.output || {};
+    }
+    return null;
+  }
+
   private schedulingModeFromContext(payload: any, toolResults: Array<{ name: string; output: any }>) {
     const recommended = String(payload?.recommendedService || '').toLowerCase();
     if (recommended === 'scheduled_chat') return 'chat';
@@ -1612,6 +1626,34 @@ export class AiService {
         { type: 'numbered_list', text: null, items: slots.map((slot, index) => this.formatSlotForUser(slot.start, slot.end, index).replace(/^\d+[.)]\s*/, '')) },
       ],
       actionUxWarnings: Array.from(new Set([...(Array.isArray(payload?.actionUxWarnings) ? payload.actionUxWarnings : []), 'scheduled_slots_forced'])).slice(0, 12),
+      actionUxRepaired: true,
+    };
+  }
+
+  private forceSchedulingNoSlotsPrompt(payload: any, state: AiChatTurnState, toolResults: Array<{ name: string; output: any }>) {
+    const slotsOutput = this.latestSlotsToolResult(toolResults);
+    if (!slotsOutput || !Array.isArray(slotsOutput.slots) || slotsOutput.slots.length > 0) return null;
+    const mode = state.schedulingMode === 'chat' ? 'chat' : this.schedulingModeFromContext(payload, toolResults);
+    const message = 'No encontré horarios disponibles en ese bloque. Elige otro momento del día y vuelvo a buscar.';
+    return {
+      ...payload,
+      message,
+      nextStep: 'interview',
+      recommendedService: null,
+      actionLabel: 'Elegir otro horario',
+      intakeQuestions: [],
+      commerceRecommendation: 'included',
+      schedulingStage: 'daypart',
+      schedulingMode: mode,
+      schedulingRange: state.schedulingRange,
+      schedulingDay: state.schedulingDay,
+      schedulingOptions: [
+        { label: 'Mañana', value: 'morning', stage: 'daypart', mode },
+        { label: 'Tarde', value: 'afternoon', stage: 'daypart', mode },
+        { label: 'Noche', value: 'evening', stage: 'daypart', mode },
+      ],
+      displayBlocks: [{ type: 'paragraph', text: message, items: [] }],
+      actionUxWarnings: Array.from(new Set([...(Array.isArray(payload?.actionUxWarnings) ? payload.actionUxWarnings : []), 'scheduled_slots_empty'])).slice(0, 12),
       actionUxRepaired: true,
     };
   }
@@ -2031,6 +2073,8 @@ export class AiService {
       if (choicePrompt) return this.normalizeChatDisplayPayload(choicePrompt, false);
       const slotOffer = this.forceSchedulingSlotOffer(normalized, state, toolResults);
       if (slotOffer) return this.normalizeChatDisplayPayload(slotOffer, false);
+      const noSlotsPrompt = this.forceSchedulingNoSlotsPrompt(normalized, state, toolResults);
+      if (noSlotsPrompt) return this.normalizeChatDisplayPayload(noSlotsPrompt, false);
     }
     if (this.isGenericVetRequest(latestMessage)) {
       normalized.nextStep = 'interview';
@@ -2227,6 +2271,27 @@ export class AiService {
     const window = this.schedulingSlotWindow(state);
     if (!window) return args;
     return { ...args, since: window.since, until: window.until };
+  }
+
+  private async ensureDeterministicSchedulingSlots(state: AiChatTurnState, toolResults: Array<{ name: string; output: any }>) {
+    if (!state.wantsScheduling || state.schedulingStage !== 'daypart') return;
+    if (this.latestSlotsToolResult(toolResults)) return;
+    const access = this.latestServiceAccessToolResult(toolResults);
+    if (!access || access.canUse === false) return;
+    const vetsOutput = this.latestFindVetsToolResult(toolResults);
+    const vets = Array.isArray(vetsOutput?.vets) ? vetsOutput.vets : [];
+    let emptySlots: any = null;
+    for (const vet of vets) {
+      const vetId = String(vet?.id || '').trim();
+      if (!vetId) continue;
+      const slots = await this.getAvailableSlotsTool(this.applySchedulingSlotWindow({ vetId, since: null, until: null, durationMin: 30 }, state));
+      if (Array.isArray(slots?.slots) && slots.slots.length > 0) {
+        toolResults.push({ name: 'get_available_slots', output: slots });
+        return;
+      }
+      emptySlots = emptySlots || slots;
+    }
+    if (emptySlots) toolResults.push({ name: 'get_available_slots', output: emptySlots });
   }
 
   private async scheduleVideoTool(args: Record<string, any>) {
@@ -2484,6 +2549,7 @@ export class AiService {
       const toolCalls = output.filter((item: any): item is AiChatToolCall => item?.type === 'function_call');
 
       if (!toolCalls.length) {
+        await this.ensureDeterministicSchedulingSlots(state, toolResults);
         const payload = this.normalizeChatTurnPayload(this.parseProviderPayload(this.extractResponsesText(data)), context, latestMessage, state, toolResults);
         return { ok: true, provider: cfg.provider, model: cfg.model, responseId: data?.id || null, payload, toolResults, context };
       }
