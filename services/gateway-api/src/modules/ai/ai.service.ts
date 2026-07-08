@@ -129,6 +129,9 @@ type AiChatTurnState = {
   caseDetailSignal: boolean;
   explicitCareRequest: boolean;
   wantsScheduling: boolean;
+  schedulingStage: string | null;
+  schedulingRange: string | null;
+  schedulingDaypart: string | null;
 };
 
 type PromptVersion = {
@@ -1322,8 +1325,17 @@ export class AiService {
     const caseDetailSignal = clinicalSignal || this.hasCaseDetailSignal(latestMessage);
     const latestText = this.normalizeCareText(latestMessage);
     const priorSchedulingQuestion = /agendar|agenda|programar|horario|horarios|opciones disponibles|elige|slot|prefieres.*(chat|video)|chat o.*video|video o.*chat/i.test(latestPriorAssistant);
+    const priorSchedulingStage = String((latestPriorMetadata as any).schedulingStage || '').trim().toLowerCase() || null;
+    const priorSchedulingRange = String((latestPriorMetadata as any).schedulingRange || '').trim().toLowerCase() || null;
+    const priorSchedulingDaypart = String((latestPriorMetadata as any).schedulingDaypart || '').trim().toLowerCase() || null;
     const wantsScheduling = /agendar|agenda|programar|cita|manana|mañana|tarde|fecha|horario|slot|disponible/.test(latestText)
       || (priorSchedulingQuestion && /chat|video|videollamada|llamada|mensaje|mensajes|perfecto|ok|okay|si|sí|va|dale|confirmo|confirmar|^[1-5]$|opcion|opción|primera|segunda|tercera/.test(latestText));
+    const selectedRange = priorSchedulingStage === 'date_range'
+      ? (/hoy|today/.test(latestText) ? 'today' : /proxima|próxima|siguiente|next/.test(latestText) ? 'next_week' : 'this_week')
+      : priorSchedulingRange;
+    const selectedDaypart = priorSchedulingStage === 'daypart'
+      ? (/mañana|manana|morning/.test(latestText) ? 'morning' : /noche|evening/.test(latestText) ? 'evening' : 'afternoon')
+      : priorSchedulingDaypart;
     return {
       urgentIntakeAlreadyAsked,
       afterUrgentIntakeAnswer,
@@ -1332,6 +1344,9 @@ export class AiService {
       caseDetailSignal,
       explicitCareRequest: caseDetailSignal && this.wantsCareRequest(latestMessage),
       wantsScheduling,
+      schedulingStage: priorSchedulingStage,
+      schedulingRange: selectedRange,
+      schedulingDaypart: selectedDaypart,
     };
   }
 
@@ -1532,8 +1547,13 @@ export class AiService {
   }
 
   private formatSlotForUser(start: unknown, end: unknown, index: number) {
-    const startText = String(start || '').trim();
-    const endText = String(end || '').trim();
+    const normalizeDate = (value: unknown) => {
+      if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString();
+      const date = new Date(String(value || '').trim());
+      return Number.isNaN(date.getTime()) ? String(value || '').trim() : date.toISOString();
+    };
+    const startText = normalizeDate(start);
+    const endText = normalizeDate(end);
     return endText
       ? `${index + 1}. ${startText} a ${endText}`
       : `${index + 1}. ${startText}`;
@@ -1557,6 +1577,17 @@ export class AiService {
       actionLabel: 'Elegir horario',
       intakeQuestions: [],
       commerceRecommendation: 'included',
+      schedulingStage: 'slot',
+      schedulingMode: mode,
+      schedulingRange: payload?.schedulingRange || null,
+      schedulingDaypart: payload?.schedulingDaypart || null,
+      schedulingOptions: slots.map((slot, index) => ({
+        label: this.formatSlotForUser(slot.start, slot.end, index).replace(/^\d+[.)]\s*/, ''),
+        value: String(index + 1),
+        start: this.formatSlotForUser(slot.start, slot.end, index).replace(/^\d+[.)]\s*/, '').split(' a ')[0],
+        end: this.formatSlotForUser(slot.start, slot.end, index).includes(' a ') ? this.formatSlotForUser(slot.start, slot.end, index).split(' a ')[1] : null,
+        mode,
+      })),
       displayBlocks: [
         { type: 'paragraph', text: `Tengo estos horarios disponibles para agendar la ${serviceLabel}. Responde con el número del horario que prefieres.`, items: [] },
         { type: 'numbered_list', text: null, items: slots.map((slot, index) => this.formatSlotForUser(slot.start, slot.end, index).replace(/^\d+[.)]\s*/, '')) },
@@ -1564,6 +1595,50 @@ export class AiService {
       actionUxWarnings: Array.from(new Set([...(Array.isArray(payload?.actionUxWarnings) ? payload.actionUxWarnings : []), 'scheduled_slots_forced'])).slice(0, 12),
       actionUxRepaired: true,
     };
+  }
+
+  private forceSchedulingChoicePrompt(payload: any, state: AiChatTurnState) {
+    const mode = /chat/i.test(String(payload?.recommendedService || '')) ? 'chat' : 'video';
+    if (!state.schedulingStage) {
+      return {
+        ...payload,
+        message: 'Perfecto. ¿Para cuándo quieres agendar la consulta?',
+        nextStep: 'interview',
+        recommendedService: null,
+        actionLabel: 'Elegir fecha',
+        intakeQuestions: [],
+        commerceRecommendation: 'included',
+        schedulingStage: 'date_range',
+        schedulingMode: mode,
+        schedulingOptions: [
+          { label: 'Hoy', value: 'today', mode },
+          { label: 'Esta semana', value: 'this_week', mode },
+          { label: 'La próxima semana', value: 'next_week', mode },
+        ],
+        displayBlocks: [{ type: 'paragraph', text: 'Perfecto. ¿Para cuándo quieres agendar la consulta?', items: [] }],
+      };
+    }
+    if (state.schedulingStage === 'date_range') {
+      return {
+        ...payload,
+        message: 'Bien. ¿Qué horario te funciona mejor?',
+        nextStep: 'interview',
+        recommendedService: null,
+        actionLabel: 'Elegir horario',
+        intakeQuestions: [],
+        commerceRecommendation: 'included',
+        schedulingStage: 'daypart',
+        schedulingMode: mode,
+        schedulingRange: state.schedulingRange,
+        schedulingOptions: [
+          { label: 'Mañana', value: 'morning', mode },
+          { label: 'Tarde', value: 'afternoon', mode },
+          { label: 'Noche', value: 'evening', mode },
+        ],
+        displayBlocks: [{ type: 'paragraph', text: 'Bien. ¿Qué horario te funciona mejor?', items: [] }],
+      };
+    }
+    return null;
   }
 
   private fallbackCommerceRecommendation(serviceAccess: any) {
@@ -1868,6 +1943,8 @@ export class AiService {
     const normalized = { ...payload };
     const scheduledAppointmentCreated = toolResults.some((result) => result.name === 'schedule_video' || result.name === 'schedule_chat');
     if (state.wantsScheduling && !scheduledAppointmentCreated) {
+      const choicePrompt = this.forceSchedulingChoicePrompt(normalized, state);
+      if (choicePrompt) return this.normalizeChatDisplayPayload(choicePrompt, false);
       const slotOffer = this.forceSchedulingSlotOffer(normalized, toolResults);
       if (slotOffer) return this.normalizeChatDisplayPayload(slotOffer, false);
     }
@@ -2279,7 +2356,7 @@ export class AiService {
       const hasScheduledAppointment = toolResults.some((result) => result.name === 'schedule_video' || result.name === 'schedule_chat');
       const serviceAccess = this.latestServiceAccessToolResult(toolResults);
       const accessExhausted = serviceAccess && serviceAccess.canUse === false;
-      const needsSchedulingTools = state.wantsScheduling && !hasScheduledAppointment && (!hasSpecialty || !hasVets || !hasAccess || (!accessExhausted && !hasSlots));
+      const needsSchedulingTools = state.wantsScheduling && state.schedulingStage === 'daypart' && !hasScheduledAppointment && (!hasSpecialty || !hasVets || !hasAccess || (!accessExhausted && !hasSlots));
       const needsRoutingTools = state.afterUrgentIntakeAnswer
         ? (!hasSpecialty || !hasVets)
         : (state.explicitCareRequest && (!hasSpecialty || !hasVets || !hasAccess)) || needsSchedulingTools;

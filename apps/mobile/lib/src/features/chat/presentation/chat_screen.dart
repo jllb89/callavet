@@ -2465,6 +2465,61 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _selectSchedulingOption(
+      _AiSchedulingOption option, _AiChatTurnResult result) async {
+    if (_isSending) return;
+    if (!option.isSlot) {
+      _sendUserMessage(option.label);
+      return;
+    }
+    final startsAt = option.start?.trim();
+    if (startsAt == null || startsAt.isEmpty) return;
+    final mode = option.mode == 'chat' ? 'chat' : 'video';
+    final starts = DateTime.tryParse(startsAt);
+    final ends = option.end == null ? null : DateTime.tryParse(option.end!);
+    final durationMin = starts != null && ends != null && ends.isAfter(starts)
+        ? ends.difference(starts).inMinutes
+        : 30;
+    setState(() {
+      _messages.add(_ChatMessage.user('Agendar ${option.label}.'));
+      _isSending = true;
+    });
+    _scrollToBottom();
+
+    try {
+      final appointment = await _postGatewayJson('/appointments', {
+        'vetId': result.vetId,
+        'petId': result.petId,
+        'specialtyId': result.specialtyId,
+        'startsAt': startsAt,
+        'durationMin': durationMin,
+        'mode': mode,
+        'priority': result.payload.urgency == 'urgent' ? 'urgent' : 'routine',
+      });
+      final scheduled = _ScheduledAppointment.fromJson(appointment);
+      final scheduledResult = result.withScheduledAppointment(scheduled);
+      if (!mounted) return;
+      setState(() {
+        _messages.add(_ChatMessage.assistant(
+          'Consulta agendada. La agregué a tu agenda.',
+          result: scheduledResult,
+          includeInHistory: false,
+        ));
+        _isSending = false;
+      });
+      _scrollToBottom();
+    } catch (error) {
+      _aiChatLog('selectSchedulingOption failed: ${error.runtimeType} $error');
+      if (!mounted) return;
+      setState(() {
+        _messages.add(_ChatMessage.assistant(_friendlyError(error),
+            includeInHistory: false));
+        _isSending = false;
+      });
+      _scrollToBottom();
+    }
+  }
+
   Future<void> _openSubscriptionUpgrade(_AiChatTurnResult result) async {
     if (_isSending) return;
     _aiChatLog('openSubscriptionUpgrade in-chat start');
@@ -2782,7 +2837,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     return _postGatewayJson('/sessions/start', {
       'kind': kind,
       if (result.petId != null) 'petId': result.petId,
-      if (result.vetId != null) 'vetId': result.vetId,
+      if (kind == 'video' && result.vetId != null) 'vetId': result.vetId,
       if (result.specialtyId != null) 'specialtyId': result.specialtyId,
       'priority': result.payload.urgency,
       'aiContext': result.handoffContext(history),
@@ -3080,6 +3135,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 onOneOffPurchaseSelected: _purchaseSingleSession,
                 onUpgradeSelected: _openSubscriptionUpgrade,
                 onPlanUpgradeConfirmed: _confirmSubscriptionUpgrade,
+                onSchedulingOptionSelected: _selectSchedulingOption,
                 onRejoinVideo: _openVideoFromChat,
                 onSurveyAction: _handleSurveyAction,
                 onRefreshAttachment: _refreshConsultAttachmentDownloadUrl,
@@ -3462,6 +3518,7 @@ class _MessageBubble extends StatelessWidget {
     required this.onOneOffPurchaseSelected,
     required this.onUpgradeSelected,
     required this.onPlanUpgradeConfirmed,
+    required this.onSchedulingOptionSelected,
     required this.onRejoinVideo,
     required this.onSurveyAction,
     required this.onCancelUpload,
@@ -3482,6 +3539,8 @@ class _MessageBubble extends StatelessWidget {
   final void Function(_AiChatTurnResult result) onUpgradeSelected;
   final void Function(_ChatSubscriptionPlan plan, _AiChatTurnResult result)
       onPlanUpgradeConfirmed;
+    final void Function(_AiSchedulingOption option, _AiChatTurnResult result)
+      onSchedulingOptionSelected;
   final ValueChanged<String> onRejoinVideo;
   final ValueChanged<_SurveyActionChoice> onSurveyAction;
   final ValueChanged<String> onCancelUpload;
@@ -3616,6 +3675,16 @@ class _MessageBubble extends StatelessWidget {
                   onOneOffPurchaseSelected: onOneOffPurchaseSelected,
                   onUpgradeSelected: onUpgradeSelected,
                   onPlanUpgradeConfirmed: onPlanUpgradeConfirmed,
+                ),
+              ],
+              if (!isUser &&
+                  message.result != null &&
+                  message.result!.payload.schedulingOptions.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                _SchedulingOptionsPanel(
+                  result: message.result!,
+                  sending: sending,
+                  onSelected: onSchedulingOptionSelected,
                 ),
               ],
               if (!isUser && message.rejoinSessionId != null) ...[
@@ -4923,6 +4992,39 @@ class _ServiceButton extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _SchedulingOptionsPanel extends StatelessWidget {
+  const _SchedulingOptionsPanel({
+    required this.result,
+    required this.sending,
+    required this.onSelected,
+  });
+
+  final _AiChatTurnResult result;
+  final bool sending;
+  final void Function(_AiSchedulingOption option, _AiChatTurnResult result)
+      onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final options = result.payload.schedulingOptions;
+    if (options.isEmpty) return const SizedBox.shrink();
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: options
+          .map(
+            (option) => _ServiceButton(
+              label: option.label,
+              selected: true,
+              enabled: !sending,
+              onTap: () => onSelected(option, result),
+            ),
+          )
+          .toList(growable: false),
     );
   }
 }
@@ -6495,6 +6597,27 @@ class _AiChatTurnResult {
       scheduledAppointment: scheduledAppointment,
     );
   }
+
+  _AiChatTurnResult withScheduledAppointment(
+      _ScheduledAppointment appointment) {
+    return _AiChatTurnResult(
+      payload: payload,
+      aiEventId: aiEventId,
+      petId: appointment.petId,
+      specialtyId: appointment.specialtyId,
+      vetId: appointment.vetId,
+      specialtyName: appointment.specialtyName,
+      vetName: appointment.vetName,
+      serviceAccessType: serviceAccessType,
+      serviceCanUse: serviceCanUse,
+      serviceAccessReason: serviceAccessReason,
+      commerceServiceOverride: commerceServiceOverride,
+      upgradePlan: upgradePlan,
+      upgradeUnavailable: upgradeUnavailable,
+      remaining: remaining,
+      scheduledAppointment: appointment,
+    );
+  }
 }
 
 class _ScheduledAppointment {
@@ -6595,6 +6718,42 @@ class _AiMessageBlock {
       };
 }
 
+class _AiSchedulingOption {
+  const _AiSchedulingOption({
+    required this.label,
+    required this.value,
+    this.start,
+    this.end,
+    this.mode,
+  });
+
+  factory _AiSchedulingOption.fromJson(Map<String, dynamic> json) {
+    return _AiSchedulingOption(
+      label: json['label']?.toString() ?? '',
+      value: json['value']?.toString() ?? '',
+      start: json['start']?.toString(),
+      end: json['end']?.toString(),
+      mode: json['mode']?.toString(),
+    );
+  }
+
+  final String label;
+  final String value;
+  final String? start;
+  final String? end;
+  final String? mode;
+
+  bool get isSlot => start != null && start!.trim().isNotEmpty;
+
+  Map<String, dynamic> toJson() => {
+        'label': label,
+        'value': value,
+        if (start != null) 'start': start,
+        if (end != null) 'end': end,
+        if (mode != null) 'mode': mode,
+      };
+}
+
 class _AiChatPayload {
   const _AiChatPayload({
     required this.message,
@@ -6610,6 +6769,11 @@ class _AiChatPayload {
     required this.handoffSummary,
     required this.routingRationale,
     required this.commerceRecommendation,
+    required this.schedulingOptions,
+    this.schedulingStage,
+    this.schedulingMode,
+    this.schedulingRange,
+    this.schedulingDaypart,
   });
 
   factory _AiChatPayload.fromJson(Map<String, dynamic> json) {
@@ -6623,6 +6787,12 @@ class _AiChatPayload {
         .whereType<Map<String, dynamic>>()
         .map(_AiMessageBlock.fromJson)
         .whereType<_AiMessageBlock>()
+        .toList(growable: false);
+      final schedulingOptions = (_asList(json['schedulingOptions']) ?? const [])
+        .map(_asMap)
+        .whereType<Map<String, dynamic>>()
+        .map(_AiSchedulingOption.fromJson)
+        .where((option) => option.label.isNotEmpty)
         .toList(growable: false);
     return _AiChatPayload(
       message: json['message']?.toString() ??
@@ -6639,6 +6809,11 @@ class _AiChatPayload {
       handoffSummary: json['handoffSummary']?.toString(),
       routingRationale: json['routingRationale']?.toString(),
       commerceRecommendation: json['commerceRecommendation']?.toString(),
+      schedulingOptions: schedulingOptions,
+      schedulingStage: json['schedulingStage']?.toString(),
+      schedulingMode: json['schedulingMode']?.toString(),
+      schedulingRange: json['schedulingRange']?.toString(),
+      schedulingDaypart: json['schedulingDaypart']?.toString(),
     );
   }
 
@@ -6655,6 +6830,11 @@ class _AiChatPayload {
   final String? handoffSummary;
   final String? routingRationale;
   final String? commerceRecommendation;
+  final List<_AiSchedulingOption> schedulingOptions;
+  final String? schedulingStage;
+  final String? schedulingMode;
+  final String? schedulingRange;
+  final String? schedulingDaypart;
 
   bool get hasDisplayBlocks => formatVersion == 1 && displayBlocks.isNotEmpty;
 
@@ -6678,6 +6858,14 @@ class _AiChatPayload {
         if (caseSummary != null) 'caseSummary': caseSummary,
         if (handoffSummary != null) 'handoffSummary': handoffSummary,
         if (routingRationale != null) 'routingRationale': routingRationale,
+        if (schedulingStage != null) 'schedulingStage': schedulingStage,
+        if (schedulingMode != null) 'schedulingMode': schedulingMode,
+        if (schedulingRange != null) 'schedulingRange': schedulingRange,
+        if (schedulingDaypart != null) 'schedulingDaypart': schedulingDaypart,
+        if (schedulingOptions.isNotEmpty)
+          'schedulingOptions': schedulingOptions
+              .map((option) => option.toJson())
+              .toList(growable: false),
       };
 
   Map<String, dynamic> get handoffMetadata => {
