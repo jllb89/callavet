@@ -1260,6 +1260,7 @@ export class AiService {
       'Set commerceRecommendation from entitlement context/tool results: included when the recommended service is available, one_off when allowance is exhausted but a one-time service is appropriate, upgrade_plan when there is no active subscription or a plan upgrade is the clearest next step, ask_more while context is missing, and none when no service should be offered.',
       'Use function tools to choose an existing specialty, find approved vets, check service access, and inspect availability.',
       'When the user wants scheduling, first clarify whether they prefer chat or video if that is not already clear. Once the mode is clear, call check_service_access for that mode before offering slots. If access is exhausted, return nextStep payment, commerceRecommendation one_off, and recommendedService scheduled_chat or scheduled_video so the app can sell the one-time consultation before scheduling. If access is available, call get_available_slots, present concrete options, and call schedule_video or schedule_chat only after the user confirms one exact slot. If the requested slot is no longer available, ask the user to choose another returned slot.',
+      'If the prior assistant message listed numbered appointment slots and the latest user reply chooses a number or clearly confirms one listed option, call schedule_video or schedule_chat using the exact ISO slot from that numbered option. Do not ask triage questions again during slot selection.',
       'Do not invent specialty IDs, vet IDs, appointment slots, entitlements, prices, or session IDs.',
       'Before recommending chat or video activation, call check_service_access for the relevant service type.',
       'Keep final responses short, warm, and action-oriented. If context is insufficient, ask a targeted question instead of showing all service choices.',
@@ -1320,9 +1321,9 @@ export class AiService {
     const clinicalSignal = this.hasClinicalSignal(latestMessage);
     const caseDetailSignal = clinicalSignal || this.hasCaseDetailSignal(latestMessage);
     const latestText = this.normalizeCareText(latestMessage);
-    const priorSchedulingQuestion = /agendar|agenda|programar|prefieres.*(chat|video)|chat o.*video|video o.*chat/i.test(latestPriorAssistant);
+    const priorSchedulingQuestion = /agendar|agenda|programar|horario|horarios|opciones disponibles|elige|slot|prefieres.*(chat|video)|chat o.*video|video o.*chat/i.test(latestPriorAssistant);
     const wantsScheduling = /agendar|agenda|programar|cita|manana|mañana|tarde|fecha|horario|slot|disponible/.test(latestText)
-      || (priorSchedulingQuestion && /chat|video|videollamada|llamada|mensaje|mensajes/.test(latestText));
+      || (priorSchedulingQuestion && /chat|video|videollamada|llamada|mensaje|mensajes|perfecto|ok|okay|si|sí|va|dale|confirmo|confirmar|^[1-5]$|opcion|opción|primera|segunda|tercera/.test(latestText));
     return {
       urgentIntakeAlreadyAsked,
       afterUrgentIntakeAnswer,
@@ -1458,6 +1459,7 @@ export class AiService {
   }
 
   private shouldAskUrgentIntake(payload: any, latestMessage: string, state: AiChatTurnState) {
+    if (state.wantsScheduling) return false;
     if (state.urgentIntakeAlreadyAsked) return false;
     const text = this.normalizeCareText(latestMessage);
     return payload?.urgency === 'urgent'
@@ -1508,6 +1510,60 @@ export class AiService {
       if (serviceType === 'chat' || serviceType === 'video') return output;
     }
     return null;
+  }
+
+  private latestAvailableSlotsToolResult(toolResults: Array<{ name: string; output: any }>) {
+    for (const result of [...toolResults].reverse()) {
+      if (result.name !== 'get_available_slots') continue;
+      const output = result.output || {};
+      const slots = Array.isArray(output.slots) ? output.slots : [];
+      if (slots.length) return output;
+    }
+    return null;
+  }
+
+  private schedulingModeFromContext(payload: any, toolResults: Array<{ name: string; output: any }>) {
+    const recommended = String(payload?.recommendedService || '').toLowerCase();
+    if (recommended === 'scheduled_chat') return 'chat';
+    if (recommended === 'scheduled_video') return 'video';
+    const access = this.latestServiceAccessToolResult(toolResults);
+    const accessType = String(access?.serviceType || '').toLowerCase();
+    return accessType === 'chat' ? 'chat' : 'video';
+  }
+
+  private formatSlotForUser(start: unknown, end: unknown, index: number) {
+    const startText = String(start || '').trim();
+    const endText = String(end || '').trim();
+    return endText
+      ? `${index + 1}. ${startText} a ${endText}`
+      : `${index + 1}. ${startText}`;
+  }
+
+  private forceSchedulingSlotOffer(payload: any, toolResults: Array<{ name: string; output: any }>) {
+    const slotsOutput = this.latestAvailableSlotsToolResult(toolResults);
+    if (!slotsOutput) return null;
+    const slots: Array<{ start: string; end: string }> = (Array.isArray(slotsOutput.slots) ? slotsOutput.slots : [])
+      .map((slot: any) => ({ start: String(slot?.start || '').trim(), end: String(slot?.end || '').trim() }))
+      .filter((slot: { start: string; end: string }) => slot.start)
+      .slice(0, 5);
+    if (!slots.length) return null;
+    const mode = this.schedulingModeFromContext(payload, toolResults);
+    const serviceLabel = mode === 'chat' ? 'chat' : 'videollamada';
+    return {
+      ...payload,
+      message: `Tengo estos horarios disponibles para agendar la ${serviceLabel}. Responde con el número del horario que prefieres.\n${slots.map((slot, index) => this.formatSlotForUser(slot.start, slot.end, index)).join('\n')}`,
+      nextStep: 'interview',
+      recommendedService: null,
+      actionLabel: 'Elegir horario',
+      intakeQuestions: [],
+      commerceRecommendation: 'included',
+      displayBlocks: [
+        { type: 'paragraph', text: `Tengo estos horarios disponibles para agendar la ${serviceLabel}. Responde con el número del horario que prefieres.`, items: [] },
+        { type: 'numbered_list', text: null, items: slots.map((slot, index) => this.formatSlotForUser(slot.start, slot.end, index).replace(/^\d+[.)]\s*/, '')) },
+      ],
+      actionUxWarnings: Array.from(new Set([...(Array.isArray(payload?.actionUxWarnings) ? payload.actionUxWarnings : []), 'scheduled_slots_forced'])).slice(0, 12),
+      actionUxRepaired: true,
+    };
   }
 
   private fallbackCommerceRecommendation(serviceAccess: any) {
@@ -1810,6 +1866,11 @@ export class AiService {
   private normalizeChatTurnPayload(payload: any, context: AiChatTurnContext, latestMessage: string, state: AiChatTurnState, toolResults: Array<{ name: string; output: any }> = []) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload;
     const normalized = { ...payload };
+    const scheduledAppointmentCreated = toolResults.some((result) => result.name === 'schedule_video' || result.name === 'schedule_chat');
+    if (state.wantsScheduling && !scheduledAppointmentCreated) {
+      const slotOffer = this.forceSchedulingSlotOffer(normalized, toolResults);
+      if (slotOffer) return this.normalizeChatDisplayPayload(slotOffer, false);
+    }
     if (this.isGenericVetRequest(latestMessage)) {
       normalized.nextStep = 'interview';
       normalized.urgency = 'routine';
@@ -2215,9 +2276,10 @@ export class AiService {
       const hasVets = toolResults.some((result) => result.name === 'find_vets');
       const hasAccess = toolResults.some((result) => result.name === 'check_service_access');
       const hasSlots = toolResults.some((result) => result.name === 'get_available_slots');
+      const hasScheduledAppointment = toolResults.some((result) => result.name === 'schedule_video' || result.name === 'schedule_chat');
       const serviceAccess = this.latestServiceAccessToolResult(toolResults);
       const accessExhausted = serviceAccess && serviceAccess.canUse === false;
-      const needsSchedulingTools = state.wantsScheduling && (!hasSpecialty || !hasVets || !hasAccess || (!accessExhausted && !hasSlots));
+      const needsSchedulingTools = state.wantsScheduling && !hasScheduledAppointment && (!hasSpecialty || !hasVets || !hasAccess || (!accessExhausted && !hasSlots));
       const needsRoutingTools = state.afterUrgentIntakeAnswer
         ? (!hasSpecialty || !hasVets)
         : (state.explicitCareRequest && (!hasSpecialty || !hasVets || !hasAccess)) || needsSchedulingTools;
