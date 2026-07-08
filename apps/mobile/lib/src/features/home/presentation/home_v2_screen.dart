@@ -59,7 +59,9 @@ class _HomeV2ScreenState extends State<HomeV2Screen>
   final _messageCtrl = TextEditingController();
   final _messageFocusNode = FocusNode();
   final _activeConsults = <_ActiveConsult>[];
+  final _upcomingAppointments = <_UpcomingAppointment>[];
   RealtimeChannel? _homeSessionsChannel;
+  RealtimeChannel? _homeAppointmentsChannel;
   RealtimeChannel? _homeSurveysChannel;
   Timer? _homeRefreshDebounce;
   _PendingSurvey? _pendingSurvey;
@@ -67,6 +69,7 @@ class _HomeV2ScreenState extends State<HomeV2Screen>
   _HomeAiPhase _aiPhase = _HomeAiPhase.home;
   bool _homeVisible = false;
   bool _activeConsultsLoaded = false;
+  bool _appointmentsLoaded = false;
   bool _pendingSurveyLoaded = false;
   PageRoute<dynamic>? _route;
 
@@ -77,6 +80,7 @@ class _HomeV2ScreenState extends State<HomeV2Screen>
     _loadFirstName();
     _seedInitialActiveConsult();
     unawaited(_loadActiveConsults());
+    unawaited(_loadUpcomingAppointments());
     unawaited(_loadPendingSurveys());
     _startHomeRealtime();
     WidgetsBinding.instance.addPostFrameCallback((_) => _playHomeFade());
@@ -131,6 +135,10 @@ class _HomeV2ScreenState extends State<HomeV2Screen>
     if (channel != null) {
       Supabase.instance.client.removeChannel(channel);
     }
+    final appointmentsChannel = _homeAppointmentsChannel;
+    if (appointmentsChannel != null) {
+      Supabase.instance.client.removeChannel(appointmentsChannel);
+    }
     final surveysChannel = _homeSurveysChannel;
     if (surveysChannel != null) {
       Supabase.instance.client.removeChannel(surveysChannel);
@@ -160,6 +168,23 @@ class _HomeV2ScreenState extends State<HomeV2Screen>
         .subscribe();
     _homeSessionsChannel = channel;
 
+    final appointmentsChannel =
+        Supabase.instance.client.channel('owner-home-appointments:$userId');
+    appointmentsChannel
+        .onPostgresChanges(
+          event: PostgresChangeEvent.all,
+          schema: 'public',
+          table: 'appointments',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'user_id',
+            value: userId,
+          ),
+          callback: (_) => _scheduleHomeRefresh(),
+        )
+        .subscribe();
+    _homeAppointmentsChannel = appointmentsChannel;
+
     final surveysChannel =
         Supabase.instance.client.channel('owner-home-surveys:$userId');
     surveysChannel
@@ -188,6 +213,7 @@ class _HomeV2ScreenState extends State<HomeV2Screen>
     if (!mounted) return;
     await Future.wait([
       _loadActiveConsults(),
+      _loadUpcomingAppointments(),
       _loadPendingSurveys(),
     ]);
   }
@@ -301,6 +327,53 @@ class _HomeV2ScreenState extends State<HomeV2Screen>
       client.close(force: true);
       if (mounted && !_pendingSurveyLoaded) {
         setState(() => _pendingSurveyLoaded = true);
+      }
+    }
+  }
+
+  Future<void> _loadUpcomingAppointments() async {
+    final token = Supabase.instance.client.auth.currentSession?.accessToken;
+    if (token == null || token.isEmpty) {
+      if (mounted) setState(() => _appointmentsLoaded = true);
+      return;
+    }
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    try {
+      final request = await client
+          .getUrl(Uri.parse('${Environment.apiBaseUrl}/appointments?limit=20'));
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+      final response =
+          await request.close().timeout(const Duration(seconds: 20));
+      final rawBody = await utf8.decoder.bind(response).join();
+      if (response.statusCode < 200 || response.statusCode >= 300) return;
+      final decoded =
+          rawBody.trim().isEmpty ? <String, dynamic>{} : jsonDecode(rawBody);
+      final rows = _asList(_asMap(decoded)?['data']) ?? const [];
+      final now = DateTime.now();
+      final upcoming = rows
+          .map(_asMap)
+          .whereType<Map<String, dynamic>>()
+          .map(_UpcomingAppointment.fromJson)
+          .where((appointment) => appointment.isUpcoming(now))
+          .toList(growable: false)
+        ..sort((a, b) => (a.startsAt ?? DateTime.fromMillisecondsSinceEpoch(0))
+            .compareTo(b.startsAt ?? DateTime.fromMillisecondsSinceEpoch(0)));
+      if (!mounted) return;
+      setState(() {
+        _upcomingAppointments
+          ..clear()
+          ..addAll(upcoming.take(3));
+        _appointmentsLoaded = true;
+      });
+      _homeAiLog(
+          'appointments load rows=${rows.length} upcoming=${_upcomingAppointments.length}');
+    } catch (error) {
+      _homeAiLog('appointments load failed: $error');
+    } finally {
+      client.close(force: true);
+      if (mounted && !_appointmentsLoaded) {
+        setState(() => _appointmentsLoaded = true);
       }
     }
   }
@@ -523,6 +596,8 @@ class _HomeV2ScreenState extends State<HomeV2Screen>
                               pendingSurveyLoaded: _pendingSurveyLoaded,
                               activeConsults: _activeConsults,
                               activeConsultsLoaded: _activeConsultsLoaded,
+                              upcomingAppointments: _upcomingAppointments,
+                              appointmentsLoaded: _appointmentsLoaded,
                               onSurveyNow: (survey) =>
                                   _answerPendingSurvey(survey, 'now'),
                               onSurveyLater: (survey) =>
@@ -536,6 +611,15 @@ class _HomeV2ScreenState extends State<HomeV2Screen>
                                 } else {
                                   context.go(
                                       '/chat/${Uri.encodeComponent(consult.id)}');
+                                }
+                              },
+                              onAppointmentSelected: (appointment) {
+                                if (appointment.canOpenVideo) {
+                                  context.go(
+                                      '/video/${Uri.encodeComponent(appointment.sessionId)}');
+                                } else if (appointment.canOpenChat) {
+                                  context.go(
+                                      '/chat/${Uri.encodeComponent(appointment.sessionId)}');
                                 }
                               },
                             ),
@@ -644,6 +728,58 @@ class _PendingSurvey {
       'Cuéntanos cómo fue la atención de $vetName para $petName.';
 }
 
+class _UpcomingAppointment {
+  const _UpcomingAppointment({
+    required this.id,
+    required this.sessionId,
+    required this.mode,
+    required this.status,
+    required this.vetName,
+    required this.petName,
+    required this.startsAt,
+  });
+
+  factory _UpcomingAppointment.fromJson(Map<String, dynamic> json) {
+    return _UpcomingAppointment(
+      id: json['id']?.toString() ?? '',
+      sessionId:
+          json['sessionId']?.toString() ?? json['session_id']?.toString() ?? '',
+      mode: json['mode']?.toString().toLowerCase() ?? 'video',
+      status: json['status']?.toString().toLowerCase() ?? '',
+      vetName: _cleanLabel(json['vetName']) ??
+          _cleanLabel(json['vet_name']) ??
+          'tu veterinario',
+      petName: _cleanLabel(json['petName']) ??
+          _cleanLabel(json['pet_name']) ??
+          'tu caballo',
+      startsAt:
+          _parseDateTime(json['startsAt']) ?? _parseDateTime(json['starts_at']),
+    );
+  }
+
+  final String id;
+  final String sessionId;
+  final String mode;
+  final String status;
+  final String vetName;
+  final String petName;
+  final DateTime? startsAt;
+
+  bool isUpcoming(DateTime now) {
+    if (!{'scheduled', 'confirmed'}.contains(status)) return false;
+    final start = startsAt;
+    return start == null ||
+        start.isAfter(now.subtract(const Duration(minutes: 5)));
+  }
+
+  bool get canOpenVideo => mode == 'video' && sessionId.isNotEmpty;
+  bool get canOpenChat => mode == 'chat' && sessionId.isNotEmpty;
+
+  String get formattedStart => startsAt == null
+      ? 'hora por confirmar'
+      : '${startsAt!.day.toString().padLeft(2, '0')}/${startsAt!.month.toString().padLeft(2, '0')} ${startsAt!.hour.toString().padLeft(2, '0')}:${startsAt!.minute.toString().padLeft(2, '0')}';
+}
+
 Map<String, dynamic>? _asMap(Object? value) {
   return value is Map
       ? value.map((key, val) => MapEntry(key.toString(), val))
@@ -663,6 +799,12 @@ String _shortLabel(String value, {required int maxLength}) {
   final first = normalized.split(' ').first.trim();
   if (first.isNotEmpty && first.length <= maxLength) return first;
   return normalized.substring(0, maxLength).trim();
+}
+
+DateTime? _parseDateTime(Object? value) {
+  final text = value?.toString().trim();
+  if (text == null || text.isEmpty) return null;
+  return DateTime.tryParse(text)?.toLocal();
 }
 
 class _HomeTopBar extends StatelessWidget {
@@ -771,10 +913,13 @@ class _HomeDefaultSection extends StatelessWidget {
     required this.pendingSurveyLoaded,
     required this.activeConsults,
     required this.activeConsultsLoaded,
+    required this.upcomingAppointments,
+    required this.appointmentsLoaded,
     required this.onSurveyNow,
     required this.onSurveyLater,
     required this.onSurveyDismiss,
     required this.onConsultSelected,
+    required this.onAppointmentSelected,
   });
 
   final bool visible;
@@ -782,16 +927,20 @@ class _HomeDefaultSection extends StatelessWidget {
   final bool pendingSurveyLoaded;
   final List<_ActiveConsult> activeConsults;
   final bool activeConsultsLoaded;
+  final List<_UpcomingAppointment> upcomingAppointments;
+  final bool appointmentsLoaded;
   final ValueChanged<_PendingSurvey> onSurveyNow;
   final ValueChanged<_PendingSurvey> onSurveyLater;
   final ValueChanged<_PendingSurvey> onSurveyDismiss;
   final ValueChanged<_ActiveConsult> onConsultSelected;
+  final ValueChanged<_UpcomingAppointment> onAppointmentSelected;
 
   @override
   Widget build(BuildContext context) {
     final showPendingSurvey = pendingSurveyLoaded && pendingSurvey != null;
     final showActiveConsults =
         activeConsultsLoaded && activeConsults.isNotEmpty;
+    final showAgenda = appointmentsLoaded && upcomingAppointments.isNotEmpty;
 
     return AnimatedOpacity(
       duration: const Duration(milliseconds: 220),
@@ -825,6 +974,23 @@ class _HomeDefaultSection extends StatelessWidget {
             _ActiveConsultStrip(
               consults: activeConsults,
               onSelected: onConsultSelected,
+            ),
+          ],
+          if (showAgenda) ...[
+            const SizedBox(height: 38),
+            const Text(
+              'agenda:',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 16,
+                fontFamily: 'ABCDiatype',
+                fontWeight: FontWeight.w400,
+              ),
+            ),
+            const SizedBox(height: 18),
+            _UpcomingAgendaStrip(
+              appointments: upcomingAppointments,
+              onSelected: onAppointmentSelected,
             ),
           ],
         ],
@@ -996,6 +1162,99 @@ class _ActiveConsultActionPill extends StatelessWidget {
                   fontFamily: 'ABCDiatype',
                   fontWeight: FontWeight.w500,
                 ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _UpcomingAgendaStrip extends StatelessWidget {
+  const _UpcomingAgendaStrip({
+    required this.appointments,
+    required this.onSelected,
+  });
+
+  final List<_UpcomingAppointment> appointments;
+  final ValueChanged<_UpcomingAppointment> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: appointments.take(3).map((appointment) {
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: _UpcomingAgendaPill(
+            appointment: appointment,
+            onTap: () => onSelected(appointment),
+          ),
+        );
+      }).toList(growable: false),
+    );
+  }
+}
+
+class _UpcomingAgendaPill extends StatelessWidget {
+  const _UpcomingAgendaPill({required this.appointment, required this.onTap});
+
+  final _UpcomingAppointment appointment;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final vet = _shortLabel(appointment.vetName, maxLength: 18);
+    final pet = _shortLabel(appointment.petName, maxLength: 14);
+    final canOpen = appointment.canOpenVideo || appointment.canOpenChat;
+    return GestureDetector(
+      onTap: canOpen ? onTap : null,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        height: 56,
+        constraints: const BoxConstraints(minWidth: 260, maxWidth: 360),
+        padding: const EdgeInsets.symmetric(horizontal: 18),
+        decoration: BoxDecoration(
+          color: Colors.black,
+          borderRadius: BorderRadius.circular(40),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.event_available_rounded,
+                color: Colors.white, size: 17),
+            const SizedBox(width: 12),
+            Flexible(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'MVZ $vet · ${appointment.formattedStart}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 13,
+                      fontFamily: 'ABCDiatype',
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    pet,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.52),
+                      fontSize: 11,
+                      fontFamily: 'ABCDiatype',
+                      fontWeight: FontWeight.w400,
+                    ),
+                  ),
+                ],
               ),
             ),
           ],

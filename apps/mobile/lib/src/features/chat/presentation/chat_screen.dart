@@ -2298,7 +2298,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final text = switch (service) {
       'video' => 'Quiero una videollamada ahora con un veterinario.',
       'scheduled_video' =>
-        'Quiero agendar una videollamada con un veterinario.',
+        'Quiero agendar una consulta con un veterinario.',
+      'scheduled_chat' =>
+        'Quiero agendar una consulta por chat con un veterinario.',
       _ => 'Quiero continuar por chat con un veterinario.',
     };
     _sendUserMessage(text);
@@ -2306,7 +2308,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   Future<void> _activateService(String service, _AiChatTurnResult result,
       {bool addUserBubble = true}) async {
-    if (service == 'scheduled_video') {
+    if (service == 'scheduled_video' || service == 'scheduled_chat') {
       _sendQuickReply(service);
       return;
     }
@@ -2372,8 +2374,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _aiChatLog('purchaseSingleSession ignored while busy service=$service');
       return;
     }
-    final kind =
-        service == 'video' || service == 'scheduled_video' ? 'video' : 'chat';
+    final kind = service == 'video' || service == 'scheduled_video'
+      ? 'video'
+      : 'chat';
     _aiChatLog('purchaseSingleSession start kind=$kind');
     setState(() {
       _messages.add(_ChatMessage.user(kind == 'video'
@@ -3042,6 +3045,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 onCancelUpload: _cancelConsultUpload,
                 onRetryMessage: (clientKey) =>
                     unawaited(_retryFailedConsultMessage(clientKey)),
+                onOpenAgenda: () => context.go('/home'),
               ),
             ),
           ],
@@ -3421,6 +3425,7 @@ class _MessageBubble extends StatelessWidget {
     required this.onSurveyAction,
     required this.onCancelUpload,
     required this.onRetryMessage,
+    required this.onOpenAgenda,
     this.onRefreshAttachment,
   });
 
@@ -3440,6 +3445,7 @@ class _MessageBubble extends StatelessWidget {
   final ValueChanged<_SurveyActionChoice> onSurveyAction;
   final ValueChanged<String> onCancelUpload;
   final ValueChanged<String> onRetryMessage;
+  final VoidCallback onOpenAgenda;
   final Future<_ConsultAttachment?> Function(_ConsultAttachment attachment)?
       onRefreshAttachment;
 
@@ -3578,6 +3584,14 @@ class _MessageBubble extends StatelessWidget {
                   selected: true,
                   enabled: !sending,
                   onTap: () => onRejoinVideo(message.rejoinSessionId!),
+                ),
+              ],
+              if (!isUser && message.result?.scheduledAppointment != null) ...[
+                const SizedBox(height: 8),
+                _ScheduledAppointmentPanel(
+                  appointment: message.result!.scheduledAppointment!,
+                  sending: sending,
+                  onOpenAgenda: onOpenAgenda,
                 ),
               ],
               if (!isUser && message.surveyAction != null) ...[
@@ -4743,8 +4757,10 @@ class _HandoffPanel extends StatelessWidget {
     if (recommended == null) return const SizedBox.shrink();
     if (result.entitlementExhaustedForRecommendedService) {
       final service = result.commerceService;
-      final recommendedService = payload.recommendedService == 'scheduled_video'
+        final recommendedService = payload.recommendedService == 'scheduled_video'
           ? 'video'
+          : payload.recommendedService == 'scheduled_chat'
+            ? 'chat'
           : payload.recommendedService;
       final canAlsoUseRecommended = result.commerceServiceOverride == null &&
           recommendedService != null &&
@@ -4778,7 +4794,10 @@ class _HandoffPanel extends StatelessWidget {
         ],
       );
     }
-    final services = ['chat', 'video', 'scheduled_video'];
+    final scheduledService = recommended == 'scheduled_chat'
+      ? 'scheduled_chat'
+      : 'scheduled_video';
+    final services = ['chat', 'video', scheduledService];
 
     return Wrap(
       spacing: 8,
@@ -4798,7 +4817,7 @@ class _HandoffPanel extends StatelessWidget {
   String _serviceLabel(String service) {
     return switch (service) {
       'video' => 'Iniciar videollamada con especialista',
-      'scheduled_video' => 'Agendar consulta por videollamada',
+      'scheduled_video' || 'scheduled_chat' => 'Agendar consulta',
       _ => 'Iniciar chat con veterinario',
     };
   }
@@ -4863,6 +4882,68 @@ class _ServiceButton extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _ScheduledAppointmentPanel extends StatelessWidget {
+  const _ScheduledAppointmentPanel({
+    required this.appointment,
+    required this.sending,
+    required this.onOpenAgenda,
+  });
+
+  final _ScheduledAppointment appointment;
+  final bool sending;
+  final VoidCallback onOpenAgenda;
+
+  @override
+  Widget build(BuildContext context) {
+    final vet = appointment.vetName.trim().isEmpty
+        ? 'tu veterinario'
+        : appointment.vetName.trim();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          constraints: const BoxConstraints(maxWidth: 340),
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.event_available_rounded,
+                  color: Colors.white, size: 17),
+              const SizedBox(width: 10),
+              Flexible(
+                child: Text(
+                  'Consulta agendada con MVZ $vet · ${appointment.formattedStart}',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontFamily: 'ABCDiatype',
+                    fontWeight: FontWeight.w500,
+                    height: 1.18,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 8),
+        _ServiceButton(
+          label: 'Ver en agenda',
+          selected: true,
+          enabled: !sending,
+          onTap: onOpenAgenda,
+        ),
+      ],
     );
   }
 }
@@ -6152,6 +6233,7 @@ class _AiChatTurnResult {
     this.upgradePlan,
     this.upgradeUnavailable = false,
     this.remaining,
+    this.scheduledAppointment,
   });
 
   factory _AiChatTurnResult.fromJson(Map<String, dynamic> json) {
@@ -6167,6 +6249,7 @@ class _AiChatTurnResult {
     bool? serviceCanUse;
     String? serviceAccessReason;
     int? remaining;
+    _ScheduledAppointment? scheduledAppointment;
     final toolNames = <String>[];
 
     for (final item in _asList(json['toolResults']) ?? const []) {
@@ -6198,6 +6281,17 @@ class _AiChatTurnResult {
             ? value.toInt()
             : int.tryParse(value?.toString() ?? '');
       }
+      if (name == 'schedule_video' || name == 'schedule_chat') {
+        final appointment = _asMap(output?['appointment']);
+        if (appointment != null) {
+          scheduledAppointment = _ScheduledAppointment.fromJson(appointment);
+          petId ??= scheduledAppointment.petId;
+          specialtyId ??= scheduledAppointment.specialtyId;
+          vetId ??= scheduledAppointment.vetId;
+          vetName ??= scheduledAppointment.vetName;
+          specialtyName ??= scheduledAppointment.specialtyName;
+        }
+      }
     }
 
     _aiChatLog(
@@ -6219,6 +6313,7 @@ class _AiChatTurnResult {
       serviceCanUse: serviceCanUse,
       serviceAccessReason: serviceAccessReason,
       remaining: remaining,
+      scheduledAppointment: scheduledAppointment,
     );
   }
 
@@ -6236,6 +6331,7 @@ class _AiChatTurnResult {
   final _ChatSubscriptionPlan? upgradePlan;
   final bool upgradeUnavailable;
   final int? remaining;
+  final _ScheduledAppointment? scheduledAppointment;
 
   String get commerceService {
     if (commerceServiceOverride == 'video' ||
@@ -6244,6 +6340,8 @@ class _AiChatTurnResult {
     }
     final recommended = payload.recommendedService == 'scheduled_video'
         ? 'video'
+      : payload.recommendedService == 'scheduled_chat'
+        ? 'chat'
         : payload.recommendedService;
     final accessType =
         serviceAccessType == 'video' || serviceAccessType == 'chat'
@@ -6276,9 +6374,16 @@ class _AiChatTurnResult {
     if (recommended == null) {
       return serviceAccessType == 'chat' || serviceAccessType == 'video';
     }
-    final target = recommended == 'scheduled_video' ? 'video' : recommended;
-    final accessType =
-        serviceAccessType == 'scheduled_video' ? 'video' : serviceAccessType;
+    final target = recommended == 'scheduled_video'
+      ? 'video'
+      : recommended == 'scheduled_chat'
+        ? 'chat'
+        : recommended;
+    final accessType = serviceAccessType == 'scheduled_video'
+      ? 'video'
+      : serviceAccessType == 'scheduled_chat'
+        ? 'chat'
+        : serviceAccessType;
     return accessType == null || accessType == target;
   }
 
@@ -6323,6 +6428,7 @@ class _AiChatTurnResult {
       upgradePlan: upgradePlan,
       upgradeUnavailable: upgradeUnavailable,
       remaining: remaining,
+      scheduledAppointment: scheduledAppointment,
     );
   }
 
@@ -6342,8 +6448,57 @@ class _AiChatTurnResult {
       upgradePlan: plan,
       upgradeUnavailable: false,
       remaining: remaining,
+      scheduledAppointment: scheduledAppointment,
     );
   }
+}
+
+class _ScheduledAppointment {
+  const _ScheduledAppointment({
+    required this.id,
+    required this.sessionId,
+    required this.vetId,
+    required this.vetName,
+    required this.petId,
+    required this.petName,
+    required this.specialtyId,
+    required this.specialtyName,
+    required this.startsAt,
+  });
+
+  factory _ScheduledAppointment.fromJson(Map<String, dynamic> json) {
+    return _ScheduledAppointment(
+      id: json['id']?.toString() ?? '',
+      sessionId:
+          json['sessionId']?.toString() ?? json['session_id']?.toString() ?? '',
+      vetId: json['vetId']?.toString() ?? json['vet_id']?.toString() ?? '',
+      vetName: json['vetName']?.toString() ??
+          json['vet_name']?.toString() ??
+          'tu veterinario',
+      petId: json['petId']?.toString() ?? json['pet_id']?.toString(),
+      petName: json['petName']?.toString() ?? json['pet_name']?.toString(),
+      specialtyId:
+          json['specialtyId']?.toString() ?? json['specialty_id']?.toString(),
+      specialtyName: json['specialtyName']?.toString() ??
+          json['specialty_name']?.toString(),
+      startsAt:
+          _parseDateTime(json['startsAt']) ?? _parseDateTime(json['starts_at']),
+    );
+  }
+
+  final String id;
+  final String sessionId;
+  final String vetId;
+  final String vetName;
+  final String? petId;
+  final String? petName;
+  final String? specialtyId;
+  final String? specialtyName;
+  final DateTime? startsAt;
+
+  String get formattedStart => startsAt == null
+      ? 'hora por confirmar'
+      : '${startsAt!.day.toString().padLeft(2, '0')}/${startsAt!.month.toString().padLeft(2, '0')} ${startsAt!.hour.toString().padLeft(2, '0')}:${startsAt!.minute.toString().padLeft(2, '0')}';
 }
 
 enum _AiMessageBlockType { paragraph, numberedList, bulletList, safetyNote }

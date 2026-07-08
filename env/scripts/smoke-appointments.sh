@@ -13,6 +13,8 @@ set -euo pipefail
 : ${UNTIL:=""}
 : ${DURATION_MIN:=30}
 
+first_slot_start=""
+
 if [[ -z "$SB_ACCESS_TOKEN" ]]; then
   echo "ERROR: SB_ACCESS_TOKEN is required (Supabase bearer)." >&2
   exit 1
@@ -40,6 +42,7 @@ if [[ -n "$VET_ID" ]]; then
     echo "ERROR: slots request failed with HTTP $slots_status" >&2
     exit 1
   fi
+  first_slot_start=$(echo "$slots_body" | jq -r '.data[0].start // empty')
 else
   echo "[2] Skipped slots: set VET_ID to test." >&2
 fi
@@ -69,12 +72,16 @@ fi
 # 4) Create appointment: with specialty (should succeed)
 created_id=""
 if [[ -n "$VET_ID" && -n "$SPECIALTY_ID" ]]; then
-  startsAt2=$(date -u -v+2H +"%Y-%m-%dT%H:%M:%SZ")
+  if [[ -z "$first_slot_start" ]]; then
+    echo "[4] Skipped create with specialty: no available slot returned for VET_ID." >&2
+  else
+  startsAt2="$first_slot_start"
   echo "[4] POST /appointments (with specialty)"
   body2=$(jq -n --arg vetId "$VET_ID" --arg startsAt "$startsAt2" --argjson durationMin $DURATION_MIN --arg specialtyId "$SPECIALTY_ID" '{vetId: $vetId, startsAt: $startsAt, durationMin: $durationMin, specialtyId: $specialtyId}')
   resp=$(curl -sS -X POST "$GATEWAY_BASE/appointments" $hdrs -d "$body2")
   echo "$resp" | jq '{id, vet_id, starts_at, ends_at, status}'
   created_id=$(echo "$resp" | jq -r '.id')
+  fi
 fi
 
 # 5) Create conflicting appointment (should 409)

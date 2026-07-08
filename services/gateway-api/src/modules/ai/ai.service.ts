@@ -4,6 +4,7 @@ import { RequestContext } from '../auth/request-context.service';
 import { ValidatorService } from '../config/validator.service';
 import { VectorTargetService } from '../config/vector-target.service';
 import { EntitlementKind, EntitlementService } from '../subscriptions/entitlement.service';
+import { AppointmentSchedulingService } from '../appointments/appointment-scheduling.service';
 
 type AiDraftType = 'triage' | 'referral' | 'note' | 'care_plan';
 type AiReviewStatus = 'reviewed' | 'accepted' | 'rejected' | 'superseded';
@@ -92,7 +93,7 @@ type AiVideoPostCallContext = {
   endState: Record<string, any> | null;
 };
 
-type AiChatToolName = 'recommend_specialty' | 'find_vets' | 'check_service_access' | 'get_available_slots';
+type AiChatToolName = 'recommend_specialty' | 'find_vets' | 'check_service_access' | 'get_available_slots' | 'schedule_video' | 'schedule_chat';
 
 type AiChatToolCall = {
   type: 'function_call';
@@ -165,6 +166,7 @@ export class AiService {
     private readonly validator: ValidatorService,
     private readonly vectorTargets: VectorTargetService,
     private readonly entitlements: EntitlementService,
+    private readonly appointmentScheduling: AppointmentSchedulingService,
   ) {}
 
   private roadmapLog(event: string, metadata: Record<string, any> = {}) {
@@ -539,7 +541,7 @@ export class AiService {
             },
           },
           urgency: { type: 'string', enum: ['routine', 'urgent', 'emergency'] },
-          recommendedService: { type: ['string', 'null'], enum: ['chat', 'video', 'scheduled_video', null] },
+          recommendedService: { type: ['string', 'null'], enum: ['chat', 'video', 'scheduled_video', 'scheduled_chat', null] },
           actionLabel: { type: ['string', 'null'] },
           safetyEscalation: { type: 'boolean' },
           intakeQuestions: { type: 'array', items: { type: 'string' }, minItems: 0, maxItems: 3 },
@@ -1026,6 +1028,44 @@ export class AiService {
           },
         },
       },
+      {
+        type: 'function',
+        name: 'schedule_video',
+        description: 'Book a scheduled video appointment after the user has explicitly confirmed one concrete available slot. Re-checks availability server-side before creating the appointment.',
+        strict: true,
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['vetId', 'petId', 'specialtyId', 'startsAt', 'durationMin', 'confirmationToken'],
+          properties: {
+            vetId: { type: 'string', description: 'Approved vet UUID from find_vets or get_available_slots context.' },
+            petId: { type: ['string', 'null'], description: 'Exact pet UUID from server context, or null only if the user has no selected horse.' },
+            specialtyId: { type: 'string', description: 'Specialty UUID from recommend_specialty.' },
+            startsAt: { type: 'string', description: 'Exact ISO date-time for the user-confirmed slot.' },
+            durationMin: { type: ['integer', 'null'], minimum: 10, maximum: 240, description: 'Confirmed duration in minutes, or null for 30.' },
+            confirmationToken: { type: ['string', 'null'], description: 'Short natural-language evidence that the user confirmed this exact slot, or null if unavailable.' },
+          },
+        },
+      },
+      {
+        type: 'function',
+        name: 'schedule_chat',
+        description: 'Book a scheduled chat appointment after the user has explicitly confirmed one concrete available slot. Re-checks availability server-side before creating the appointment.',
+        strict: true,
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['vetId', 'petId', 'specialtyId', 'startsAt', 'durationMin', 'confirmationToken'],
+          properties: {
+            vetId: { type: 'string', description: 'Approved vet UUID from find_vets or get_available_slots context.' },
+            petId: { type: ['string', 'null'], description: 'Exact pet UUID from server context, or null only if the user has no selected horse.' },
+            specialtyId: { type: 'string', description: 'Specialty UUID from recommend_specialty.' },
+            startsAt: { type: 'string', description: 'Exact ISO date-time for the user-confirmed slot.' },
+            durationMin: { type: ['integer', 'null'], minimum: 10, maximum: 240, description: 'Confirmed duration in minutes, or null for 30.' },
+            confirmationToken: { type: ['string', 'null'], description: 'Short natural-language evidence that the user confirmed this exact slot, or null if unavailable.' },
+          },
+        },
+      },
     ];
   }
 
@@ -1211,13 +1251,14 @@ export class AiService {
       'Ask the urgent triage question set only once. If the user has already answered those first urgent intake questions, do not ask another triage set or another generic follow-up.',
       'If the latest user message includes a concrete horse/case detail and asks to talk, connect, chat, call, video, or consult with a veterinarian, route immediately with tools instead of asking a generic preference question.',
       'After the user answers the first urgent intake questions, decide the specialty, urgency, and service type from the available information. Then use tools to route: recommend_specialty, find_vets for that specialty, check_service_access for the recommended service, and get_available_slots only if scheduled_video is the best next step.',
-      'After urgent intake answers, present the next action as chat, immediate video, or scheduled video. If red flags remain, bias toward immediate video/local emergency care; if stable but needs review, choose chat or scheduled video based on service access and availability.',
+      'After urgent intake answers, present the next action as chat, immediate video, scheduled video, or scheduled chat. If red flags remain, bias toward immediate video/local emergency care; if stable but needs review, choose chat, scheduled chat, or scheduled video based on service access and availability.',
       'Before recommending a service, gather the minimum missing context for a useful vet handoff: affected horse, main concern, onset/duration, severity, appetite/water, relevant history/medications, and red flags. Ask at most one concise follow-up at a time.',
       'Do not immediately ask the user to choose a product. Decide whether chat, immediate video, or scheduled video is best based on urgency, symptoms, context, and entitlement signals; then explain the recommendation briefly.',
       'Prepare the conversation so a later veterinarian handoff can include a concise contextualization, not a diagnosis.',
       'Populate caseSummary, handoffSummary, and routingRationale whenever there is concrete case detail. Keep them concise, factual, and non-diagnostic; use null only when there is not enough detail.',
       'Set commerceRecommendation from entitlement context/tool results: included when the recommended service is available, one_off when allowance is exhausted but a one-time service is appropriate, upgrade_plan when there is no active subscription or a plan upgrade is the clearest next step, ask_more while context is missing, and none when no service should be offered.',
       'Use function tools to choose an existing specialty, find approved vets, check service access, and inspect availability.',
+      'When the user wants scheduling, first clarify whether they prefer chat or video if that is not already clear, then get available slots, present concrete options, and call schedule_video or schedule_chat only after the user confirms one exact slot. If the requested slot is no longer available, ask the user to choose another returned slot.',
       'Do not invent specialty IDs, vet IDs, appointment slots, entitlements, prices, or session IDs.',
       'Before recommending chat or video activation, call check_service_access for the relevant service type.',
       'Keep final responses short, warm, and action-oriented. If context is insufficient, ask a targeted question instead of showing all service choices.',
@@ -1917,57 +1958,44 @@ export class AiService {
   }
 
   private async getAvailableSlotsTool(args: Record<string, any>) {
-    const vetId = this.normalizeOptionalUuid(String(args.vetId || ''), 'vetId');
-    if (!vetId) throw new BadRequestException('vetId_required');
     const durationMin = Math.min(Math.max(Number(args.durationMin || 30) || 30, 10), 240);
     const since = args.since ? new Date(String(args.since)) : new Date();
     const until = args.until ? new Date(String(args.until)) : new Date(since.getTime() + 7 * 24 * 60 * 60 * 1000);
     if (Number.isNaN(since.getTime()) || Number.isNaN(until.getTime()) || until <= since) {
       throw new BadRequestException('slot_window_invalid');
     }
-    const { rows } = await this.db.query<any>(
-      `with params as (
-         select $1::uuid as vet_id,
-                $2::timestamptz as since,
-                $3::timestamptz as until,
-                $4::int as dur
-       ),
-       days as (
-         select generate_series(date_trunc('day', (select since from params)), date_trunc('day', (select until from params)), interval '1 day')::date as day
-       ),
-       avail as (
-         select d.day,
-                va.start_time as start_t,
-                va.end_time as end_t
-           from days d
-           join vet_availability va on va.weekday = extract(dow from d.day) and va.vet_id = (select vet_id from params)
-       ),
-       ranges as (
-         select make_timestamptz(extract(year from a.day)::int, extract(month from a.day)::int, extract(day from a.day)::int, extract(hour from a.start_t)::int, extract(minute from a.start_t)::int, 0) as start_at,
-                make_timestamptz(extract(year from a.day)::int, extract(month from a.day)::int, extract(day from a.day)::int, extract(hour from a.end_t)::int, extract(minute from a.end_t)::int, 0) as end_at
-           from avail a
-       ),
-       slots as (
-         select gs as slot_start, gs + make_interval(mins => (select dur from params)) as slot_end
-           from ranges r,
-                generate_series(r.start_at, r.end_at - make_interval(mins => (select dur from params)), make_interval(mins => (select dur from params))) as gs
-       ),
-       booked as (
-         select tstzrange(starts_at, ends_at) as appt_range
-           from appointments
-          where vet_id = (select vet_id from params)
-            and status = any(array['scheduled','active','confirmed']::text[])
-       )
-       select slot_start, slot_end
-         from slots s
-        where s.slot_start >= (select since from params)
-          and s.slot_end <= (select until from params)
-          and not exists (select 1 from booked b where tstzrange(s.slot_start, s.slot_end) && b.appt_range)
-        order by slot_start asc
-        limit 5`,
-      [vetId, since.toISOString(), until.toISOString(), durationMin]
-    );
-    return { ok: true, vetId, durationMin, slots: rows.map((row) => ({ start: row.slot_start, end: row.slot_end })) };
+    const vetId = String(args.vetId || '').trim();
+    const slots = await this.appointmentScheduling.availableSlots({
+      vetId,
+      since: since.toISOString(),
+      until: until.toISOString(),
+      durationMin,
+      limit: 5,
+    });
+    return { ok: true, vetId, durationMin, slots };
+  }
+
+  private async scheduleVideoTool(args: Record<string, any>) {
+    return this.scheduleAppointmentTool(args, 'video');
+  }
+
+  private async scheduleChatTool(args: Record<string, any>) {
+    return this.scheduleAppointmentTool(args, 'chat');
+  }
+
+  private async scheduleAppointmentTool(args: Record<string, any>, mode: 'chat' | 'video') {
+    const confirmationToken = String(args.confirmationToken || '').trim();
+    if (!confirmationToken) throw new BadRequestException('slot_confirmation_required');
+    const appointment = await this.appointmentScheduling.createScheduledConsult({
+      vetId: String(args.vetId || '').trim(),
+      petId: args.petId == null ? null : String(args.petId || '').trim(),
+      specialtyId: String(args.specialtyId || '').trim(),
+      startsAt: String(args.startsAt || '').trim(),
+      durationMin: args.durationMin == null ? null : Number(args.durationMin),
+      priority: 'routine',
+      mode,
+    });
+    return { ok: true, appointment };
   }
 
   private async executeChatTool(call: AiChatToolCall, context: AiChatTurnContext) {
@@ -1981,6 +2009,10 @@ export class AiService {
         return this.checkServiceAccessTool(args, context);
       case 'get_available_slots':
         return this.getAvailableSlotsTool(args);
+      case 'schedule_video':
+        return this.scheduleVideoTool(args);
+      case 'schedule_chat':
+        return this.scheduleChatTool(args);
       default:
         throw new BadGatewayException(`ai_tool_not_allowed:${call.name}`);
     }

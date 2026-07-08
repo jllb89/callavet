@@ -3442,6 +3442,7 @@ components:
               startsAt: { type: string, format: date-time }
               durationMin: { type: integer, default: 30 }
               specialtyId: { type: string, format: uuid }
+              mode: { type: string, enum: [chat, video], default: video }
             required: [vetId, startsAt, specialtyId]
     AppointmentPatch:
       content:
@@ -4261,10 +4262,28 @@ components:
       properties:
         id: { type: string, format: uuid }
         session_id: { type: string, format: uuid, nullable: true }
+        sessionId: { type: string, format: uuid, nullable: true }
         vet_id: { type: string, format: uuid }
+        vetId: { type: string, format: uuid }
+        vet_name: { type: string, nullable: true }
+        vetName: { type: string, nullable: true }
         user_id: { type: string, format: uuid }
+        userId: { type: string, format: uuid }
+        user_name: { type: string, nullable: true }
+        userName: { type: string, nullable: true }
+        pet_id: { type: string, format: uuid, nullable: true }
+        petId: { type: string, format: uuid, nullable: true }
+        pet_name: { type: string, nullable: true }
+        petName: { type: string, nullable: true }
+        specialty_id: { type: string, format: uuid, nullable: true }
+        specialtyId: { type: string, format: uuid, nullable: true }
+        specialty_name: { type: string, nullable: true }
+        specialtyName: { type: string, nullable: true }
+        mode: { type: string, enum: [chat, video] }
         starts_at: { type: string, format: date-time }
+        startsAt: { type: string, format: date-time }
         ends_at: { type: string, format: date-time, nullable: true }
+        endsAt: { type: string, format: date-time, nullable: true }
         status: { type: string, enum: [scheduled, confirmed, active, completed, no_show, canceled] }
     Slot:
       type: object

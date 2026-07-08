@@ -2,9 +2,8 @@ import { Body, Controller, Get, HttpException, HttpStatus, Param, Patch, Post, Q
 import { DbService } from '../db/db.service';
 import { AuthGuard } from '../auth/auth.guard';
 import { RequestContext } from '../auth/request-context.service';
-import { ValidatorService } from '../config/validator.service';
-import { EnumService } from '../config/enum.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { AppointmentSchedulingService, AppointmentCreateInput } from './appointment-scheduling.service';
 
 function appointmentDurationMinutes(start: any, end: any): number {
   const startAt = new Date(start).getTime();
@@ -17,11 +16,10 @@ function appointmentDurationMinutes(start: any, end: any): number {
 @UseGuards(AuthGuard)
 export class AppointmentsController {
   constructor(
-    private readonly db: DbService,
     private readonly rc: RequestContext,
-    private readonly validator: ValidatorService,
-    private readonly enumService: EnumService,
     private readonly notifications: NotificationsService,
+    private readonly scheduling: AppointmentSchedulingService,
+    private readonly db: DbService,
   ) {}
 
   @Get('appointments')
@@ -32,99 +30,16 @@ export class AppointmentsController {
     try {
       const limit = Math.min(Math.max(parseInt(limitStr || '20', 10) || 20, 1), 100);
       const offset = Math.max(parseInt(offsetStr || '0', 10) || 0, 0);
-      if (this.db.isStub) return { data: [], mode: 'stub' } as any;
-      const rows = await this.db.runInTx(async (q) => {
-        const { rows } = await q(
-          `select id, user_id, vet_id, status, starts_at, ends_at
-             from appointments
-            where user_id = auth.uid() or vet_id = auth.uid()
-            order by coalesce(starts_at, created_at) desc nulls last
-            limit $1 offset $2`,
-          [limit, offset]
-        );
-        return rows as any[];
-      });
-      return { data: rows };
+      return { data: await this.scheduling.listForActor(limit, offset) };
     } catch (e: any) {
       throw new HttpException(e?.message || 'appointments_list_failed', HttpStatus.BAD_REQUEST);
     }
   }
 
   @Post('appointments')
-  async create(@Body() body: { vetId: string; petId?: string; startsAt: string; durationMin?: number; specialtyId: string }) {
+  async create(@Body() body: AppointmentCreateInput) {
     try {
-      if (!body?.vetId || !body?.startsAt) throw new HttpException('vetId_and_startsAt_required', HttpStatus.BAD_REQUEST);
-      if (!body?.specialtyId) throw new HttpException('specialty_required', HttpStatus.BAD_REQUEST);
-      this.validator.validateUUID(body.vetId, 'vetId');
-      this.validator.validateUUID(body.specialtyId, 'specialtyId');
-      if (body.petId) this.validator.validateUUID(body.petId, 'petId');
-      if (this.db.isStub) {
-        return {
-          id: `appt_${Date.now()}`,
-          session_id: body.petId ? `sess_${Date.now()}` : null,
-          user_id: (this.rc.claims && (this.rc.claims as any).sub) || 'user_stub',
-          vet_id: body.vetId,
-          status: 'scheduled',
-          starts_at: body.startsAt,
-          ends_at: new Date(new Date(body.startsAt).getTime() + ((body.durationMin || 30) * 60 * 1000)).toISOString(),
-        } as any;
-      }
-      const row = await this.db.runInTx(async (q) => {
-        // Validate vet approval and requested specialty coverage.
-        const { rows: vetRows } = await q<{ ok: boolean; is_approved: boolean }>(
-          `select array_position(coalesce(v.specialties, '{}'::uuid[]), $1::uuid) is not null
-               and exists (select 1 from vet_specialties vs where vs.id = $1::uuid and coalesce(vs.is_active, true)) as ok,
-                  is_approved
-             from vets v
-            where id = $2::uuid
-            limit 1`,
-          [body.specialtyId, body.vetId]
-        );
-        if (!vetRows[0]?.ok) throw new HttpException('vet_missing_specialty', HttpStatus.BAD_REQUEST);
-        if (!vetRows[0]?.is_approved) throw new HttpException('vet_not_approved', HttpStatus.BAD_REQUEST);
-
-        let sessionId: string | null = null;
-        if (body.petId) {
-          const { rows: petRows } = await q<{ id: string }>(
-            `select id
-               from pets
-              where id = $1::uuid
-                and user_id = auth.uid()
-              limit 1`,
-            [body.petId]
-          );
-          if (!petRows[0]) throw new HttpException('pet_not_found_for_user', HttpStatus.BAD_REQUEST);
-          const { rows: sessionRows } = await q<{ id: string }>(
-            `insert into chat_sessions (id, user_id, vet_id, pet_id, status, mode, created_at, updated_at)
-             values (gen_random_uuid(), auth.uid(), $1::uuid, $2::uuid, 'scheduled', 'video', now(), now())
-             returning id`,
-            [body.vetId, body.petId]
-          );
-          sessionId = sessionRows[0]?.id || null;
-        }
-
-        // Simple conflict check: ensure vet is free in the requested window
-        const duration = body.durationMin || 30;
-        const activeStatuses = this.enumService.getValuesAsArray('appointments', 'status').filter(s => 
-          ['scheduled','active','confirmed'].includes(s)
-        ).join(`','`);
-        const { rows: conflicts } = await q(
-          `select id from appointments
-            where vet_id = $1
-              and status = ANY(ARRAY['scheduled','active','confirmed']::text[])
-              and tstzrange(starts_at, ends_at) && tstzrange($2::timestamptz, ($2::timestamptz + make_interval(mins => $3)))
-            limit 1`,
-          [body.vetId, body.startsAt, duration]
-        );
-        if (conflicts[0]) throw new HttpException('vet_conflict', HttpStatus.CONFLICT);
-        const { rows } = await q(
-          `insert into appointments (id, session_id, user_id, vet_id, status, starts_at, ends_at)
-           values (gen_random_uuid(), $1::uuid, auth.uid(), $2::uuid, 'scheduled', $3::timestamptz, ($3::timestamptz + make_interval(mins => $4)))
-           returning id, session_id, user_id, vet_id, status, starts_at, ends_at`,
-          [sessionId, body.vetId, body.startsAt, duration]
-        );
-        return rows[0];
-      });
+      const row = await this.scheduling.createScheduledConsult(body);
       // Fire-and-forget notification: appointment scheduled
       try {
         this.notifications.sendEvent({
@@ -342,52 +257,7 @@ export class AppointmentsController {
     try {
       if (this.db.isStub) return { data: [] } as any;
       const durationMin = Math.min(Math.max(parseInt(durationStr || '30', 10) || 30, 10), 240);
-      const rows = await this.db.runInTx(async (q) => {
-        // Compute slots from daily availability blocks (vet_availability), exclude conflicts with existing appointments
-        const { rows: slots } = await q<any>(
-          `with params as (
-             select $1::uuid as vet_id,
-                    coalesce($2::timestamptz, now()) as since,
-                    coalesce($3::timestamptz, now() + interval '7 days') as until,
-                    $4::int as dur
-           ),
-           days as (
-             select generate_series(date_trunc('day', (select since from params)), date_trunc('day', (select until from params)), interval '1 day')::date as day
-           ),
-           avail as (
-             select d.day,
-                    va.start_time as start_t,
-                    va.end_time as end_t
-               from days d
-               join vet_availability va on va.weekday = extract(dow from d.day) and va.vet_id = (select vet_id from params)
-           ),
-           ranges as (
-             select make_timestamptz(extract(year from a.day)::int, extract(month from a.day)::int, extract(day from a.day)::int, extract(hour from a.start_t)::int, extract(minute from a.start_t)::int, 0) as start_at,
-                    make_timestamptz(extract(year from a.day)::int, extract(month from a.day)::int, extract(day from a.day)::int, extract(hour from a.end_t)::int, extract(minute from a.end_t)::int, 0) as end_at
-               from avail a
-           ),
-           slots as (
-             select gs as slot_start, gs + make_interval(mins => (select dur from params)) as slot_end
-               from ranges r,
-                    generate_series(r.start_at, r.end_at - make_interval(mins => (select dur from params)), make_interval(mins => (select dur from params))) as gs
-           ),
-           booked as (
-             select tstzrange(starts_at, ends_at) as appt_range
-               from appointments
-              where vet_id = (select vet_id from params)
-                and status = ANY(ARRAY['scheduled','active','confirmed']::text[])
-           )
-           select slot_start, slot_end
-             from slots s
-            where not exists (
-              select 1 from booked b where tstzrange(s.slot_start, s.slot_end) && b.appt_range
-            )
-            order by slot_start asc
-            limit 200`,
-          [vetId, since || null, until || null, durationMin]
-        );
-        return slots.map((r: any) => ({ start: r.slot_start, end: r.slot_end }));
-      });
+      const rows = await this.scheduling.availableSlots({ vetId, since, until, durationMin, limit: 200 });
       return { data: rows };
     } catch (e: any) {
       throw new HttpException(e?.message || 'slots_failed', HttpStatus.BAD_REQUEST);

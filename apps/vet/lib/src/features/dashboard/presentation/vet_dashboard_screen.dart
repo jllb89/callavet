@@ -955,6 +955,7 @@ class _ActivitySections extends StatelessWidget {
               _UpcomingAppointmentsList(
                 appointments: upcomingAppointments,
                 onJoinVideo: onJoinVideo,
+                onOpenChat: onOpenChat,
               ),
           ]);
         }
@@ -1328,10 +1329,13 @@ class _ConsultOptionsButton extends StatelessWidget {
 
 class _UpcomingAppointmentsList extends StatelessWidget {
   const _UpcomingAppointmentsList(
-      {required this.appointments, required this.onJoinVideo});
+      {required this.appointments,
+      required this.onJoinVideo,
+      required this.onOpenChat});
 
   final List<_UpcomingAppointment> appointments;
   final ValueChanged<_VideoJoinTarget> onJoinVideo;
+  final ValueChanged<String> onOpenChat;
 
   @override
   Widget build(BuildContext context) {
@@ -1359,6 +1363,8 @@ class _UpcomingAppointmentsList extends StatelessWidget {
                 time: appointment.formattedStart,
                 onJoin: appointment.canJoinVideo
                     ? () => onJoinVideo(appointment.videoJoinTarget)
+                  : appointment.canOpenChat
+                    ? () => onOpenChat(appointment.sessionId)
                     : null,
               ),
             ),
@@ -2755,6 +2761,7 @@ class _UpcomingAppointment {
       ? 'hora por confirmar'
       : _formatAppointmentDate(startsAt!);
   bool get canJoinVideo => mode == 'video' && sessionId.trim().isNotEmpty;
+  bool get canOpenChat => mode == 'chat' && sessionId.trim().isNotEmpty;
   _VideoJoinTarget get videoJoinTarget => _VideoJoinTarget(
         sessionId: sessionId,
         name: name,
