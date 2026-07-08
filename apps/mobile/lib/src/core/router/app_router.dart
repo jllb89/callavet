@@ -94,7 +94,10 @@ class AppRouter {
         name: 'home',
         pageBuilder: (context, state) => _noTransitionPage(
           state,
-          const HomeV2Screen(),
+          HomeV2Screen(
+            initialActiveConsultId: state.uri.queryParameters['activeConsult'],
+            initialActiveConsultMode: state.uri.queryParameters['mode'],
+          ),
         ),
       ),
       GoRoute(

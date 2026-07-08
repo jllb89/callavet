@@ -263,7 +263,71 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     setState(() => _isReturningHome = true);
     await Future<void>.delayed(_returnHomeFadeDuration);
     if (!mounted) return;
+    final activeSessionId = _consultSessionId;
+    if (activeSessionId != null && !_consultClosed) {
+      final query = Uri(queryParameters: {
+        'activeConsult': activeSessionId,
+        'mode': 'chat',
+      }).query;
+      context.go('/home?$query');
+      return;
+    }
     context.go('/home');
+  }
+
+  Future<void> _confirmAndReturnHome() async {
+    if (!_isConsultChatRoute || _consultClosed) {
+      await _returnHome();
+      return;
+    }
+    final shouldExit = await showDialog<bool>(
+          context: context,
+          barrierColor: Colors.black.withValues(alpha: 0.68),
+          builder: (context) => AlertDialog(
+            backgroundColor: const Color(0xFF141417),
+            surfaceTintColor: Colors.transparent,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(22),
+              side: BorderSide(color: Colors.white.withValues(alpha: 0.10)),
+            ),
+            title: const Text(
+              '¿Salir del chat?',
+              style: TextStyle(
+                color: Colors.white,
+                fontFamily: 'ABCDiatype',
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            content: Text(
+              'La consulta seguirá activa y podrás volver desde el inicio.',
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.72),
+                fontSize: 14,
+                fontFamily: 'ABCDiatype',
+                height: 1.35,
+              ),
+            ),
+            actionsPadding: const EdgeInsets.fromLTRB(18, 0, 18, 16),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                style: TextButton.styleFrom(foregroundColor: Colors.white),
+                child: const Text('Seguir en chat'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.white,
+                  foregroundColor: Colors.black,
+                ),
+                child: const Text('Salir'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+    if (!shouldExit || !mounted) return;
+    await _returnHome();
   }
 
   String get _homeDisplayName {
@@ -2956,7 +3020,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           child: SafeArea(
             bottom: false,
             child: _ChatHeader(
-              onBack: () => unawaited(_returnHome()),
+              onBack: () => unawaited(_confirmAndReturnHome()),
               onEnd: _isConsultChatRoute && !_consultClosed
                   ? () => unawaited(_endConsultFromOwner())
                   : null,
@@ -3604,6 +3668,21 @@ String? _consultDisplayImageUrl(_ConsultAttachment attachment) {
       _nonEmpty(attachment.downloadUrl);
 }
 
+Widget _fadeInImageFrame(
+  BuildContext context,
+  Widget child,
+  int? frame,
+  bool wasSynchronouslyLoaded,
+) {
+  if (wasSynchronouslyLoaded) return child;
+  return AnimatedOpacity(
+    opacity: frame == null ? 0 : 1,
+    duration: const Duration(milliseconds: 180),
+    curve: Curves.easeOutCubic,
+    child: child,
+  );
+}
+
 class _ConsultAttachmentPreview extends StatelessWidget {
   const _ConsultAttachmentPreview({
     required this.attachment,
@@ -3682,10 +3761,18 @@ class _ConsultAttachmentPreview extends StatelessWidget {
     if (attachment.kind == _ConsultAttachmentKind.image &&
         (displayUrl != null || localPath != null)) {
       final image = localPath != null
-          ? Image.file(File(localPath),
-              fit: BoxFit.cover, gaplessPlayback: true)
-          : Image.network(displayUrl!,
-              fit: BoxFit.cover, gaplessPlayback: true);
+          ? Image.file(
+              File(localPath),
+              fit: BoxFit.cover,
+              gaplessPlayback: true,
+              frameBuilder: _fadeInImageFrame,
+            )
+          : Image.network(
+              displayUrl!,
+              fit: BoxFit.cover,
+              gaplessPlayback: true,
+              frameBuilder: _fadeInImageFrame,
+            );
       return GestureDetector(
         onTap: () => _openImage(context),
         child: ClipRRect(
@@ -3746,7 +3833,7 @@ class _ConsultAttachmentPreview extends StatelessWidget {
           Flexible(
             child: Text(
               attachment.isUploading
-                  ? _uploadProgressText(attachment)
+                  ? 'Cargando ${label.toLowerCase()}'
                   : _attachmentLabel(label, attachment),
               style: const TextStyle(
                 color: Colors.white,
@@ -3790,15 +3877,6 @@ class _AttachmentUploadOverlay extends StatelessWidget {
                     child: Row(
                       children: [
                         _TinyUploadSpinner(progress: progress),
-                        const SizedBox(width: 7),
-                        Text(
-                          _uploadProgressText(attachment),
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
                       ],
                     ),
                   ),
@@ -4753,13 +4831,70 @@ class _SurveyActionPanel extends StatelessWidget {
       spacing: 8,
       runSpacing: 8,
       children: action.choices.map((choice) {
-        return _ServiceButton(
+        return _SurveyChoiceTag(
           label: choice.label,
           selected: choice.selected,
           enabled: !sending,
           onTap: () => onSelected(choice),
         );
       }).toList(growable: false),
+    );
+  }
+}
+
+class _SurveyChoiceTag extends StatelessWidget {
+  const _SurveyChoiceTag({
+    required this.label,
+    required this.selected,
+    required this.enabled,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final bool enabled;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      enabled: enabled,
+      selected: selected,
+      label: label,
+      child: GestureDetector(
+        onTap: enabled ? onTap : null,
+        behavior: HitTestBehavior.opaque,
+        child: AnimatedOpacity(
+          duration: const Duration(milliseconds: 160),
+          opacity: enabled ? 1 : 0.45,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(
+                color: selected
+                    ? Colors.white
+                    : Colors.white.withValues(alpha: 0.22),
+              ),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Colors.black,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  height: 1,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

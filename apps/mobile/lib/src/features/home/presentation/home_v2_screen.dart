@@ -39,7 +39,14 @@ void _surveyHomeLog(String message) {
 }
 
 class HomeV2Screen extends StatefulWidget {
-  const HomeV2Screen({super.key});
+  const HomeV2Screen({
+    super.key,
+    this.initialActiveConsultId,
+    this.initialActiveConsultMode,
+  });
+
+  final String? initialActiveConsultId;
+  final String? initialActiveConsultMode;
 
   @override
   State<HomeV2Screen> createState() => _HomeV2ScreenState();
@@ -66,10 +73,26 @@ class _HomeV2ScreenState extends State<HomeV2Screen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _loadFirstName();
+    _seedInitialActiveConsult();
     unawaited(_loadActiveConsults());
     unawaited(_loadPendingSurveys());
     _startHomeRealtime();
     WidgetsBinding.instance.addPostFrameCallback((_) => _playHomeFade());
+  }
+
+  void _seedInitialActiveConsult() {
+    final id = widget.initialActiveConsultId?.trim();
+    if (id == null || id.isEmpty) return;
+    final mode = widget.initialActiveConsultMode?.trim().toLowerCase();
+    final consult = _ActiveConsult.fallback(
+      id: id,
+      mode: mode == 'video' ? 'video' : 'chat',
+    );
+    _activeConsults
+      ..clear()
+      ..add(consult);
+    _activeConsultsLoaded = true;
+    _homeAiLog('seeded active consult from route id=$id mode=${consult.mode}');
   }
 
   @override
@@ -194,20 +217,36 @@ class _HomeV2ScreenState extends State<HomeV2Screen>
       final decoded =
           rawBody.trim().isEmpty ? <String, dynamic>{} : jsonDecode(rawBody);
       final rows = _asList(_asMap(decoded)?['data']) ?? const [];
-      final active = rows
+      final consults = rows
           .map(_asMap)
           .whereType<Map<String, dynamic>>()
           .map(_ActiveConsult.fromJson)
+          .toList(growable: false);
+      final active = consults
           .where((consult) => consult.isActive)
           .take(3)
           .toList(growable: false);
+      final activeIds = active.map((consult) => consult.id).toSet();
+      final inactiveIds = consults
+          .where((consult) => !consult.isActive)
+          .map((consult) => consult.id)
+          .toSet();
+      final preserved = _activeConsults.where((consult) {
+        return consult.isActive &&
+            !activeIds.contains(consult.id) &&
+            !inactiveIds.contains(consult.id);
+      });
+      final merged = [...active, ...preserved].take(3).toList(growable: false);
       if (!mounted) return;
       setState(() {
         _activeConsults
           ..clear()
-          ..addAll(active);
+          ..addAll(merged);
         _activeConsultsLoaded = true;
       });
+      _homeAiLog(
+        'active consult load rows=${rows.length} active=${active.length} preserved=${merged.length - active.length} visible=${merged.length} statuses=${consults.map((consult) => '${consult.id}:${consult.status}:${consult.mode}').join(',')}',
+      );
     } catch (_) {
       // Home should keep rendering even if session activity cannot load.
     } finally {
@@ -516,6 +555,22 @@ class _HomeV2ScreenState extends State<HomeV2Screen>
   }
 }
 
+const _terminalConsultStatuses = {
+  'completed',
+  'closed',
+  'ended',
+  'cancelled',
+  'canceled',
+  'expired',
+  'failed',
+  'finished',
+  'forced_ended',
+  'host_absent',
+  'no_show',
+  'released',
+  'timed_out',
+};
+
 class _ActiveConsult {
   const _ActiveConsult({
     required this.id,
@@ -541,6 +596,20 @@ class _ActiveConsult {
     );
   }
 
+  factory _ActiveConsult.fallback({
+    required String id,
+    required String mode,
+  }) {
+    return _ActiveConsult(
+      id: id,
+      mode: mode,
+      status: 'active',
+      petName: 'Consulta',
+      priority: 'routine',
+      specialtyName: 'general',
+    );
+  }
+
   final String id;
   final String mode;
   final String status;
@@ -550,7 +619,7 @@ class _ActiveConsult {
 
   bool get isActive =>
       id.isNotEmpty &&
-      (status == 'active' || status == 'scheduled') &&
+      !_terminalConsultStatuses.contains(status) &&
       (mode == 'chat' || mode == 'video');
 
   String get priorityLabel {

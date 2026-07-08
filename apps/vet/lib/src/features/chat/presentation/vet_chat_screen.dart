@@ -2770,6 +2770,21 @@ String? _vetDisplayImageUrl(_VetAttachment attachment) {
       _vetNonEmpty(attachment.downloadUrl);
 }
 
+Widget _fadeInImageFrame(
+  BuildContext context,
+  Widget child,
+  int? frame,
+  bool wasSynchronouslyLoaded,
+) {
+  if (wasSynchronouslyLoaded) return child;
+  return AnimatedOpacity(
+    opacity: frame == null ? 0 : 1,
+    duration: const Duration(milliseconds: 180),
+    curve: Curves.easeOutCubic,
+    child: child,
+  );
+}
+
 class _VetAttachmentPreview extends StatelessWidget {
   const _VetAttachmentPreview({
     required this.attachment,
@@ -2848,10 +2863,18 @@ class _VetAttachmentPreview extends StatelessWidget {
     if (attachment.kind == _VetAttachmentKind.image &&
         (displayUrl != null || localPath != null)) {
       final image = localPath != null
-          ? Image.file(File(localPath),
-              fit: BoxFit.cover, gaplessPlayback: true)
-          : Image.network(displayUrl!,
-              fit: BoxFit.cover, gaplessPlayback: true);
+          ? Image.file(
+              File(localPath),
+              fit: BoxFit.cover,
+              gaplessPlayback: true,
+              frameBuilder: _fadeInImageFrame,
+            )
+          : Image.network(
+              displayUrl!,
+              fit: BoxFit.cover,
+              gaplessPlayback: true,
+              frameBuilder: _fadeInImageFrame,
+            );
       return GestureDetector(
         onTap: () => _openImage(context),
         child: ClipRRect(
@@ -2912,7 +2935,7 @@ class _VetAttachmentPreview extends StatelessWidget {
           Flexible(
             child: Text(
               attachment.isUploading
-                  ? _vetUploadProgressText(attachment)
+                  ? 'Cargando ${label.toLowerCase()}'
                   : _vetAttachmentLabel(label, attachment),
               style: const TextStyle(
                 color: Colors.white,
@@ -2957,16 +2980,6 @@ class _VetAttachmentUploadOverlay extends StatelessWidget {
                     child: Row(
                       children: [
                         _TinyUploadSpinner(progress: progress),
-                        const SizedBox(width: 7),
-                        Text(
-                          _vetUploadProgressText(attachment),
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 12,
-                            fontFamily: 'ABC Diatype',
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
                       ],
                     ),
                   ),
