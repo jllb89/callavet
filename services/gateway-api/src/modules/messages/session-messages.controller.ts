@@ -134,6 +134,7 @@ type MessageAttachmentResponse = {
   metadata: Record<string, any>;
   created_at: string;
   downloadUrl?: string | null;
+  thumbnailUrl?: string | null;
   downloadExpiresIn?: number;
 };
 
@@ -459,6 +460,29 @@ export class SessionMessagesController {
     }
   }
 
+  private async signedThumbnailUrl(row: MessageAttachmentRow) {
+    if (!row.thumbnail_path) return null;
+    const span = this.startChatSpan('chat.attachment.thumbnail_url.refresh', {
+      sessionId: row.session_id,
+      attachmentId: row.id,
+      kind: row.kind,
+    });
+    try {
+      const { data, error } = await this.getStorageClient()
+        .storage
+        .from(row.storage_bucket)
+        .createSignedUrl(row.thumbnail_path, this.attachmentDownloadExpiresIn);
+      if (error) return null;
+      span.setStatus({ code: SpanStatusCode.OK });
+      return data?.signedUrl || null;
+    } catch (error) {
+      this.recordSpanError(span, error);
+      throw error;
+    } finally {
+      span.end();
+    }
+  }
+
   private async storageObjectByteSize(row: MessageAttachmentRow) {
     const slash = row.storage_path.lastIndexOf('/');
     const prefix = slash >= 0 ? row.storage_path.slice(0, slash) : '';
@@ -503,7 +527,10 @@ export class SessionMessagesController {
 
   private async shapeAttachment(row: MessageAttachmentRow): Promise<MessageAttachmentResponse> {
     const status = String(row.status || '').toLowerCase();
-    const downloadUrl = status !== 'removed' && status !== 'failed' ? await this.signedDownloadUrl(row) : null;
+    const canDownload = status !== 'removed' && status !== 'failed';
+    const [downloadUrl, thumbnailUrl] = canDownload
+      ? await Promise.all([this.signedDownloadUrl(row), this.signedThumbnailUrl(row)])
+      : [null, null];
     return {
       id: row.id,
       message_id: row.message_id,
@@ -522,6 +549,7 @@ export class SessionMessagesController {
       metadata: row.metadata || {},
       created_at: row.created_at,
       downloadUrl,
+      thumbnailUrl,
       downloadExpiresIn: downloadUrl ? this.attachmentDownloadExpiresIn : undefined,
     };
   }

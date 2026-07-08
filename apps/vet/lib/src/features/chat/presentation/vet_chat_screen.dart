@@ -97,6 +97,12 @@ class _VetChatScreenState extends State<VetChatScreen>
 
   bool get _isAssistant => widget.sessionId == _vetAssistantSessionId;
 
+  void _traceMessageList(String event, Map<String, Object?> metadata) {
+    debugPrint(
+      '[VetChat] messages.$event $metadata total=${_consultMessages.length}',
+    );
+  }
+
   String get _assistantDisplayName {
     final trimmed = widget.displayName?.trim();
     return trimmed == null || trimmed.isEmpty ? 'Doctor' : trimmed;
@@ -238,6 +244,11 @@ class _VetChatScreenState extends State<VetChatScreen>
       } else if (!_isClosedStatus(status)) {
         _scheduleHandoffRetry();
       }
+      _traceMessageList('load', {
+        'server': messages.length,
+        'outbox': outboxEntries.length,
+        'status': status,
+      });
       _markVisibleMessagesRead();
       unawaited(_flushOutbox());
       _scrollToBottom();
@@ -341,6 +352,7 @@ class _VetChatScreenState extends State<VetChatScreen>
             }
             if (!mounted) return;
             final wasTyping = _ownerTyping;
+            if (wasTyping == typing && _lastOwnerTypingAt == eventAt) return;
             setState(() {
               _lastOwnerTypingAt = typing ? eventAt : null;
               _ownerTyping = typing;
@@ -428,14 +440,15 @@ class _VetChatScreenState extends State<VetChatScreen>
     }
     if (!drivesReconnect) return;
     if (!mounted || _disposing) return;
-    setState(() {
-      _realtimeStatus = switch (status) {
-        RealtimeSubscribeStatus.channelError => 'reconectando chat...',
-        RealtimeSubscribeStatus.closed => 'chat sin conexión',
-        RealtimeSubscribeStatus.timedOut => 'reconectando chat...',
-        RealtimeSubscribeStatus.subscribed => null,
-      };
-    });
+    final nextStatus = switch (status) {
+      RealtimeSubscribeStatus.channelError => 'reconectando chat...',
+      RealtimeSubscribeStatus.closed => 'chat sin conexión',
+      RealtimeSubscribeStatus.timedOut => 'reconectando chat...',
+      RealtimeSubscribeStatus.subscribed => null,
+    };
+    if (_realtimeStatus != nextStatus) {
+      setState(() => _realtimeStatus = nextStatus);
+    }
     _emitTelemetry('realtime_reconnect', metadata: {
       'status': status.name,
       'reconnectAttempt': _reconnectAttempts + 1,
@@ -482,6 +495,7 @@ class _VetChatScreenState extends State<VetChatScreen>
         ));
     if (mounted) {
       final wasOnline = _ownerOnline;
+      if (wasOnline == online) return;
       setState(() => _ownerOnline = online);
       if (online && !wasOnline) {
         _announceForAccessibility('El tutor está en línea.');
@@ -547,12 +561,18 @@ class _VetChatScreenState extends State<VetChatScreen>
   }
 
   void _scheduleRefresh() {
+    _traceMessageList('refresh.schedule_catchup', {
+      'lastStreamOrder': _lastConsultStreamOrder,
+    });
     _refreshDebounce?.cancel();
     _refreshDebounce =
         Timer(const Duration(milliseconds: 450), _refreshMessages);
   }
 
   void _scheduleFullRefresh() {
+    _traceMessageList('refresh.schedule_full', {
+      'lastStreamOrder': _lastConsultStreamOrder,
+    });
     _refreshDebounce?.cancel();
     _refreshDebounce = Timer(
       const Duration(milliseconds: 450),
@@ -611,17 +631,6 @@ class _VetChatScreenState extends State<VetChatScreen>
     return order != null && lastOrder > 0 && order > lastOrder + 1;
   }
 
-  bool _shouldShowDateSeparator(
-      _VetChatMessage? previous, _VetChatMessage current) {
-    final currentDate = current.createdAt;
-    if (currentDate == null) return false;
-    final previousDate = previous?.createdAt;
-    if (previousDate == null) return false;
-    return previousDate.year != currentDate.year ||
-        previousDate.month != currentDate.month ||
-        previousDate.day != currentDate.day;
-  }
-
   Future<void> _catchUpMessages() async {
     if (_isAssistant) return;
     if (_catchUpInFlight) return;
@@ -645,6 +654,10 @@ class _VetChatScreenState extends State<VetChatScreen>
       for (final message in _messagesWithReceipts(messages, receipts)) {
         _upsertConsultMessage(message);
       }
+      _traceMessageList('catchup', {
+        'afterStreamOrder': afterStreamOrder,
+        'count': messages.length,
+      });
       String? firstIncoming;
       for (final message in messages) {
         if (message.role != 'vet') {
@@ -689,6 +702,12 @@ class _VetChatScreenState extends State<VetChatScreen>
         inserted = true;
       }
       _consultMessages.sort(_compareMessages);
+    });
+    _traceMessageList(inserted ? 'upsert.insert' : 'upsert.replace', {
+      'id': message.id,
+      'clientKey': message.clientKey,
+      'streamOrder': message.streamOrder,
+      'attachments': message.attachments.length,
     });
     if (message.streamOrder != null && message.clientKey != null) {
       unawaited(_VetOutboxStore.remove(message.clientKey!));
@@ -736,6 +755,7 @@ class _VetChatScreenState extends State<VetChatScreen>
     if (receipt['user_id']?.toString() == currentUserId) return;
     final messageId = receipt['message_id']?.toString() ?? '';
     if (messageId.isEmpty || !mounted) return;
+    var applied = false;
     setState(() {
       final index =
           _consultMessages.indexWhere((message) => message.id == messageId);
@@ -744,7 +764,9 @@ class _VetChatScreenState extends State<VetChatScreen>
         deliveredByOther: receipt['delivered_at'] != null,
         readByOther: receipt['read_at'] != null,
       );
+      applied = true;
     });
+    if (applied) _traceMessageList('receipt.apply', {'messageId': messageId});
   }
 
   void _markVisibleMessagesRead() {
@@ -886,9 +908,12 @@ class _VetChatScreenState extends State<VetChatScreen>
       );
       if (message != null) {
         if (mounted) {
-          setState(() => _consultMessages.removeWhere((candidate) =>
-              candidate.id == optimisticMessage.id ||
-              candidate.clientKey == clientKey));
+          setState(() {
+            _consultMessages.removeWhere((candidate) =>
+                candidate.id == optimisticMessage.id ||
+                candidate.clientKey == clientKey);
+          });
+          _traceMessageList('optimistic.remove', {'clientKey': clientKey});
         }
         _upsertConsultMessage(_VetChatMessage.fromJson(message));
       }
@@ -1786,23 +1811,23 @@ class _VetChatScreenState extends State<VetChatScreen>
                       }
                       final messageIndex = index - (hasHandoff ? 1 : 0);
                       final message = _consultMessages[messageIndex];
-                      final previousMessage = messageIndex > 0
-                          ? _consultMessages[messageIndex - 1]
-                          : null;
-                      final showDateSeparator =
-                          _shouldShowDateSeparator(previousMessage, message);
+                      final nextMessage =
+                          messageIndex < _consultMessages.length - 1
+                              ? _consultMessages[messageIndex + 1]
+                              : null;
+                      final showMessageLog = nextMessage == null ||
+                          nextMessage.role != message.role ||
+                          message.deliveryState == 'failed';
                       return Column(
                         key: ValueKey('thread-${message.id}'),
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          if (showDateSeparator)
-                            _VetChatDateSeparator(
-                                date: message.createdAt ?? DateTime.now()),
                           if (_unreadMarkerMessageId == message.id)
                             const _VetUnreadMessagesMarker(),
                           _ChatBubble(
                             message: message,
                             ownerName: _ownerName,
+                            showMessageLog: showMessageLog,
                             onRefreshAttachment:
                                 _refreshVetAttachmentDownloadUrl,
                             onCancelUpload: _cancelUpload,
@@ -1974,40 +1999,6 @@ class _MessageOpacityFade extends StatelessWidget {
         ).createShader(bounds);
       },
       child: child,
-    );
-  }
-}
-
-class _VetChatDateSeparator extends StatelessWidget {
-  const _VetChatDateSeparator({required this.date});
-
-  final DateTime date;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 14),
-      child: Center(
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.08),
-            borderRadius: BorderRadius.circular(999),
-            border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            child: Text(
-              _vetChatDateLabel(date),
-              style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.68),
-                fontSize: 11,
-                fontFamily: 'ABCDiatype',
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ),
-      ),
     );
   }
 }
@@ -2527,6 +2518,7 @@ class _ChatBubble extends StatelessWidget {
   const _ChatBubble({
     required this.message,
     this.ownerName = 'tutor',
+    this.showMessageLog = true,
     this.onCancelUpload,
     this.onRetryMessage,
     this.onRefreshAttachment,
@@ -2534,6 +2526,7 @@ class _ChatBubble extends StatelessWidget {
 
   final _VetChatMessage message;
   final String ownerName;
+  final bool showMessageLog;
   final ValueChanged<String>? onCancelUpload;
   final ValueChanged<String>? onRetryMessage;
   final Future<_VetAttachment?> Function(_VetAttachment attachment)?
@@ -2617,15 +2610,18 @@ class _ChatBubble extends StatelessWidget {
                     ),
                   ),
                 ),
-            const SizedBox(height: 4),
-            Text(
-              message.label(ownerName: ownerName),
-              style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.38),
-                fontSize: 10,
-                fontFamily: 'ABCDiatype',
+            if (showMessageLog &&
+                message.label(ownerName: ownerName).isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text(
+                message.label(ownerName: ownerName),
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.38),
+                  fontSize: 10,
+                  fontFamily: 'ABCDiatype',
+                ),
               ),
-            ),
+            ],
             if (isVet &&
                 message.deliveryState == 'failed' &&
                 message.clientKey != null &&
@@ -2650,7 +2646,7 @@ class _ChatBubble extends StatelessWidget {
   }
 }
 
-class _VetAttachmentStrip extends StatelessWidget {
+class _VetAttachmentStrip extends StatefulWidget {
   const _VetAttachmentStrip({
     required this.attachments,
     required this.clientKey,
@@ -2667,26 +2663,111 @@ class _VetAttachmentStrip extends StatelessWidget {
       onRefreshAttachment;
 
   @override
+  State<_VetAttachmentStrip> createState() => _VetAttachmentStripState();
+}
+
+class _VetAttachmentStripState extends State<_VetAttachmentStrip> {
+  final _prewarmedImageUrls = <String>{};
+  final _readyImageUrls = <String>{};
+  Timer? _revealTimer;
+  bool _readyToReveal = true;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _syncImageReadiness();
+  }
+
+  @override
+  void didUpdateWidget(covariant _VetAttachmentStrip oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _syncImageReadiness();
+  }
+
+  @override
+  void dispose() {
+    _revealTimer?.cancel();
+    super.dispose();
+  }
+
+  void _syncImageReadiness() {
+    final networkImageUrls = widget.attachments
+        .where((attachment) =>
+            attachment.kind == _VetAttachmentKind.image &&
+            attachment.localPath == null)
+        .map(_vetDisplayImageUrl)
+        .whereType<String>()
+        .where((url) => url.trim().isNotEmpty)
+        .toList(growable: false);
+    final shouldCoordinate = networkImageUrls.length > 1;
+    if (!shouldCoordinate) {
+      _revealTimer?.cancel();
+      if (!_readyToReveal) setState(() => _readyToReveal = true);
+    }
+    for (final url in networkImageUrls) {
+      if (!_prewarmedImageUrls.add(url)) continue;
+      unawaited(precacheImage(NetworkImage(url), context).then((_) {
+        _readyImageUrls.add(url);
+        if (mounted &&
+            networkImageUrls.every(_readyImageUrls.contains) &&
+            !_readyToReveal) {
+          setState(() => _readyToReveal = true);
+        }
+      }).catchError((_) {
+        _readyImageUrls.add(url);
+        if (mounted &&
+            networkImageUrls.every(_readyImageUrls.contains) &&
+            !_readyToReveal) {
+          setState(() => _readyToReveal = true);
+        }
+      }));
+    }
+    if (!shouldCoordinate) return;
+    if (networkImageUrls.every(_readyImageUrls.contains)) {
+      if (!_readyToReveal) setState(() => _readyToReveal = true);
+      return;
+    }
+    if (_readyToReveal) setState(() => _readyToReveal = false);
+    _revealTimer?.cancel();
+    _revealTimer = Timer(const Duration(milliseconds: 700), () {
+      if (mounted) setState(() => _readyToReveal = true);
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: attachments
-          .map((attachment) => Padding(
-                padding: EdgeInsets.only(
-                    bottom:
-                        flushSingleImage && attachments.length == 1 ? 0 : 6),
-                child: _VetAttachmentPreview(
-                  attachment: attachment,
-                  clientKey: clientKey,
-                  onCancelUpload: onCancelUpload,
-                  onRefreshAttachment: onRefreshAttachment,
-                  flushImage: flushSingleImage && attachments.length == 1,
-                ),
-              ))
-          .toList(growable: false),
+    return AnimatedOpacity(
+      opacity: _readyToReveal ? 1 : 0,
+      duration: const Duration(milliseconds: 160),
+      curve: Curves.easeOutCubic,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: widget.attachments
+            .map((attachment) => Padding(
+                  padding: EdgeInsets.only(
+                      bottom: widget.flushSingleImage &&
+                              widget.attachments.length == 1
+                          ? 0
+                          : 6),
+                  child: _VetAttachmentPreview(
+                    attachment: attachment,
+                    clientKey: widget.clientKey,
+                    onCancelUpload: widget.onCancelUpload,
+                    onRefreshAttachment: widget.onRefreshAttachment,
+                    flushImage: widget.flushSingleImage &&
+                        widget.attachments.length == 1,
+                  ),
+                ))
+            .toList(growable: false),
+      ),
     );
   }
+}
+
+String? _vetDisplayImageUrl(_VetAttachment attachment) {
+  return _vetNonEmpty(attachment.thumbnailUrl) ??
+      _vetNonEmpty(attachment.downloadUrl);
 }
 
 class _VetAttachmentPreview extends StatelessWidget {
@@ -2757,7 +2838,7 @@ class _VetAttachmentPreview extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final url = attachment.downloadUrl;
+    final displayUrl = _vetDisplayImageUrl(attachment);
     final localPath = attachment.localPath;
     final label = switch (attachment.kind) {
       _VetAttachmentKind.image => 'Imagen',
@@ -2765,11 +2846,12 @@ class _VetAttachmentPreview extends StatelessWidget {
       _VetAttachmentKind.voice => 'Nota de voz',
     };
     if (attachment.kind == _VetAttachmentKind.image &&
-        (url != null || localPath != null)) {
+        (displayUrl != null || localPath != null)) {
       final image = localPath != null
           ? Image.file(File(localPath),
               fit: BoxFit.cover, gaplessPlayback: true)
-          : Image.network(url!, fit: BoxFit.cover, gaplessPlayback: true);
+          : Image.network(displayUrl!,
+              fit: BoxFit.cover, gaplessPlayback: true);
       return GestureDetector(
         onTap: () => _openImage(context),
         child: ClipRRect(
@@ -2862,7 +2944,7 @@ class _VetAttachmentUploadOverlay extends StatelessWidget {
     return DecoratedBox(
       decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.42)),
       child: Align(
-        alignment: Alignment.bottomLeft,
+        alignment: Alignment.topLeft,
         child: Padding(
           padding: const EdgeInsets.all(12),
           child: Column(
@@ -2901,16 +2983,6 @@ class _VetAttachmentUploadOverlay extends StatelessWidget {
                           color: Colors.white, size: 18),
                     ),
                 ],
-              ),
-              const SizedBox(height: 7),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(99),
-                child: LinearProgressIndicator(
-                  value: progress <= 0 ? null : progress,
-                  minHeight: 4,
-                  backgroundColor: Colors.white.withValues(alpha: 0.22),
-                  valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
-                ),
               ),
             ],
           ),
@@ -4656,6 +4728,7 @@ class _VetAttachment {
     required this.byteSize,
     this.durationMs,
     this.downloadUrl,
+    this.thumbnailUrl,
     this.localPath,
     this.status,
     this.uploadProgress = 0,
@@ -4678,6 +4751,8 @@ class _VetAttachment {
       durationMs: _asInt(json['durationMs'] ?? json['duration_ms']),
       downloadUrl:
           json['downloadUrl']?.toString() ?? json['download_url']?.toString(),
+      thumbnailUrl:
+          json['thumbnailUrl']?.toString() ?? json['thumbnail_url']?.toString(),
       uploadProgress: _asDouble(json['uploadProgress']) ?? 0,
     );
   }
@@ -4688,6 +4763,7 @@ class _VetAttachment {
   final int byteSize;
   final int? durationMs;
   final String? downloadUrl;
+  final String? thumbnailUrl;
   final String? localPath;
   final String? status;
   final double uploadProgress;
@@ -4705,6 +4781,7 @@ class _VetAttachment {
       byteSize: byteSize,
       durationMs: durationMs,
       downloadUrl: downloadUrl,
+      thumbnailUrl: thumbnailUrl,
       localPath: localPath,
       status: status ?? this.status,
       uploadProgress: uploadProgress ?? this.uploadProgress,
@@ -4720,6 +4797,8 @@ class _VetAttachment {
       durationMs: durationMs ?? previous.durationMs,
       downloadUrl:
           _vetNonEmpty(downloadUrl) ?? _vetNonEmpty(previous.downloadUrl),
+      thumbnailUrl:
+          _vetNonEmpty(thumbnailUrl) ?? _vetNonEmpty(previous.thumbnailUrl),
       localPath: _vetNonEmpty(localPath) ?? _vetNonEmpty(previous.localPath),
       status: status ?? previous.status,
       uploadProgress:
@@ -4741,6 +4820,7 @@ List<_VetAttachment>? _mergeVetAttachments(
     if (prior == null) return attachment;
     final next = attachment.withMediaFrom(prior);
     if (next.downloadUrl != attachment.downloadUrl ||
+        next.thumbnailUrl != attachment.thumbnailUrl ||
         next.localPath != attachment.localPath ||
         next.uploadProgress != attachment.uploadProgress) {
       changed = true;
@@ -4890,33 +4970,6 @@ String _formatRecordingElapsed(DateTime? startedAt) {
   final minutes = elapsed.inMinutes.remainder(60).toString().padLeft(2, '0');
   final seconds = elapsed.inSeconds.remainder(60).toString().padLeft(2, '0');
   return '$minutes:$seconds';
-}
-
-String _vetChatDateLabel(DateTime date) {
-  final now = DateTime.now();
-  final today = DateTime(now.year, now.month, now.day);
-  final day = DateTime(date.year, date.month, date.day);
-  final difference = today.difference(day).inDays;
-  if (difference == 0) return 'Hoy';
-  if (difference == 1) return 'Ayer';
-  const months = [
-    'ene',
-    'feb',
-    'mar',
-    'abr',
-    'may',
-    'jun',
-    'jul',
-    'ago',
-    'sep',
-    'oct',
-    'nov',
-    'dic',
-  ];
-  final month = months[(date.month - 1).clamp(0, 11)];
-  return date.year == now.year
-      ? '${date.day} $month'
-      : '${date.day} $month ${date.year}';
 }
 
 String _formatVetVoiceDuration(Duration duration) {

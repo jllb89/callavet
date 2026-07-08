@@ -271,6 +271,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     return trimmed == null || trimmed.isEmpty ? 'Jorge' : trimmed;
   }
 
+  void _traceMessageList(String event, Map<String, Object?> metadata) {
+    _aiChatLog('messages.$event $metadata total=${_messages.length}');
+  }
+
   bool get _showsHomeIntro => widget.sessionId == 'ai' && !_isConsultChatRoute;
 
   String? get _consultSessionId {
@@ -379,6 +383,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         }
         _consultClosed = _isClosedConsultStatus(status);
       });
+      _traceMessageList('load', {
+        'server': messages.length,
+        'outbox': outboxEntries.length,
+        'status': status,
+      });
       _markVisibleConsultMessagesRead();
       unawaited(_flushConsultOutbox(sessionId));
       if (_consultClosed) unawaited(_startSurveyPrompt());
@@ -482,6 +491,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             }
             if (!mounted) return;
             final wasTyping = _vetTyping;
+            if (wasTyping == typing && _lastVetTypingAt == eventAt) return;
             setState(() {
               _lastVetTypingAt = typing ? eventAt : null;
               _vetTyping = typing;
@@ -567,14 +577,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
     if (!drivesReconnect) return;
     if (!mounted || _disposing) return;
-    setState(() {
-      _consultRealtimeStatus = switch (status) {
-        RealtimeSubscribeStatus.channelError => 'reconectando chat...',
-        RealtimeSubscribeStatus.closed => 'chat sin conexión',
-        RealtimeSubscribeStatus.timedOut => 'reconectando chat...',
-        RealtimeSubscribeStatus.subscribed => null,
-      };
-    });
+    final nextStatus = switch (status) {
+      RealtimeSubscribeStatus.channelError => 'reconectando chat...',
+      RealtimeSubscribeStatus.closed => 'chat sin conexión',
+      RealtimeSubscribeStatus.timedOut => 'reconectando chat...',
+      RealtimeSubscribeStatus.subscribed => null,
+    };
+    if (_consultRealtimeStatus != nextStatus) {
+      setState(() => _consultRealtimeStatus = nextStatus);
+    }
     _emitConsultTelemetry('realtime_reconnect', metadata: {
       'status': status.name,
       'reconnectAttempt': _consultReconnectAttempts + 1,
@@ -600,8 +611,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           (presence) => presence.payload['role']?.toString() == 'vet',
         ));
     if (mounted) {
+      final shouldAnnounce = online && !_vetOnline && !_vetEnteredAnnounced;
+      if (!shouldAnnounce && _vetOnline == online) return;
       setState(() {
-        if (online && !_vetOnline && !_vetEnteredAnnounced) {
+        if (shouldAnnounce) {
           _messages.add(_ChatMessage.assistant(
             'El veterinario ha entrado al chat.',
             includeInHistory: false,
@@ -676,12 +689,18 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   void _scheduleConsultRefresh() {
+    _traceMessageList('refresh.schedule_catchup', {
+      'lastStreamOrder': _lastConsultStreamOrder,
+    });
     _consultRefreshDebounce?.cancel();
     _consultRefreshDebounce =
         Timer(const Duration(milliseconds: 350), _refreshConsultMessages);
   }
 
   void _scheduleConsultFullRefresh() {
+    _traceMessageList('refresh.schedule_full', {
+      'lastStreamOrder': _lastConsultStreamOrder,
+    });
     _consultRefreshDebounce?.cancel();
     _consultRefreshDebounce = Timer(
       const Duration(milliseconds: 350),
@@ -728,6 +747,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       for (final message in _messagesWithReceipts(messages, receipts)) {
         _upsertConsultMessage(message);
       }
+      _traceMessageList('catchup', {
+        'afterStreamOrder': afterStreamOrder,
+        'count': messages.length,
+      });
       String? firstIncoming;
       for (final message in messages) {
         if (!message.isUser) {
@@ -754,16 +777,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     } finally {
       _consultCatchUpInFlight = false;
     }
-  }
-
-  bool _shouldShowDateSeparator(_ChatMessage? previous, _ChatMessage current) {
-    final currentDate = current.createdAt;
-    if (currentDate == null) return false;
-    final previousDate = previous?.createdAt;
-    if (previousDate == null) return false;
-    return previousDate.year != currentDate.year ||
-        previousDate.month != currentDate.month ||
-        previousDate.day != currentDate.day;
   }
 
   void _stopConsultRealtime() {
@@ -821,6 +834,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _messages.sort(_inlineConsultSessionId == null
           ? _compareConsultMessages
           : _compareInlineMessages);
+    });
+    _traceMessageList(inserted ? 'upsert.insert' : 'upsert.replace', {
+      'id': message.id,
+      'clientKey': message.clientKey,
+      'streamOrder': message.streamOrder,
+      'attachments': message.attachments.length,
     });
     if (message.streamOrder != null && message.clientKey != null) {
       unawaited(_ConsultOutboxStore.remove(message.clientKey!));
@@ -886,6 +905,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (receipt['user_id']?.toString() == currentUserId) return;
     final messageId = receipt['message_id']?.toString() ?? '';
     if (messageId.isEmpty || !mounted) return;
+    var applied = false;
     setState(() {
       final index = _messages.indexWhere((message) => message.id == messageId);
       if (index < 0 || !_messages[index].isUser) return;
@@ -893,7 +913,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         deliveredByOther: receipt['delivered_at'] != null,
         readByOther: receipt['read_at'] != null,
       );
+      applied = true;
     });
+    if (applied) _traceMessageList('receipt.apply', {'messageId': messageId});
   }
 
   void _markVisibleConsultMessagesRead() {
@@ -1016,9 +1038,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       );
       if (message != null) {
         if (mounted) {
-          setState(() => _messages.removeWhere((candidate) =>
-              candidate.id == optimisticMessage.id ||
-              candidate.clientKey == clientKey));
+          setState(() {
+            _messages.removeWhere((candidate) =>
+                candidate.id == optimisticMessage.id ||
+                candidate.clientKey == clientKey);
+          });
+          _traceMessageList('optimistic.remove', {'clientKey': clientKey});
         }
         _upsertConsultMessage(_ChatMessage.consultFromJson(message));
       } else {
@@ -1789,7 +1814,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         !hasPrompt) {
       setState(() {
         _messages.add(_ChatMessage.assistant(
-          '¿Quieres calificar esta consulta ahora?',
+          'Tu consulta ha terminado, te agradecemos tu preferencia. ¿Quieres calificar tu consulta ahora?',
           includeInHistory: false,
           surveyAction: _SurveyAction.prompt(survey),
         ));
@@ -1852,7 +1877,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           _messages.add(_ChatMessage.assistant(
             answer == 'later'
                 ? 'Claro, te lo preguntaremos más tarde.'
-                : 'Listo, no volveremos a pedir esta encuesta para esta consulta.',
+                : '¡Gracias!',
             includeInHistory: false,
           ));
         });
@@ -2862,10 +2887,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         }
         final messageIndex = index - introCount;
         final message = _messages[messageIndex];
-        final previousMessage =
-            messageIndex > 0 ? _messages[messageIndex - 1] : null;
-        final showDateSeparator =
-            _shouldShowDateSeparator(previousMessage, message);
+        final nextMessage = messageIndex < _messages.length - 1
+            ? _messages[messageIndex + 1]
+            : null;
+        final showMessageLog = nextMessage == null ||
+            nextMessage.role != message.role ||
+            message.deliveryState == 'failed';
         final isFirstUserMessage = message.isUser &&
             !_messages.take(messageIndex).any((message) => message.isUser);
         final userTurnsBeforeOrAtMessage = _messages
@@ -2876,8 +2903,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           key: ValueKey('thread-${message.id}'),
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (showDateSeparator)
-              _ChatDateSeparator(date: message.createdAt ?? DateTime.now()),
             if (_unreadConsultMarkerMessageId == message.id)
               const _UnreadMessagesMarker(),
             _AnimatedMessageEntry(
@@ -2888,6 +2913,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 message: message,
                 vetName: _consultVetName,
                 sending: _isSending,
+                showMessageLog: showMessageLog,
                 canShowActions: userTurnsBeforeOrAtMessage >= 2,
                 onServiceSelected: _activateService,
                 onOneOffPurchaseSelected: _purchaseSingleSession,
@@ -3017,40 +3043,6 @@ class _MessageOpacityFade extends StatelessWidget {
         ).createShader(bounds);
       },
       child: child,
-    );
-  }
-}
-
-class _ChatDateSeparator extends StatelessWidget {
-  const _ChatDateSeparator({required this.date});
-
-  final DateTime date;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 14),
-      child: Center(
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.08),
-            borderRadius: BorderRadius.circular(999),
-            border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            child: Text(
-              _chatDateLabel(date),
-              style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.68),
-                fontSize: 11,
-                fontFamily: 'ABCDiatype',
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ),
-      ),
     );
   }
 }
@@ -3302,6 +3294,7 @@ class _MessageBubble extends StatelessWidget {
     required this.message,
     required this.vetName,
     required this.sending,
+    required this.showMessageLog,
     required this.canShowActions,
     required this.onServiceSelected,
     required this.onOneOffPurchaseSelected,
@@ -3317,6 +3310,7 @@ class _MessageBubble extends StatelessWidget {
   final _ChatMessage message;
   final String vetName;
   final bool sending;
+  final bool showMessageLog;
   final bool canShowActions;
   final void Function(String service, _AiChatTurnResult result)
       onServiceSelected;
@@ -3417,7 +3411,8 @@ class _MessageBubble extends StatelessWidget {
                       ),
                     ),
                   ),
-              if (message.consultLabel(vetName: vetName) != null) ...[
+              if (showMessageLog &&
+                  message.consultLabel(vetName: vetName) != null) ...[
                 const SizedBox(height: 4),
                 Text(
                   message.consultLabel(vetName: vetName)!,
@@ -3484,7 +3479,7 @@ class _MessageBubble extends StatelessWidget {
   }
 }
 
-class _ConsultAttachmentStrip extends StatelessWidget {
+class _ConsultAttachmentStrip extends StatefulWidget {
   const _ConsultAttachmentStrip({
     required this.attachments,
     required this.clientKey,
@@ -3501,26 +3496,112 @@ class _ConsultAttachmentStrip extends StatelessWidget {
       onRefreshAttachment;
 
   @override
+  State<_ConsultAttachmentStrip> createState() =>
+      _ConsultAttachmentStripState();
+}
+
+class _ConsultAttachmentStripState extends State<_ConsultAttachmentStrip> {
+  final _prewarmedImageUrls = <String>{};
+  final _readyImageUrls = <String>{};
+  Timer? _revealTimer;
+  bool _readyToReveal = true;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _syncImageReadiness();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ConsultAttachmentStrip oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _syncImageReadiness();
+  }
+
+  @override
+  void dispose() {
+    _revealTimer?.cancel();
+    super.dispose();
+  }
+
+  void _syncImageReadiness() {
+    final networkImageUrls = widget.attachments
+        .where((attachment) =>
+            attachment.kind == _ConsultAttachmentKind.image &&
+            attachment.localPath == null)
+        .map(_consultDisplayImageUrl)
+        .whereType<String>()
+        .where((url) => url.trim().isNotEmpty)
+        .toList(growable: false);
+    final shouldCoordinate = networkImageUrls.length > 1;
+    if (!shouldCoordinate) {
+      _revealTimer?.cancel();
+      if (!_readyToReveal) setState(() => _readyToReveal = true);
+    }
+    for (final url in networkImageUrls) {
+      if (!_prewarmedImageUrls.add(url)) continue;
+      unawaited(precacheImage(NetworkImage(url), context).then((_) {
+        _readyImageUrls.add(url);
+        if (mounted &&
+            networkImageUrls.every(_readyImageUrls.contains) &&
+            !_readyToReveal) {
+          setState(() => _readyToReveal = true);
+        }
+      }).catchError((_) {
+        _readyImageUrls.add(url);
+        if (mounted &&
+            networkImageUrls.every(_readyImageUrls.contains) &&
+            !_readyToReveal) {
+          setState(() => _readyToReveal = true);
+        }
+      }));
+    }
+    if (!shouldCoordinate) return;
+    if (networkImageUrls.every(_readyImageUrls.contains)) {
+      if (!_readyToReveal) setState(() => _readyToReveal = true);
+      return;
+    }
+    if (_readyToReveal) setState(() => _readyToReveal = false);
+    _revealTimer?.cancel();
+    _revealTimer = Timer(const Duration(milliseconds: 700), () {
+      if (mounted) setState(() => _readyToReveal = true);
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: attachments
-          .map((attachment) => Padding(
-                padding: EdgeInsets.only(
-                    bottom:
-                        flushSingleImage && attachments.length == 1 ? 0 : 6),
-                child: _ConsultAttachmentPreview(
-                  attachment: attachment,
-                  clientKey: clientKey,
-                  onCancelUpload: onCancelUpload,
-                  onRefreshAttachment: onRefreshAttachment,
-                  flushImage: flushSingleImage && attachments.length == 1,
-                ),
-              ))
-          .toList(growable: false),
+    return AnimatedOpacity(
+      opacity: _readyToReveal ? 1 : 0,
+      duration: const Duration(milliseconds: 160),
+      curve: Curves.easeOutCubic,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: widget.attachments
+            .map((attachment) => Padding(
+                  padding: EdgeInsets.only(
+                      bottom: widget.flushSingleImage &&
+                              widget.attachments.length == 1
+                          ? 0
+                          : 6),
+                  child: _ConsultAttachmentPreview(
+                    attachment: attachment,
+                    clientKey: widget.clientKey,
+                    onCancelUpload: widget.onCancelUpload,
+                    onRefreshAttachment: widget.onRefreshAttachment,
+                    flushImage: widget.flushSingleImage &&
+                        widget.attachments.length == 1,
+                  ),
+                ))
+            .toList(growable: false),
+      ),
     );
   }
+}
+
+String? _consultDisplayImageUrl(_ConsultAttachment attachment) {
+  return _nonEmpty(attachment.thumbnailUrl) ??
+      _nonEmpty(attachment.downloadUrl);
 }
 
 class _ConsultAttachmentPreview extends StatelessWidget {
@@ -3591,7 +3672,7 @@ class _ConsultAttachmentPreview extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final url = attachment.downloadUrl;
+    final displayUrl = _consultDisplayImageUrl(attachment);
     final localPath = attachment.localPath;
     final label = switch (attachment.kind) {
       _ConsultAttachmentKind.image => 'Imagen',
@@ -3599,11 +3680,12 @@ class _ConsultAttachmentPreview extends StatelessWidget {
       _ConsultAttachmentKind.voice => 'Nota de voz',
     };
     if (attachment.kind == _ConsultAttachmentKind.image &&
-        (url != null || localPath != null)) {
+        (displayUrl != null || localPath != null)) {
       final image = localPath != null
           ? Image.file(File(localPath),
               fit: BoxFit.cover, gaplessPlayback: true)
-          : Image.network(url!, fit: BoxFit.cover, gaplessPlayback: true);
+          : Image.network(displayUrl!,
+              fit: BoxFit.cover, gaplessPlayback: true);
       return GestureDetector(
         onTap: () => _openImage(context),
         child: ClipRRect(
@@ -3695,7 +3777,7 @@ class _AttachmentUploadOverlay extends StatelessWidget {
     return DecoratedBox(
       decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.42)),
       child: Align(
-        alignment: Alignment.bottomLeft,
+        alignment: Alignment.topLeft,
         child: Padding(
           padding: const EdgeInsets.all(12),
           child: Column(
@@ -3733,16 +3815,6 @@ class _AttachmentUploadOverlay extends StatelessWidget {
                           color: Colors.white, size: 18),
                     ),
                 ],
-              ),
-              const SizedBox(height: 7),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(99),
-                child: LinearProgressIndicator(
-                  value: progress <= 0 ? null : progress,
-                  minHeight: 4,
-                  backgroundColor: Colors.white.withValues(alpha: 0.22),
-                  valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
-                ),
               ),
             ],
           ),
@@ -5432,6 +5504,7 @@ class _ConsultAttachment {
     this.height,
     this.durationMs,
     this.downloadUrl,
+    this.thumbnailUrl,
     this.localPath,
     this.status,
     this.uploadProgress = 0,
@@ -5456,6 +5529,8 @@ class _ConsultAttachment {
       durationMs: _asInt(json['durationMs'] ?? json['duration_ms']),
       downloadUrl:
           json['downloadUrl']?.toString() ?? json['download_url']?.toString(),
+      thumbnailUrl:
+          json['thumbnailUrl']?.toString() ?? json['thumbnail_url']?.toString(),
       status: json['status']?.toString(),
       uploadProgress: _asDouble(json['uploadProgress']) ?? 0,
     );
@@ -5469,6 +5544,7 @@ class _ConsultAttachment {
   final int? height;
   final int? durationMs;
   final String? downloadUrl;
+  final String? thumbnailUrl;
   final String? localPath;
   final String? status;
   final double uploadProgress;
@@ -5488,6 +5564,7 @@ class _ConsultAttachment {
       height: height,
       durationMs: durationMs,
       downloadUrl: downloadUrl,
+      thumbnailUrl: thumbnailUrl,
       localPath: localPath,
       status: status ?? this.status,
       uploadProgress: uploadProgress ?? this.uploadProgress,
@@ -5504,6 +5581,7 @@ class _ConsultAttachment {
       height: height ?? previous.height,
       durationMs: durationMs ?? previous.durationMs,
       downloadUrl: _nonEmpty(downloadUrl) ?? _nonEmpty(previous.downloadUrl),
+      thumbnailUrl: _nonEmpty(thumbnailUrl) ?? _nonEmpty(previous.thumbnailUrl),
       localPath: _nonEmpty(localPath) ?? _nonEmpty(previous.localPath),
       status: status ?? previous.status,
       uploadProgress:
@@ -5688,6 +5766,7 @@ List<_ConsultAttachment>? _mergeConsultAttachments(
     final next = attachment.withMediaFrom(prior);
     if (!identical(next, attachment) &&
         (next.downloadUrl != attachment.downloadUrl ||
+            next.thumbnailUrl != attachment.thumbnailUrl ||
             next.localPath != attachment.localPath ||
             next.uploadProgress != attachment.uploadProgress)) {
       changed = true;
@@ -6444,33 +6523,6 @@ String _formatRecordingElapsed(DateTime? startedAt) {
   final minutes = elapsed.inMinutes.remainder(60).toString().padLeft(2, '0');
   final seconds = elapsed.inSeconds.remainder(60).toString().padLeft(2, '0');
   return '$minutes:$seconds';
-}
-
-String _chatDateLabel(DateTime date) {
-  final now = DateTime.now();
-  final today = DateTime(now.year, now.month, now.day);
-  final day = DateTime(date.year, date.month, date.day);
-  final difference = today.difference(day).inDays;
-  if (difference == 0) return 'Hoy';
-  if (difference == 1) return 'Ayer';
-  const months = [
-    'ene',
-    'feb',
-    'mar',
-    'abr',
-    'may',
-    'jun',
-    'jul',
-    'ago',
-    'sep',
-    'oct',
-    'nov',
-    'dic',
-  ];
-  final month = months[(date.month - 1).clamp(0, 11)];
-  return date.year == now.year
-      ? '${date.day} $month'
-      : '${date.day} $month ${date.year}';
 }
 
 DateTime? _parseDateTime(Object? value) {
