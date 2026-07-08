@@ -2145,7 +2145,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _sendUserMessage(String text) async {
+  Future<void> _sendUserMessage(String text,
+      {Map<String, dynamic>? metadata}) async {
     if (_isSending) {
       _aiChatLog(
           'sendUserMessage ignored while sending preview="${_preview(text)}"');
@@ -2157,7 +2158,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       'historyCount=${history.length} visibleMessages=${_messages.length}',
     );
     setState(() {
-      _messages.add(_ChatMessage.user(text));
+      _messages.add(_ChatMessage.user(text, metadata: metadata));
       _isSending = true;
     });
     _aiChatLog(
@@ -2165,7 +2166,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _scrollToBottom();
 
     try {
-      final response = await _runAiTurn(text, history);
+      final response = await _runAiTurn(text, history, metadata: metadata);
       _aiChatLog(
           'sendUserMessage raw response keys=${response.keys.join(',')}');
       final result = _AiChatTurnResult.fromJson(response);
@@ -2200,6 +2201,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Future<Map<String, dynamic>> _runAiTurn(
     String message,
     List<Map<String, dynamic>> history,
+    {Map<String, dynamic>? metadata}
   ) async {
     final token = Supabase.instance.client.auth.currentSession?.accessToken;
     final userId = Supabase.instance.client.auth.currentUser?.id;
@@ -2218,6 +2220,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       'conversationId': _conversationId,
       'message': message,
       'messages': history,
+      if (metadata != null && metadata.isNotEmpty) 'messageMetadata': metadata,
       if (sessionId != null) 'sessionId': sessionId,
       if (_aiChatDryRun) 'dryRun': true,
     };
@@ -2283,6 +2286,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           (message) => {
             'role': message.isUser ? 'user' : 'assistant',
             'content': message.text,
+            if (message.metadata != null && message.metadata!.isNotEmpty)
+              'metadata': message.metadata,
             if (!message.isUser && message.result != null)
               'metadata': message.result!.payload.historyMetadata,
           },
@@ -2469,7 +2474,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _AiSchedulingOption option, _AiChatTurnResult result) async {
     if (_isSending) return;
     if (!option.isSlot) {
-      _sendUserMessage(option.label);
+      _sendUserMessage(option.label,
+          metadata: option.selectionMetadata(result.payload));
       return;
     }
     final startsAt = option.start?.trim();
@@ -6016,6 +6022,7 @@ class _ChatMessage {
     this.result,
     this.rejoinSessionId,
     this.surveyAction,
+    this.metadata,
     this.includeInHistory = true,
     this.attachments = const [],
     this.deliveryState,
@@ -6026,6 +6033,7 @@ class _ChatMessage {
     String? id,
     String? clientKey,
     String? deliveryState,
+    Map<String, dynamic>? metadata,
     bool includeInHistory = true,
     List<_ConsultAttachment> attachments = const [],
   }) {
@@ -6035,6 +6043,7 @@ class _ChatMessage {
       text: text,
       clientKey: clientKey,
       deliveryState: deliveryState,
+      metadata: metadata,
       includeInHistory: includeInHistory,
       attachments: attachments,
     );
@@ -6094,6 +6103,7 @@ class _ChatMessage {
   final _AiChatTurnResult? result;
   final String? rejoinSessionId;
   final _SurveyAction? surveyAction;
+  final Map<String, dynamic>? metadata;
   final bool includeInHistory;
   final List<_ConsultAttachment> attachments;
   final String? deliveryState;
@@ -6149,6 +6159,7 @@ class _ChatMessage {
       result: result,
       rejoinSessionId: rejoinSessionId,
       surveyAction: surveyAction,
+      metadata: metadata,
       includeInHistory: includeInHistory,
       attachments: attachments ?? this.attachments,
       deliveryState: deliveryState ?? this.deliveryState,
@@ -6722,6 +6733,7 @@ class _AiSchedulingOption {
   const _AiSchedulingOption({
     required this.label,
     required this.value,
+    this.stage,
     this.start,
     this.end,
     this.mode,
@@ -6731,6 +6743,7 @@ class _AiSchedulingOption {
     return _AiSchedulingOption(
       label: json['label']?.toString() ?? '',
       value: json['value']?.toString() ?? '',
+      stage: json['stage']?.toString(),
       start: json['start']?.toString(),
       end: json['end']?.toString(),
       mode: json['mode']?.toString(),
@@ -6739,15 +6752,31 @@ class _AiSchedulingOption {
 
   final String label;
   final String value;
+  final String? stage;
   final String? start;
   final String? end;
   final String? mode;
 
   bool get isSlot => start != null && start!.trim().isNotEmpty;
 
+  Map<String, dynamic> selectionMetadata(_AiChatPayload payload) => {
+        'schedulingStage': stage ?? payload.schedulingStage,
+        'schedulingMode': mode ?? payload.schedulingMode,
+        if (stage == 'date_range') 'schedulingRange': value,
+        if (stage == 'day') 'schedulingDay': value,
+        if (stage == 'daypart') 'schedulingDaypart': value,
+        if (stage != 'date_range' && payload.schedulingRange != null)
+          'schedulingRange': payload.schedulingRange,
+        if (stage != 'day' && payload.schedulingDay != null)
+          'schedulingDay': payload.schedulingDay,
+        if (stage != 'daypart' && payload.schedulingDaypart != null)
+          'schedulingDaypart': payload.schedulingDaypart,
+      };
+
   Map<String, dynamic> toJson() => {
         'label': label,
         'value': value,
+        if (stage != null) 'stage': stage,
         if (start != null) 'start': start,
         if (end != null) 'end': end,
         if (mode != null) 'mode': mode,
@@ -6773,6 +6802,7 @@ class _AiChatPayload {
     this.schedulingStage,
     this.schedulingMode,
     this.schedulingRange,
+    this.schedulingDay,
     this.schedulingDaypart,
   });
 
@@ -6813,6 +6843,7 @@ class _AiChatPayload {
       schedulingStage: json['schedulingStage']?.toString(),
       schedulingMode: json['schedulingMode']?.toString(),
       schedulingRange: json['schedulingRange']?.toString(),
+      schedulingDay: json['schedulingDay']?.toString(),
       schedulingDaypart: json['schedulingDaypart']?.toString(),
     );
   }
@@ -6834,6 +6865,7 @@ class _AiChatPayload {
   final String? schedulingStage;
   final String? schedulingMode;
   final String? schedulingRange;
+  final String? schedulingDay;
   final String? schedulingDaypart;
 
   bool get hasDisplayBlocks => formatVersion == 1 && displayBlocks.isNotEmpty;
@@ -6861,6 +6893,7 @@ class _AiChatPayload {
         if (schedulingStage != null) 'schedulingStage': schedulingStage,
         if (schedulingMode != null) 'schedulingMode': schedulingMode,
         if (schedulingRange != null) 'schedulingRange': schedulingRange,
+        if (schedulingDay != null) 'schedulingDay': schedulingDay,
         if (schedulingDaypart != null) 'schedulingDaypart': schedulingDaypart,
         if (schedulingOptions.isNotEmpty)
           'schedulingOptions': schedulingOptions
