@@ -62,6 +62,7 @@ class _VetDashboardScreenState extends State<VetDashboardScreen>
   String? _dashboardBroadcastTopic;
   Timer? _dashboardRefreshDebounce;
   late Future<_VetProfileBundle> _profileBundleFuture;
+  DateTime _selectedAppointmentDay = _startOfLocalDay(DateTime.now());
   bool _dashboardVisible = false;
   PageRoute<dynamic>? _route;
 
@@ -519,6 +520,9 @@ class _VetDashboardScreenState extends State<VetDashboardScreen>
             onOpenChat: _openChat,
             onEndConsult: _endActiveConsult,
             endingConsultIds: _endingConsultIds,
+            selectedAppointmentDay: _selectedAppointmentDay,
+            onAppointmentDaySelected: (day) => setState(
+                () => _selectedAppointmentDay = day),
           );
 
     return Scaffold(
@@ -709,6 +713,8 @@ class _DashboardPage extends StatelessWidget {
     required this.onOpenChat,
     required this.onEndConsult,
     required this.endingConsultIds,
+    required this.selectedAppointmentDay,
+    required this.onAppointmentDaySelected,
   });
 
   final bool availableNow;
@@ -722,56 +728,75 @@ class _DashboardPage extends StatelessWidget {
   final ValueChanged<String> onOpenChat;
   final ValueChanged<_ActiveConsult> onEndConsult;
   final Set<String> endingConsultIds;
+  final DateTime selectedAppointmentDay;
+  final ValueChanged<DateTime> onAppointmentDaySelected;
 
   @override
   Widget build(BuildContext context) {
     final isPrompt = assistantPhase == _VetAssistantPhase.prompt;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Expanded(
-          child: CustomScrollView(
-            slivers: [
-              SliverToBoxAdapter(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    AnimatedContainer(
-                      duration: const Duration(milliseconds: 560),
-                      curve: Curves.easeOutCubic,
-                      height: isPrompt ? 24 : 96,
+    return FutureBuilder<_VetProfileBundle>(
+      future: profileBundleFuture,
+      builder: (context, snapshot) {
+        final bundle = snapshot.data;
+        if (bundle == null) return const SizedBox.expand();
+        final firstName = _firstNameFrom(bundle.profile.fullName);
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: CustomScrollView(
+                slivers: [
+                  SliverToBoxAdapter(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        AnimatedContainer(
+                          duration: const Duration(milliseconds: 560),
+                          curve: Curves.easeOutCubic,
+                          height: isPrompt ? 24 : 96,
+                        ),
+                        Text(
+                          firstName == null ? '¡Hola!' : '¡Hola, $firstName!',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 20,
+                            fontFamily: 'ABC Diatype',
+                            fontWeight: FontWeight.w400,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        _DashboardAssistantHeading(isPrompt: isPrompt),
+                        if (!isPrompt) ...[
+                          const SizedBox(height: 30),
+                          const _BoltMark(),
+                          const SizedBox(height: 42),
+                          _ActivitySections(
+                            availableNow: availableNow,
+                            bundle: bundle,
+                            selectedAppointmentDay: selectedAppointmentDay,
+                            onAppointmentDaySelected: onAppointmentDaySelected,
+                            onJoinVideo: onJoinVideo,
+                            onOpenChat: onOpenChat,
+                            onEndConsult: onEndConsult,
+                            endingConsultIds: endingConsultIds,
+                          ),
+                        ],
+                      ],
                     ),
-                    _DashboardGreeting(
-                        profileBundleFuture: profileBundleFuture),
-                    const SizedBox(height: 6),
-                    _DashboardAssistantHeading(isPrompt: isPrompt),
-                    if (!isPrompt) ...[
-                      const SizedBox(height: 30),
-                      const _BoltMark(),
-                      const SizedBox(height: 42),
-                      _ActivitySections(
-                        availableNow: availableNow,
-                        profileBundleFuture: profileBundleFuture,
-                        onJoinVideo: onJoinVideo,
-                        onOpenChat: onOpenChat,
-                        onEndConsult: onEndConsult,
-                        endingConsultIds: endingConsultIds,
-                      ),
-                    ],
-                  ],
-                ),
+                  ),
+                ],
               ),
-            ],
-          ),
-        ),
-        _VetAssistantComposer(
-          controller: assistantController,
-          focusNode: assistantFocusNode,
-          isPrompt: isPrompt,
-          onTap: onAssistantTap,
-          onSend: onAssistantSend,
-        ),
-      ],
+            ),
+            _VetAssistantComposer(
+              controller: assistantController,
+              focusNode: assistantFocusNode,
+              isPrompt: isPrompt,
+              onTap: onAssistantTap,
+              onSend: onAssistantSend,
+            ),
+          ],
+        );
+      },
     );
   }
 }
@@ -831,31 +856,6 @@ class _DashboardAssistantHeading extends StatelessWidget {
   }
 }
 
-class _DashboardGreeting extends StatelessWidget {
-  const _DashboardGreeting({required this.profileBundleFuture});
-
-  final Future<_VetProfileBundle> profileBundleFuture;
-
-  @override
-  Widget build(BuildContext context) {
-    return FutureBuilder<_VetProfileBundle>(
-      future: profileBundleFuture,
-      builder: (context, snapshot) {
-        final firstName = _firstNameFrom(snapshot.data?.profile.fullName);
-        return Text(
-          firstName == null ? '¡Hola!' : '¡Hola, $firstName!',
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 20,
-            fontFamily: 'ABC Diatype',
-            fontWeight: FontWeight.w400,
-          ),
-        );
-      },
-    );
-  }
-}
-
 class _BoltMark extends StatelessWidget {
   const _BoltMark();
 
@@ -876,7 +876,9 @@ class _BoltMark extends StatelessWidget {
 class _ActivitySections extends StatelessWidget {
   const _ActivitySections({
     required this.availableNow,
-    required this.profileBundleFuture,
+    required this.bundle,
+    required this.selectedAppointmentDay,
+    required this.onAppointmentDaySelected,
     required this.onJoinVideo,
     required this.onOpenChat,
     required this.onEndConsult,
@@ -884,7 +886,9 @@ class _ActivitySections extends StatelessWidget {
   });
 
   final bool availableNow;
-  final Future<_VetProfileBundle> profileBundleFuture;
+  final _VetProfileBundle bundle;
+  final DateTime selectedAppointmentDay;
+  final ValueChanged<DateTime> onAppointmentDaySelected;
   final ValueChanged<_VideoJoinTarget> onJoinVideo;
   final ValueChanged<String> onOpenChat;
   final ValueChanged<_ActiveConsult> onEndConsult;
@@ -892,79 +896,56 @@ class _ActivitySections extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<_VetProfileBundle>(
-      future: profileBundleFuture,
-      builder: (context, snapshot) {
-        final queue = snapshot.data?.queue;
-        final activeConsults =
-            queue?.activeConsults ?? const <_ActiveConsult>[];
-        final upcomingAppointments =
-            queue?.upcomingAppointments ?? const <_UpcomingAppointment>[];
-        final isLoading = snapshot.connectionState == ConnectionState.waiting;
-        if (isLoading && snapshot.data == null) {
-          return const SizedBox.shrink();
-        }
+    final activeConsults = bundle.queue.activeConsults;
+    final upcomingAppointments = bundle.queue.upcomingAppointments;
+    final filteredAppointments = upcomingAppointments
+        .where((appointment) => appointment.startsOn(selectedAppointmentDay))
+        .toList(growable: false);
+    final hasJoinableVideo =
+        activeConsults.any((consult) => consult.canJoinVideo);
+    if (activeConsults.isEmpty && upcomingAppointments.isEmpty) {
+      return const SizedBox.shrink();
+    }
 
-        final hasJoinableVideo =
-            activeConsults.any((consult) => consult.canJoinVideo);
-        if (!isLoading &&
-            activeConsults.isEmpty &&
-            upcomingAppointments.isEmpty) {
-          return const SizedBox.shrink();
-        }
+    final children = <Widget>[];
+    if (activeConsults.isNotEmpty) {
+      children.addAll([
+        _ActiveConsultsTitle(
+          label: availableNow ? 'consultas activas:' : 'fuera de guardia:',
+          live: availableNow && hasJoinableVideo,
+        ),
+        const SizedBox(height: 24),
+        _ActiveConsultEventList(
+          consults: activeConsults,
+          onJoinVideo: onJoinVideo,
+          onOpenChat: onOpenChat,
+          onEndConsult: onEndConsult,
+          endingConsultIds: endingConsultIds,
+        ),
+      ]);
+    }
 
-        final children = <Widget>[];
-        if (isLoading || activeConsults.isNotEmpty) {
-          children.addAll([
-            _ActiveConsultsTitle(
-              label: availableNow ? 'consultas activas:' : 'fuera de guardia:',
-              live: availableNow && hasJoinableVideo,
-            ),
-            const SizedBox(height: 24),
-            if (isLoading)
-              const _LoadingTag()
-            else
-              _ActiveConsultEventList(
-                consults: activeConsults,
-                onJoinVideo: onJoinVideo,
-                onOpenChat: onOpenChat,
-                onEndConsult: onEndConsult,
-                endingConsultIds: endingConsultIds,
-              ),
-          ]);
-        }
+    if (upcomingAppointments.isNotEmpty) {
+      if (children.isNotEmpty) {
+        children.add(const SizedBox(height: 46));
+      }
+      children.addAll([
+        _WeekdaySelector(
+          selectedDay: selectedAppointmentDay,
+          onSelected: onAppointmentDaySelected,
+        ),
+        const SizedBox(height: 18),
+        _UpcomingAppointmentsList(
+          appointments: filteredAppointments,
+          onJoinVideo: onJoinVideo,
+          onOpenChat: onOpenChat,
+        ),
+      ]);
+    }
 
-        if (isLoading || upcomingAppointments.isNotEmpty) {
-          if (children.isNotEmpty) {
-            children.add(const SizedBox(height: 46));
-          }
-          children.addAll([
-            const Text(
-              'próximas consultas:',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 16,
-                fontFamily: 'ABC Diatype',
-                fontWeight: FontWeight.w400,
-              ),
-            ),
-            const SizedBox(height: 28),
-            if (isLoading)
-              const _LoadingTag()
-            else
-              _UpcomingAppointmentsList(
-                appointments: upcomingAppointments,
-                onJoinVideo: onJoinVideo,
-                onOpenChat: onOpenChat,
-              ),
-          ]);
-        }
-
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: children,
-        );
-      },
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: children,
     );
   }
 }
@@ -1341,18 +1322,7 @@ class _UpcomingAppointmentsList extends StatelessWidget {
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          'hoy:',
-          style: TextStyle(
-            color: Colors.white,
-            fontSize: 12,
-            fontFamily: 'ABC Diatype',
-            fontWeight: FontWeight.w400,
-          ),
-        ),
-        const SizedBox(height: 10),
-        ...appointments.take(3).map((appointment) {
+      children: appointments.map((appointment) {
           return Padding(
             padding: const EdgeInsets.only(bottom: 10),
             child: SingleChildScrollView(
@@ -1370,8 +1340,53 @@ class _UpcomingAppointmentsList extends StatelessWidget {
               ),
             ),
           );
-        }),
-      ],
+        }).toList(growable: false),
+    );
+  }
+}
+
+class _WeekdaySelector extends StatelessWidget {
+  const _WeekdaySelector({required this.selectedDay, required this.onSelected});
+
+  final DateTime selectedDay;
+  final ValueChanged<DateTime> onSelected;
+
+  static const _labels = ['D', 'L', 'M', 'M', 'J', 'V', 'S'];
+
+  @override
+  Widget build(BuildContext context) {
+    final today = _startOfLocalDay(DateTime.now());
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: List.generate(7, (index) {
+        final day = today.add(Duration(days: index));
+        final selected = _isSameLocalDay(day, selectedDay);
+        return Padding(
+          padding: const EdgeInsets.only(right: 12),
+          child: GestureDetector(
+            onTap: () => onSelected(day),
+            behavior: HitTestBehavior.opaque,
+            child: Container(
+              width: 28,
+              height: 28,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: selected ? Colors.white : Colors.transparent,
+                shape: BoxShape.circle,
+              ),
+              child: Text(
+                _labels[day.weekday % 7],
+                style: TextStyle(
+                  color: selected ? Colors.black : Colors.white,
+                  fontSize: 13,
+                  fontFamily: 'ABC Diatype',
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          ),
+        );
+      }),
     );
   }
 }
@@ -1447,22 +1462,6 @@ class _RoundConsultIconButton extends StatelessWidget {
           shape: BoxShape.circle,
         ),
         child: Icon(icon, color: Colors.black, size: 18),
-      ),
-    );
-  }
-}
-
-class _LoadingTag extends StatelessWidget {
-  const _LoadingTag();
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 92,
-      height: 30,
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.06),
-        borderRadius: BorderRadius.circular(40),
       ),
     );
   }
@@ -2760,7 +2759,11 @@ class _UpcomingAppointment {
 
   String get formattedStart => startsAt == null
       ? 'hora por confirmar'
-      : _formatAppointmentDate(startsAt!);
+      : _formatAppointmentTime(startsAt!);
+  bool startsOn(DateTime day) {
+    final start = startsAt;
+    return start != null && _isSameLocalDay(start, day);
+  }
   bool get canJoinVideo => mode == 'video' && sessionId.trim().isNotEmpty;
   bool get canOpenChat => mode == 'chat' && sessionId.trim().isNotEmpty;
   _VideoJoinTarget get videoJoinTarget => _VideoJoinTarget(
@@ -3023,13 +3026,19 @@ DateTime? _parseDateTime(Object? value) {
   return DateTime.tryParse(value.toString())?.toLocal();
 }
 
-String _formatAppointmentDate(DateTime value) {
-  final day = value.day.toString().padLeft(2, '0');
-  final month = value.month.toString().padLeft(2, '0');
+String _formatAppointmentTime(DateTime value) {
   final hour = value.hour.toString().padLeft(2, '0');
   final minute = value.minute.toString().padLeft(2, '0');
-  return '$day/$month/${value.year}  $hour:${minute}hrs';
+  return '$hour:$minute';
 }
+
+DateTime _startOfLocalDay(DateTime value) =>
+    DateTime(value.year, value.month, value.day);
+
+bool _isSameLocalDay(DateTime left, DateTime right) =>
+    left.year == right.year &&
+    left.month == right.month &&
+    left.day == right.day;
 
 String _formatShortDateTime(DateTime value) {
   final day = value.day.toString().padLeft(2, '0');

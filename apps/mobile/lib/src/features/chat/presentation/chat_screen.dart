@@ -4976,7 +4976,7 @@ class _ServiceButton extends StatelessWidget {
         onTap: enabled ? onTap : null,
         behavior: HitTestBehavior.opaque,
         child: ConstrainedBox(
-          constraints: const BoxConstraints(minWidth: 44),
+          constraints: const BoxConstraints(minWidth: 40),
           child: AnimatedOpacity(
             duration: const Duration(milliseconds: 160),
             opacity: enabled ? 1 : 0.45,
@@ -4986,9 +4986,9 @@ class _ServiceButton extends StatelessWidget {
                 borderRadius: BorderRadius.circular(30),
               ),
               child: SizedBox(
-                height: 44,
+                height: 40,
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 13),
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
                   child: Align(
                     alignment: Alignment.center,
                     widthFactor: 1,
@@ -4996,7 +4996,7 @@ class _ServiceButton extends StatelessWidget {
                       label,
                       style: const TextStyle(
                         color: Colors.black,
-                        fontSize: 12,
+                        fontSize: 11.5,
                         fontWeight: FontWeight.w500,
                         height: 1,
                       ),

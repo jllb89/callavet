@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
@@ -71,6 +72,8 @@ class _HomeV2ScreenState extends State<HomeV2Screen>
   bool _activeConsultsLoaded = false;
   bool _appointmentsLoaded = false;
   bool _pendingSurveyLoaded = false;
+  bool _calendarActive = false;
+  DateTime _selectedAgendaDay = _startOfLocalDay(DateTime.now());
   PageRoute<dynamic>? _route;
 
   @override
@@ -339,8 +342,8 @@ class _HomeV2ScreenState extends State<HomeV2Screen>
     }
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
     try {
-      final request = await client
-          .getUrl(Uri.parse('${Environment.apiBaseUrl}/appointments?limit=20'));
+        final request = await client
+          .getUrl(Uri.parse('${Environment.apiBaseUrl}/appointments?limit=50'));
       request.headers.set(HttpHeaders.acceptHeader, 'application/json');
       request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
       final response =
@@ -363,7 +366,7 @@ class _HomeV2ScreenState extends State<HomeV2Screen>
       setState(() {
         _upcomingAppointments
           ..clear()
-          ..addAll(upcoming.take(3));
+          ..addAll(upcoming);
         _appointmentsLoaded = true;
       });
       _homeAiLog(
@@ -406,6 +409,51 @@ class _HomeV2ScreenState extends State<HomeV2Screen>
     } finally {
       client.close(force: true);
     }
+  }
+
+  Future<void> _cancelAppointment(_UpcomingAppointment appointment) async {
+    final token = Supabase.instance.client.auth.currentSession?.accessToken;
+    if (token == null || token.isEmpty || appointment.id.isEmpty) return;
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    try {
+      final request = await client.patchUrl(
+          Uri.parse('${Environment.apiBaseUrl}/appointments/${appointment.id}'));
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+      request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+      request.write(jsonEncode({'status': 'canceled'}));
+      final response =
+          await request.close().timeout(const Duration(seconds: 20));
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        await _loadUpcomingAppointments();
+      }
+    } catch (error) {
+      _homeAiLog('appointment cancel failed: $error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  void _showAppointmentActions(_UpcomingAppointment appointment) {
+    showCupertinoModalPopup<void>(
+      context: context,
+      builder: (sheetContext) => CupertinoActionSheet(
+        actions: [
+          CupertinoActionSheetAction(
+            isDestructiveAction: true,
+            onPressed: () {
+              Navigator.of(sheetContext).pop();
+              unawaited(_cancelAppointment(appointment));
+            },
+            child: const Text('Cancelar consulta'),
+          ),
+        ],
+        cancelButton: CupertinoActionSheetAction(
+          onPressed: () => Navigator.of(sheetContext).pop(),
+          child: const Text('Cerrar'),
+        ),
+      ),
+    );
   }
 
   Future<void> _loadFirstName() async {
@@ -598,6 +646,14 @@ class _HomeV2ScreenState extends State<HomeV2Screen>
                               activeConsultsLoaded: _activeConsultsLoaded,
                               upcomingAppointments: _upcomingAppointments,
                               appointmentsLoaded: _appointmentsLoaded,
+                              calendarActive: _calendarActive,
+                              selectedAgendaDay: _selectedAgendaDay,
+                              onAiModeSelected: () =>
+                                  setState(() => _calendarActive = false),
+                              onCalendarModeSelected: () =>
+                                  setState(() => _calendarActive = true),
+                              onAgendaDaySelected: (day) => setState(
+                                  () => _selectedAgendaDay = day),
                               onSurveyNow: (survey) =>
                                   _answerPendingSurvey(survey, 'now'),
                               onSurveyLater: (survey) =>
@@ -622,6 +678,7 @@ class _HomeV2ScreenState extends State<HomeV2Screen>
                                       '/chat/${Uri.encodeComponent(appointment.sessionId)}');
                                 }
                               },
+                              onAppointmentMore: _showAppointmentActions,
                             ),
                     ),
                   ),
@@ -774,11 +831,23 @@ class _UpcomingAppointment {
 
   bool get canOpenVideo => mode == 'video' && sessionId.isNotEmpty;
   bool get canOpenChat => mode == 'chat' && sessionId.isNotEmpty;
+  bool startsOn(DateTime day) {
+    final start = startsAt;
+    return start != null && _isSameLocalDay(start, day);
+  }
 
   String get formattedStart => startsAt == null
       ? 'hora por confirmar'
-      : '${startsAt!.day.toString().padLeft(2, '0')}/${startsAt!.month.toString().padLeft(2, '0')} ${startsAt!.hour.toString().padLeft(2, '0')}:${startsAt!.minute.toString().padLeft(2, '0')}';
+      : '${startsAt!.hour.toString().padLeft(2, '0')}:${startsAt!.minute.toString().padLeft(2, '0')}';
 }
+
+DateTime _startOfLocalDay(DateTime value) =>
+    DateTime(value.year, value.month, value.day);
+
+bool _isSameLocalDay(DateTime left, DateTime right) =>
+    left.year == right.year &&
+    left.month == right.month &&
+    left.day == right.day;
 
 Map<String, dynamic>? _asMap(Object? value) {
   return value is Map
@@ -915,11 +984,17 @@ class _HomeDefaultSection extends StatelessWidget {
     required this.activeConsultsLoaded,
     required this.upcomingAppointments,
     required this.appointmentsLoaded,
+    required this.calendarActive,
+    required this.selectedAgendaDay,
+    required this.onAiModeSelected,
+    required this.onCalendarModeSelected,
+    required this.onAgendaDaySelected,
     required this.onSurveyNow,
     required this.onSurveyLater,
     required this.onSurveyDismiss,
     required this.onConsultSelected,
     required this.onAppointmentSelected,
+    required this.onAppointmentMore,
   });
 
   final bool visible;
@@ -929,18 +1004,27 @@ class _HomeDefaultSection extends StatelessWidget {
   final bool activeConsultsLoaded;
   final List<_UpcomingAppointment> upcomingAppointments;
   final bool appointmentsLoaded;
+  final bool calendarActive;
+  final DateTime selectedAgendaDay;
+  final VoidCallback onAiModeSelected;
+  final VoidCallback onCalendarModeSelected;
+  final ValueChanged<DateTime> onAgendaDaySelected;
   final ValueChanged<_PendingSurvey> onSurveyNow;
   final ValueChanged<_PendingSurvey> onSurveyLater;
   final ValueChanged<_PendingSurvey> onSurveyDismiss;
   final ValueChanged<_ActiveConsult> onConsultSelected;
   final ValueChanged<_UpcomingAppointment> onAppointmentSelected;
+  final ValueChanged<_UpcomingAppointment> onAppointmentMore;
 
   @override
   Widget build(BuildContext context) {
     final showPendingSurvey = pendingSurveyLoaded && pendingSurvey != null;
     final showActiveConsults =
         activeConsultsLoaded && activeConsults.isNotEmpty;
-    final showAgenda = appointmentsLoaded && upcomingAppointments.isNotEmpty;
+    final showAgenda = calendarActive && appointmentsLoaded;
+    final selectedAppointments = upcomingAppointments
+      .where((appointment) => appointment.startsOn(selectedAgendaDay))
+      .toList(growable: false);
 
     return AnimatedOpacity(
       duration: const Duration(milliseconds: 220),
@@ -949,7 +1033,11 @@ class _HomeDefaultSection extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const _AiShortcut(),
+          _HomeModeShortcuts(
+            calendarActive: calendarActive,
+            onAiSelected: onAiModeSelected,
+            onCalendarSelected: onCalendarModeSelected,
+          ),
           if (showPendingSurvey) ...[
             const SizedBox(height: 34),
             _PendingSurveyCard(
@@ -978,19 +1066,15 @@ class _HomeDefaultSection extends StatelessWidget {
           ],
           if (showAgenda) ...[
             const SizedBox(height: 38),
-            const Text(
-              'agenda:',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 16,
-                fontFamily: 'ABCDiatype',
-                fontWeight: FontWeight.w400,
-              ),
+            _WeekdaySelector(
+              selectedDay: selectedAgendaDay,
+              onSelected: onAgendaDaySelected,
             ),
             const SizedBox(height: 18),
             _UpcomingAgendaStrip(
-              appointments: upcomingAppointments,
+              appointments: selectedAppointments,
               onSelected: onAppointmentSelected,
+              onMore: onAppointmentMore,
             ),
           ],
         ],
@@ -1175,21 +1259,24 @@ class _UpcomingAgendaStrip extends StatelessWidget {
   const _UpcomingAgendaStrip({
     required this.appointments,
     required this.onSelected,
+    required this.onMore,
   });
 
   final List<_UpcomingAppointment> appointments;
   final ValueChanged<_UpcomingAppointment> onSelected;
+  final ValueChanged<_UpcomingAppointment> onMore;
 
   @override
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
-      children: appointments.take(3).map((appointment) {
+      children: appointments.map((appointment) {
         return Padding(
           padding: const EdgeInsets.only(bottom: 10),
           child: _UpcomingAgendaPill(
             appointment: appointment,
             onTap: () => onSelected(appointment),
+            onMore: () => onMore(appointment),
           ),
         );
       }).toList(growable: false),
@@ -1198,10 +1285,15 @@ class _UpcomingAgendaStrip extends StatelessWidget {
 }
 
 class _UpcomingAgendaPill extends StatelessWidget {
-  const _UpcomingAgendaPill({required this.appointment, required this.onTap});
+  const _UpcomingAgendaPill({
+    required this.appointment,
+    required this.onTap,
+    required this.onMore,
+  });
 
   final _UpcomingAppointment appointment;
   final VoidCallback onTap;
+  final VoidCallback onMore;
 
   @override
   Widget build(BuildContext context) {
@@ -1250,6 +1342,26 @@ class _UpcomingAgendaPill extends StatelessWidget {
                 fontWeight: FontWeight.w300,
               ),
             ),
+            const SizedBox(width: 12),
+            GestureDetector(
+              onTap: onMore,
+              behavior: HitTestBehavior.opaque,
+              child: SizedBox(
+                width: 28,
+                height: 34,
+                child: Center(
+                  child: SvgPicture.asset(
+                    'assets/icons/more-horizontal.svg',
+                    width: 18,
+                    height: 18,
+                    colorFilter: const ColorFilter.mode(
+                      Colors.white,
+                      BlendMode.srcIn,
+                    ),
+                  ),
+                ),
+              ),
+            ),
           ],
         ),
       ),
@@ -1276,15 +1388,109 @@ class _AgendaActionIcon extends StatelessWidget {
   }
 }
 
-class _AiShortcut extends StatelessWidget {
-  const _AiShortcut();
+class _HomeModeShortcuts extends StatelessWidget {
+  const _HomeModeShortcuts({
+    required this.calendarActive,
+    required this.onAiSelected,
+    required this.onCalendarSelected,
+  });
+
+  final bool calendarActive;
+  final VoidCallback onAiSelected;
+  final VoidCallback onCalendarSelected;
 
   @override
   Widget build(BuildContext context) {
-    return SvgPicture.asset(
-      'assets/icons/ai.svg',
-      width: 26,
-      height: 26,
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _HomeModeIcon(
+          asset: 'assets/icons/ai.svg',
+          active: !calendarActive,
+          onTap: onAiSelected,
+        ),
+        const SizedBox(width: 14),
+        _HomeModeIcon(
+          asset: 'assets/icons/calendar.svg',
+          active: calendarActive,
+          onTap: onCalendarSelected,
+        ),
+      ],
+    );
+  }
+}
+
+class _HomeModeIcon extends StatelessWidget {
+  const _HomeModeIcon({
+    required this.asset,
+    required this.active,
+    required this.onTap,
+  });
+
+  final String asset;
+  final bool active;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Opacity(
+        opacity: active ? 1 : 0.34,
+        child: SvgPicture.asset(
+          asset,
+          width: 26,
+          height: 26,
+          colorFilter: const ColorFilter.mode(Colors.white, BlendMode.srcIn),
+        ),
+      ),
+    );
+  }
+}
+
+class _WeekdaySelector extends StatelessWidget {
+  const _WeekdaySelector({required this.selectedDay, required this.onSelected});
+
+  final DateTime selectedDay;
+  final ValueChanged<DateTime> onSelected;
+
+  static const _labels = ['D', 'L', 'M', 'M', 'J', 'V', 'S'];
+
+  @override
+  Widget build(BuildContext context) {
+    final today = _startOfLocalDay(DateTime.now());
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: List.generate(7, (index) {
+        final day = today.add(Duration(days: index));
+        final selected = _isSameLocalDay(day, selectedDay);
+        return Padding(
+          padding: const EdgeInsets.only(right: 12),
+          child: GestureDetector(
+            onTap: () => onSelected(day),
+            behavior: HitTestBehavior.opaque,
+            child: Container(
+              width: 28,
+              height: 28,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: selected ? Colors.white : Colors.transparent,
+                shape: BoxShape.circle,
+              ),
+              child: Text(
+                _labels[day.weekday % 7],
+                style: TextStyle(
+                  color: selected ? Colors.black : Colors.white,
+                  fontSize: 13,
+                  fontFamily: 'ABCDiatype',
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          ),
+        );
+      }),
     );
   }
 }
