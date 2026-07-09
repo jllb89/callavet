@@ -1443,11 +1443,12 @@ export class AiService {
     const appetiteConcern = /no quiere comer|no come|dej[oó] de comer|apetito|anorex|desde antier|desde ayer|colic|cólico|diarrea/.test(haystack);
     const emergencyConcern = /no se levanta|respira|sangre|sangrado|dolor fuerte|suda|rueda|se echa|emergencia|urgente/.test(haystack);
     const lamenessConcern = /cojea|cojera|cojo|renque|renguea|renguera|claudica|pata|extremidad|casco|tendon|articular/.test(haystack);
+    const eyeConcern = /ojo|ojos|ocular|secrecion|lagrimeo|cornea|parpado|vision|rojo|enrojec/.test(haystack);
     const boostedTerms = [
       { terms: ['no quiere comer', 'no come', 'dejo de comer', 'dejó de comer', 'apetito', 'colico', 'cólico', 'diarrea', 'gastro'], targets: ['gastro', 'interna', 'internal', 'urgenc', 'critical', 'critico'] },
       { terms: ['cojea', 'cojera', 'lameness', 'renque', 'renguera', 'renguea', 'pata', 'tendon', 'tendón', 'articular', 'casco', 'marcha'], targets: ['cojera', 'ortopedia', 'lameness', 'orthopedic', 'deportiva', 'rehabilit', 'musculoesquelet'] },
       { terms: ['piel', 'dermat', 'alergia', 'comezon', 'comezón', 'picazón', 'rash', 'herida superficial'], targets: ['dermat', 'piel'] },
-      { terms: ['ojo', 'vision', 'visión', 'lagrimeo', 'cornea', 'córnea'], targets: ['oftal', 'ophthalm', 'ojo'] },
+      { terms: ['ojo', 'ojos', 'ocular', 'vision', 'visión', 'lagrimeo', 'cornea', 'córnea', 'secrecion', 'secreción', 'enrojec'], targets: ['oftal', 'ophthalm', 'ojo', 'ocular'] },
       { terms: ['diente', 'boca', 'masticar', 'dent'], targets: ['odonto', 'dent'] },
       { terms: ['parto', 'preñada', 'prenada', 'gestacion', 'gestación', 'fertilidad', 'reprodu'], targets: ['repro', 'fertilidad'] },
       { terms: ['sangre', 'no se levanta', 'respira', 'emergencia', 'urgente', 'dolor fuerte'], targets: ['urgenc', 'emergency', 'critical', 'critico', 'general'] },
@@ -1465,7 +1466,9 @@ export class AiService {
         const specialtyMatches = group.targets.some((target) => name.includes(target) || description.includes(target));
         return sum + (symptomMatches && specialtyMatches ? 4 : 0);
       }, 0);
-      const clinicalBoost = (lamenessConcern && (name.includes('ortopedia') || name.includes('cojera') || description.includes('musculoesquelet') || description.includes('tendon') || description.includes('casco'))) ? 12
+      const clinicalBoost = (eyeConcern && (name.includes('oftal') || name.includes('ojo') || description.includes('ocular') || description.includes('cornea'))) ? 16
+        : (eyeConcern && name.includes('gastro')) ? -6
+        : (lamenessConcern && (name.includes('ortopedia') || name.includes('cojera') || description.includes('musculoesquelet') || description.includes('tendon') || description.includes('casco'))) ? 12
         : (appetiteConcern && name.includes('gastro')) ? 10
         : (appetiteConcern && (name.includes('urgenc') || description.includes('colico'))) ? 8
           : (appetiteConcern && name.includes('interna')) ? 6
@@ -1515,6 +1518,13 @@ export class AiService {
         '¿Ves hinchazón, calor en la pata o el casco, o alguna herida?',
       ];
     }
+    if (/ojo|ojos|ocular|secrecion|lagrimeo|cornea|parpado|vision|rojo|enrojec/.test(text)) {
+      return [
+        '¿Desde cuándo notas el ojo rojo o con secreción?',
+        '¿Mantiene el ojo abierto o lo cierra, lagrimea mucho o parece tener dolor?',
+        '¿Ves opacidad, golpe, herida, cuerpo extraño o inflamación alrededor del ojo?',
+      ];
+    }
     return this.urgentIntakeQuestions(context);
   }
 
@@ -1537,7 +1547,7 @@ export class AiService {
 
   private hasClinicalSignal(text: string) {
     const normalized = this.normalizeCareText(text);
-    return /no quiere comer|no come|dejo de comer|apetito|colic|colico|dolor|fiebre|no se levanta|respira|respiracion|hinchazon|babea|baba|sangre|herida|cojea|cojera|cojo|renque|renguea|claudica|pata|extremidad|casco|tendon|tos|diarrea|vomito|mal aliento|descarga|secrecion|decaido|suda|inquieto|abdomen|mandibula|tragar/.test(normalized);
+    return /no quiere comer|no come|dejo de comer|apetito|colic|colico|dolor|fiebre|no se levanta|respira|respiracion|hinchazon|babea|baba|sangre|herida|cojea|cojera|cojo|renque|renguea|claudica|pata|extremidad|casco|tendon|tos|diarrea|vomito|mal aliento|descarga|secrecion|ojo|ojos|ocular|lagrimeo|cornea|parpado|vision|enrojec|decaido|suda|inquieto|abdomen|mandibula|tragar/.test(normalized);
   }
 
   private hasCaseDetailSignal(latestMessage: string) {

@@ -582,6 +582,13 @@ export class SessionsController {
         let checkout: { session_id: string; url: string } | null = null;
         if (overage) {
           await q('update chat_sessions set status = $2, updated_at = now() where id = $1', [dbSessionId, 'pending_payment']);
+          await q(
+            `update vet_consult_locks
+                set released_at = now(), updated_at = now(), reason = 'pending_payment'
+              where session_id = $1::uuid
+                and released_at is null`,
+            [dbSessionId]
+          );
           const sk = process.env.STRIPE_SECRET_KEY || '';
           const successUrl = process.env.CHECKOUT_SUCCESS_URL || 'http://localhost:3000/overage/success';
           const cancelUrl = process.env.CHECKOUT_CANCEL_URL || 'http://localhost:3000/overage/cancel';

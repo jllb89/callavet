@@ -1064,20 +1064,81 @@ class _HomeDefaultSection extends StatelessWidget {
               onSelected: onConsultSelected,
             ),
           ],
-          if (showAgenda) ...[
-            const SizedBox(height: 38),
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 360),
+            reverseDuration: const Duration(milliseconds: 240),
+            switchInCurve: Curves.easeOutCubic,
+            switchOutCurve: Curves.easeInCubic,
+            transitionBuilder: (child, animation) {
+              final slide = Tween<Offset>(
+                begin: const Offset(0, -0.08),
+                end: Offset.zero,
+              ).animate(CurvedAnimation(
+                parent: animation,
+                curve: Curves.easeOutCubic,
+              ));
+              return FadeTransition(
+                opacity: animation,
+                child: SlideTransition(position: slide, child: child),
+              );
+            },
+            child: showAgenda
+                ? _AgendaRevealPanel(
+                    key: ValueKey<String>(
+                        'agenda-${selectedAgendaDay.toIso8601String()}'),
+                    selectedDay: selectedAgendaDay,
+                    appointments: selectedAppointments,
+                    onDaySelected: onAgendaDaySelected,
+                    onAppointmentSelected: onAppointmentSelected,
+                    onAppointmentMore: onAppointmentMore,
+                  )
+                : const SizedBox.shrink(key: ValueKey('agenda-hidden')),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AgendaRevealPanel extends StatelessWidget {
+  const _AgendaRevealPanel({
+    super.key,
+    required this.selectedDay,
+    required this.appointments,
+    required this.onDaySelected,
+    required this.onAppointmentSelected,
+    required this.onAppointmentMore,
+  });
+
+  final DateTime selectedDay;
+  final List<_UpcomingAppointment> appointments;
+  final ValueChanged<DateTime> onDaySelected;
+  final ValueChanged<_UpcomingAppointment> onAppointmentSelected;
+  final ValueChanged<_UpcomingAppointment> onAppointmentMore;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 36),
+      child: AnimatedSize(
+        duration: const Duration(milliseconds: 360),
+        curve: Curves.easeOutCubic,
+        alignment: Alignment.topLeft,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
             _WeekdaySelector(
-              selectedDay: selectedAgendaDay,
-              onSelected: onAgendaDaySelected,
+              selectedDay: selectedDay,
+              onSelected: onDaySelected,
             ),
-            const SizedBox(height: 18),
+            const SizedBox(height: 16),
             _UpcomingAgendaStrip(
-              appointments: selectedAppointments,
+              appointments: appointments,
               onSelected: onAppointmentSelected,
               onMore: onAppointmentMore,
             ),
           ],
-        ],
+        ),
       ),
     );
   }
@@ -1270,16 +1331,63 @@ class _UpcomingAgendaStrip extends StatelessWidget {
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
-      children: appointments.map((appointment) {
+      children: List.generate(appointments.length, (index) {
+        final appointment = appointments[index];
         return Padding(
           padding: const EdgeInsets.only(bottom: 10),
-          child: _UpcomingAgendaPill(
-            appointment: appointment,
-            onTap: () => onSelected(appointment),
-            onMore: () => onMore(appointment),
+          child: _AnimatedAgendaEntry(
+            index: index,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _UpcomingAgendaPill(
+                  appointment: appointment,
+                  onTap: () => onSelected(appointment),
+                ),
+                const SizedBox(width: 8),
+                _AgendaMoreButton(onTap: () => onMore(appointment)),
+              ],
+            ),
           ),
         );
       }).toList(growable: false),
+    );
+  }
+}
+
+class _AnimatedAgendaEntry extends StatefulWidget {
+  const _AnimatedAgendaEntry({required this.index, required this.child});
+
+  final int index;
+  final Widget child;
+
+  @override
+  State<_AnimatedAgendaEntry> createState() => _AnimatedAgendaEntryState();
+}
+
+class _AnimatedAgendaEntryState extends State<_AnimatedAgendaEntry> {
+  bool _visible = false;
+
+  @override
+  void initState() {
+    super.initState();
+    Future<void>.delayed(Duration(milliseconds: 55 * widget.index), () {
+      if (mounted) setState(() => _visible = true);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedOpacity(
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOutCubic,
+      opacity: _visible ? 1 : 0,
+      child: AnimatedSlide(
+        duration: const Duration(milliseconds: 340),
+        curve: Curves.easeOutCubic,
+        offset: _visible ? Offset.zero : const Offset(0, 0.18),
+        child: widget.child,
+      ),
     );
   }
 }
@@ -1288,12 +1396,10 @@ class _UpcomingAgendaPill extends StatelessWidget {
   const _UpcomingAgendaPill({
     required this.appointment,
     required this.onTap,
-    required this.onMore,
   });
 
   final _UpcomingAppointment appointment;
   final VoidCallback onTap;
-  final VoidCallback onMore;
 
   @override
   Widget build(BuildContext context) {
@@ -1307,7 +1413,7 @@ class _UpcomingAgendaPill extends StatelessWidget {
       behavior: HitTestBehavior.opaque,
       child: Container(
         height: 51,
-        constraints: const BoxConstraints(minWidth: 260, maxWidth: 360),
+        constraints: const BoxConstraints(maxWidth: 320),
         padding: const EdgeInsets.only(left: 9, right: 18),
         decoration: BoxDecoration(
           color: Colors.white.withValues(alpha: 0.06),
@@ -1342,27 +1448,32 @@ class _UpcomingAgendaPill extends StatelessWidget {
                 fontWeight: FontWeight.w300,
               ),
             ),
-            const SizedBox(width: 12),
-            GestureDetector(
-              onTap: onMore,
-              behavior: HitTestBehavior.opaque,
-              child: SizedBox(
-                width: 28,
-                height: 34,
-                child: Center(
-                  child: SvgPicture.asset(
-                    'assets/icons/more-horizontal.svg',
-                    width: 18,
-                    height: 18,
-                    colorFilter: const ColorFilter.mode(
-                      Colors.white,
-                      BlendMode.srcIn,
-                    ),
-                  ),
-                ),
-              ),
-            ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AgendaMoreButton extends StatelessWidget {
+  const _AgendaMoreButton({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: SizedBox(
+        width: 34,
+        height: 44,
+        child: Center(
+          child: SvgPicture.asset(
+            'assets/icons/more-horizontal.svg',
+            width: 18,
+            height: 18,
+          ),
         ),
       ),
     );
@@ -1406,12 +1517,14 @@ class _HomeModeShortcuts extends StatelessWidget {
       children: [
         _HomeModeIcon(
           asset: 'assets/icons/ai.svg',
+          size: 26,
           active: !calendarActive,
           onTap: onAiSelected,
         ),
-        const SizedBox(width: 14),
+        const SizedBox(width: 28),
         _HomeModeIcon(
           asset: 'assets/icons/calendar.svg',
+          size: 20,
           active: calendarActive,
           onTap: onCalendarSelected,
         ),
@@ -1423,11 +1536,13 @@ class _HomeModeShortcuts extends StatelessWidget {
 class _HomeModeIcon extends StatelessWidget {
   const _HomeModeIcon({
     required this.asset,
+    required this.size,
     required this.active,
     required this.onTap,
   });
 
   final String asset;
+  final double size;
   final bool active;
   final VoidCallback onTap;
 
@@ -1436,13 +1551,14 @@ class _HomeModeIcon extends StatelessWidget {
     return GestureDetector(
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
-      child: Opacity(
+      child: AnimatedOpacity(
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
         opacity: active ? 1 : 0.34,
         child: SvgPicture.asset(
           asset,
-          width: 26,
-          height: 26,
-          colorFilter: const ColorFilter.mode(Colors.white, BlendMode.srcIn),
+          width: size,
+          height: size,
         ),
       ),
     );
@@ -1471,8 +1587,8 @@ class _WeekdaySelector extends StatelessWidget {
             onTap: () => onSelected(day),
             behavior: HitTestBehavior.opaque,
             child: Container(
-              width: 28,
-              height: 28,
+              width: 24,
+              height: 24,
               alignment: Alignment.center,
               decoration: BoxDecoration(
                 color: selected ? Colors.white : Colors.transparent,
@@ -1482,7 +1598,7 @@ class _WeekdaySelector extends StatelessWidget {
                 _labels[day.weekday % 7],
                 style: TextStyle(
                   color: selected ? Colors.black : Colors.white,
-                  fontSize: 13,
+                  fontSize: 11,
                   fontFamily: 'ABCDiatype',
                   fontWeight: FontWeight.w500,
                 ),

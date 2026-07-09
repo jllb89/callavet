@@ -930,13 +930,10 @@ class _ActivitySections extends StatelessWidget {
         children.add(const SizedBox(height: 46));
       }
       children.addAll([
-        _WeekdaySelector(
+        _VetAgendaRevealPanel(
           selectedDay: selectedAppointmentDay,
-          onSelected: onAppointmentDaySelected,
-        ),
-        const SizedBox(height: 18),
-        _UpcomingAppointmentsList(
           appointments: filteredAppointments,
+          onDaySelected: onAppointmentDaySelected,
           onJoinVideo: onJoinVideo,
           onOpenChat: onOpenChat,
         ),
@@ -946,6 +943,62 @@ class _ActivitySections extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: children,
+    );
+  }
+}
+
+class _VetAgendaRevealPanel extends StatelessWidget {
+  const _VetAgendaRevealPanel({
+    required this.selectedDay,
+    required this.appointments,
+    required this.onDaySelected,
+    required this.onJoinVideo,
+    required this.onOpenChat,
+  });
+
+  final DateTime selectedDay;
+  final List<_UpcomingAppointment> appointments;
+  final ValueChanged<DateTime> onDaySelected;
+  final ValueChanged<_VideoJoinTarget> onJoinVideo;
+  final ValueChanged<String> onOpenChat;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSize(
+      duration: const Duration(milliseconds: 360),
+      curve: Curves.easeOutCubic,
+      alignment: Alignment.topLeft,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _WeekdaySelector(
+            selectedDay: selectedDay,
+            onSelected: onDaySelected,
+          ),
+          const SizedBox(height: 16),
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 320),
+            switchInCurve: Curves.easeOutCubic,
+            switchOutCurve: Curves.easeInCubic,
+            transitionBuilder: (child, animation) {
+              final slide = Tween<Offset>(
+                begin: const Offset(0, 0.12),
+                end: Offset.zero,
+              ).animate(animation);
+              return FadeTransition(
+                opacity: animation,
+                child: SlideTransition(position: slide, child: child),
+              );
+            },
+            child: _UpcomingAppointmentsList(
+              key: ValueKey<String>(selectedDay.toIso8601String()),
+              appointments: appointments,
+              onJoinVideo: onJoinVideo,
+              onOpenChat: onOpenChat,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1310,7 +1363,8 @@ class _ConsultOptionsButton extends StatelessWidget {
 
 class _UpcomingAppointmentsList extends StatelessWidget {
   const _UpcomingAppointmentsList(
-      {required this.appointments,
+  {super.key,
+  required this.appointments,
       required this.onJoinVideo,
       required this.onOpenChat});
 
@@ -1322,13 +1376,16 @@ class _UpcomingAppointmentsList extends StatelessWidget {
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
-      children: appointments.map((appointment) {
+      children: List.generate(appointments.length, (index) {
+          final appointment = appointments[index];
           return Padding(
             padding: const EdgeInsets.only(bottom: 10),
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              clipBehavior: Clip.none,
-              child: _UpcomingConsultPill(
+            child: _VetAnimatedAgendaEntry(
+              index: index,
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                clipBehavior: Clip.none,
+                child: _UpcomingConsultPill(
                 name: appointment.name,
                 time: appointment.formattedStart,
                 mode: appointment.mode,
@@ -1337,10 +1394,48 @@ class _UpcomingAppointmentsList extends StatelessWidget {
                   : appointment.canOpenChat
                     ? () => onOpenChat(appointment.sessionId)
                     : null,
+                ),
               ),
             ),
           );
         }).toList(growable: false),
+    );
+  }
+}
+
+class _VetAnimatedAgendaEntry extends StatefulWidget {
+  const _VetAnimatedAgendaEntry({required this.index, required this.child});
+
+  final int index;
+  final Widget child;
+
+  @override
+  State<_VetAnimatedAgendaEntry> createState() => _VetAnimatedAgendaEntryState();
+}
+
+class _VetAnimatedAgendaEntryState extends State<_VetAnimatedAgendaEntry> {
+  bool _visible = false;
+
+  @override
+  void initState() {
+    super.initState();
+    Future<void>.delayed(Duration(milliseconds: 55 * widget.index), () {
+      if (mounted) setState(() => _visible = true);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedOpacity(
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOutCubic,
+      opacity: _visible ? 1 : 0,
+      child: AnimatedSlide(
+        duration: const Duration(milliseconds: 340),
+        curve: Curves.easeOutCubic,
+        offset: _visible ? Offset.zero : const Offset(0, 0.18),
+        child: widget.child,
+      ),
     );
   }
 }
@@ -1367,8 +1462,8 @@ class _WeekdaySelector extends StatelessWidget {
             onTap: () => onSelected(day),
             behavior: HitTestBehavior.opaque,
             child: Container(
-              width: 28,
-              height: 28,
+              width: 24,
+              height: 24,
               alignment: Alignment.center,
               decoration: BoxDecoration(
                 color: selected ? Colors.white : Colors.transparent,
@@ -1378,7 +1473,7 @@ class _WeekdaySelector extends StatelessWidget {
                 _labels[day.weekday % 7],
                 style: TextStyle(
                   color: selected ? Colors.black : Colors.white,
-                  fontSize: 13,
+                  fontSize: 11,
                   fontFamily: 'ABC Diatype',
                   fontWeight: FontWeight.w500,
                 ),

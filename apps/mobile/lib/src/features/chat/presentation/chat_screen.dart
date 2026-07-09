@@ -2852,7 +2852,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     return _postGatewayJson('/sessions/start', {
       'kind': kind,
       if (result.petId != null) 'petId': result.petId,
-      if (kind == 'video' && result.vetId != null) 'vetId': result.vetId,
+      if (result.vetId != null) 'vetId': result.vetId,
       if (result.specialtyId != null) 'specialtyId': result.specialtyId,
       'priority': result.payload.urgency,
       'aiContext': result.handoffContext(history),
