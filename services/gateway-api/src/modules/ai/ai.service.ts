@@ -175,6 +175,7 @@ type AiContext = {
 
 const SCHEDULING_TIME_ZONE = 'America/Mexico_City';
 const SCHEDULING_SLOT_DURATION_MIN = 30;
+const SCHEDULING_MIN_LEAD_MIN = 30;
 
 @Injectable()
 export class AiService {
@@ -1747,6 +1748,42 @@ export class AiService {
     return this.mexicoCityDateValue();
   }
 
+  private schedulingDateParts(value: string | null) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || '').trim());
+    if (!match) return null;
+    return { year: Number(match[1]), month: Number(match[2]), day: Number(match[3]) };
+  }
+
+  private schedulingPartWindows() {
+    return {
+      morning: { start: [7, 0] as [number, number], until: [12, 0] as [number, number] },
+      afternoon: { start: [12, 0] as [number, number], until: [19, 0] as [number, number] },
+      evening: { start: [19, 0] as [number, number], until: [21, 30] as [number, number] },
+    };
+  }
+
+  private schedulingWindowCanStillStart(dayValue: string | null, part: string) {
+    const date = this.schedulingDateParts(dayValue);
+    if (!date) return false;
+    const window = this.schedulingPartWindows()[part as keyof ReturnType<AiService['schedulingPartWindows']>];
+    if (!window) return false;
+    const latestStartIso = this.mexicoCityLocalToUtcIso(date.year, date.month, date.day, window.until[0], window.until[1]);
+    const latestStart = new Date(latestStartIso).getTime() - SCHEDULING_SLOT_DURATION_MIN * 60 * 1000;
+    return latestStart - Date.now() >= SCHEDULING_MIN_LEAD_MIN * 60 * 1000;
+  }
+
+  private schedulingDayHasFutureWindow(dayValue: string | null) {
+    return ['morning', 'afternoon', 'evening'].some((part) => this.schedulingWindowCanStillStart(dayValue, part));
+  }
+
+  private schedulingDaypartOptions(dayValue: string | null, mode: string) {
+    return [
+      { label: 'Mañana', value: 'morning', stage: 'daypart', mode },
+      { label: 'Tarde', value: 'afternoon', stage: 'daypart', mode },
+      { label: 'Noche', value: 'evening', stage: 'daypart', mode },
+    ].filter((option) => this.schedulingWindowCanStillStart(dayValue, option.value));
+  }
+
   private schedulingDayOptions(range: string | null) {
     const [year, month, day] = this.schedulingTodayDate().split('-').map((part) => Number(part));
     const base = new Date(Date.UTC(year, month - 1, day, 12, 0, 0, 0));
@@ -1766,12 +1803,18 @@ export class AiService {
       const value = this.localDateValue(day);
       const label = formatter.format(day).replace(',', '');
       return { label, value };
-    });
+    }).filter((option) => this.schedulingDayHasFutureWindow(option.value));
   }
 
   private forceSchedulingChoicePrompt(payload: any, state: AiChatTurnState) {
     const mode = state.schedulingMode === 'chat' || /chat/i.test(String(payload?.recommendedService || '')) ? 'chat' : 'video';
     if (!state.schedulingStage) {
+      const today = this.schedulingTodayDate();
+      const dateRangeOptions = [
+        ...(this.schedulingDayHasFutureWindow(today) ? [{ label: 'Hoy', value: 'today', stage: 'date_range', mode }] : []),
+        { label: 'Esta semana', value: 'this_week', stage: 'date_range', mode },
+        { label: 'La próxima semana', value: 'next_week', stage: 'date_range', mode },
+      ];
       return {
         ...payload,
         message: 'Perfecto. ¿Para cuándo quieres agendar la consulta?',
@@ -1782,11 +1825,7 @@ export class AiService {
         commerceRecommendation: 'included',
         schedulingStage: 'date_range',
         schedulingMode: mode,
-        schedulingOptions: [
-          { label: 'Hoy', value: 'today', stage: 'date_range', mode },
-          { label: 'Esta semana', value: 'this_week', stage: 'date_range', mode },
-          { label: 'La próxima semana', value: 'next_week', stage: 'date_range', mode },
-        ],
+        schedulingOptions: dateRangeOptions,
         displayBlocks: [{ type: 'paragraph', text: 'Perfecto. ¿Para cuándo quieres agendar la consulta?', items: [] }],
       };
     }
@@ -1808,6 +1847,7 @@ export class AiService {
         };
       }
       const today = this.schedulingTodayDate();
+      const todayDaypartOptions = this.schedulingDaypartOptions(today, mode);
       return {
         ...payload,
         message: 'Bien. ¿Qué horario te funciona mejor?',
@@ -1820,11 +1860,7 @@ export class AiService {
         schedulingMode: mode,
         schedulingRange: state.schedulingRange,
         schedulingDay: today,
-        schedulingOptions: [
-          { label: 'Mañana', value: 'morning', stage: 'daypart', mode },
-          { label: 'Tarde', value: 'afternoon', stage: 'daypart', mode },
-          { label: 'Noche', value: 'evening', stage: 'daypart', mode },
-        ],
+        schedulingOptions: todayDaypartOptions,
         displayBlocks: [{ type: 'paragraph', text: 'Bien. ¿Qué horario te funciona mejor?', items: [] }],
       };
     }
@@ -1841,11 +1877,7 @@ export class AiService {
         schedulingMode: mode,
         schedulingRange: state.schedulingRange,
         schedulingDay: state.schedulingDay,
-        schedulingOptions: [
-          { label: 'Mañana', value: 'morning', stage: 'daypart', mode },
-          { label: 'Tarde', value: 'afternoon', stage: 'daypart', mode },
-          { label: 'Noche', value: 'evening', stage: 'daypart', mode },
-        ],
+        schedulingOptions: this.schedulingDaypartOptions(state.schedulingDay, mode),
         displayBlocks: [{ type: 'paragraph', text: 'Perfecto. ¿Qué horario te funciona mejor?', items: [] }],
       };
     }
@@ -2358,20 +2390,13 @@ export class AiService {
 
   private schedulingSlotWindow(state: AiChatTurnState) {
     if (!state.schedulingDay || !state.schedulingDaypart) return null;
-    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(state.schedulingDay);
-    if (!match) return null;
-    const year = Number(match[1]);
-    const month = Number(match[2]);
-    const day = Number(match[3]);
-    const windows: Record<string, { start: [number, number]; until: [number, number] }> = {
-      morning: { start: [7, 0], until: [12, 0] },
-      afternoon: { start: [12, 0], until: [19, 0] },
-      evening: { start: [19, 0], until: [21, 30] },
-    };
-    const window = windows[state.schedulingDaypart] || windows.afternoon;
+    const date = this.schedulingDateParts(state.schedulingDay);
+    if (!date) return null;
+    const windows = this.schedulingPartWindows();
+    const window = windows[state.schedulingDaypart as keyof typeof windows] || windows.afternoon;
     return {
-      since: this.mexicoCityLocalToUtcIso(year, month, day, window.start[0], window.start[1]),
-      until: this.mexicoCityLocalToUtcIso(year, month, day, window.until[0], window.until[1]),
+      since: this.mexicoCityLocalToUtcIso(date.year, date.month, date.day, window.start[0], window.start[1]),
+      until: this.mexicoCityLocalToUtcIso(date.year, date.month, date.day, window.until[0], window.until[1]),
     };
   }
 

@@ -907,29 +907,25 @@ class _ActivitySections extends StatelessWidget {
       return const SizedBox.shrink();
     }
 
-    final children = <Widget>[];
-    if (activeConsults.isNotEmpty) {
-      children.addAll([
-        _ActiveConsultsTitle(
-          label: availableNow ? 'consultas activas:' : 'fuera de guardia:',
-          live: availableNow && hasJoinableVideo,
-        ),
-        const SizedBox(height: 24),
-        _ActiveConsultEventList(
-          consults: activeConsults,
-          onJoinVideo: onJoinVideo,
-          onOpenChat: onOpenChat,
-          onEndConsult: onEndConsult,
-          endingConsultIds: endingConsultIds,
-        ),
-      ]);
-    }
+    final children = <Widget>[
+      _ActiveConsultsRevealPanel(
+        activeConsults: activeConsults,
+        availableNow: availableNow,
+        hasJoinableVideo: hasJoinableVideo,
+        onJoinVideo: onJoinVideo,
+        onOpenChat: onOpenChat,
+        onEndConsult: onEndConsult,
+        endingConsultIds: endingConsultIds,
+      ),
+    ];
 
     if (upcomingAppointments.isNotEmpty) {
-      if (children.isNotEmpty) {
-        children.add(const SizedBox(height: 46));
-      }
       children.addAll([
+        AnimatedContainer(
+          duration: const Duration(milliseconds: 360),
+          curve: Curves.easeOutCubic,
+          height: activeConsults.isNotEmpty ? 46 : 0,
+        ),
         _VetAgendaRevealPanel(
           selectedDay: selectedAppointmentDay,
           appointments: filteredAppointments,
@@ -943,6 +939,70 @@ class _ActivitySections extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: children,
+    );
+  }
+}
+
+class _ActiveConsultsRevealPanel extends StatelessWidget {
+  const _ActiveConsultsRevealPanel({
+    required this.activeConsults,
+    required this.availableNow,
+    required this.hasJoinableVideo,
+    required this.onJoinVideo,
+    required this.onOpenChat,
+    required this.onEndConsult,
+    required this.endingConsultIds,
+  });
+
+  final List<_ActiveConsult> activeConsults;
+  final bool availableNow;
+  final bool hasJoinableVideo;
+  final ValueChanged<_VideoJoinTarget> onJoinVideo;
+  final ValueChanged<String> onOpenChat;
+  final ValueChanged<_ActiveConsult> onEndConsult;
+  final Set<String> endingConsultIds;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSize(
+      duration: const Duration(milliseconds: 360),
+      curve: Curves.easeOutCubic,
+      alignment: Alignment.topLeft,
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 340),
+        switchInCurve: Curves.easeOutCubic,
+        switchOutCurve: Curves.easeInCubic,
+        transitionBuilder: (child, animation) {
+          final slide = Tween<Offset>(
+            begin: const Offset(0, -0.12),
+            end: Offset.zero,
+          ).animate(animation);
+          return FadeTransition(
+            opacity: animation,
+            child: SlideTransition(position: slide, child: child),
+          );
+        },
+        child: activeConsults.isEmpty
+            ? const SizedBox.shrink(key: ValueKey('no-active-consults'))
+            : Column(
+                key: ValueKey<int>(activeConsults.length),
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _ActiveConsultsTitle(
+                    label: availableNow ? 'consultas activas:' : 'fuera de guardia:',
+                    live: availableNow && hasJoinableVideo,
+                  ),
+                  const SizedBox(height: 24),
+                  _ActiveConsultEventList(
+                    consults: activeConsults,
+                    onJoinVideo: onJoinVideo,
+                    onOpenChat: onOpenChat,
+                    onEndConsult: onEndConsult,
+                    endingConsultIds: endingConsultIds,
+                  ),
+                ],
+              ),
+      ),
     );
   }
 }
