@@ -402,8 +402,9 @@ export class SessionsController {
 
         let assignedVetId = vetId;
         if (!assignedVetId && kind === 'chat') {
-          const { rows: candidateRows } = await q<{ id: string }>(
+          const { rows: candidateRows } = await q<{ id: string; specialty_match: boolean }>(
             `select v.id
+                    ,($1::uuid is not null and array_position(coalesce(v.specialties, '{}'::uuid[]), $1::uuid) is not null) as specialty_match
                from vets v
           left join ratings r
                  on r.vet_id = v.id
@@ -411,11 +412,16 @@ export class SessionsController {
                  on l.vet_id = v.id
                 and l.released_at is null
                 and l.expires_at > now()
+                and exists (
+                  select 1
+                    from chat_sessions locked_session
+                   where locked_session.id = l.session_id
+                     and locked_session.status = 'active'
+                )
               where v.is_approved = true
-                and ($1::uuid is null or array_position(coalesce(v.specialties, '{}'::uuid[]), $1::uuid) is not null)
                 and l.vet_id is null
-              group by v.id, v.created_at
-              order by coalesce(avg(r.score), 0) desc, count(r.id) desc, v.created_at asc
+              group by v.id, v.created_at, v.specialties
+              order by specialty_match desc, coalesce(avg(r.score), 0) desc, count(r.id) desc, v.created_at asc
               limit 1`,
             [specialtyId]
           );
@@ -425,6 +431,7 @@ export class SessionsController {
             assignedVetId,
             specialtyId,
             kind,
+            specialtyMatch: candidateRows[0]?.specialty_match ?? null,
           });
         }
         if (kind === 'chat' && !assignedVetId) {
@@ -435,7 +442,7 @@ export class SessionsController {
           const { rows: vetRows } = await q<{ id: string; is_approved: boolean; specialty_ok: boolean }>(
             `select id,
                     is_approved,
-                    ($2::uuid is null or array_position(coalesce(specialties, '{}'::uuid[]), $2::uuid) is not null) as specialty_ok
+                    true as specialty_ok
                from vets
               where id = $1::uuid
               limit 1`,

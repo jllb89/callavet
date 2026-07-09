@@ -2313,13 +2313,16 @@ export class AiService {
              where vcl.vet_id = v.id
                and vcl.released_at is null
                and vcl.expires_at > now()
+               and exists (
+                 select 1
+                   from chat_sessions locked_session
+                  where locked_session.id = vcl.session_id
+                    and locked_session.status = 'active'
+               )
           )
-          and ($1::uuid is null or (
-            array_position(v.specialties, $1::uuid) is not null
-            and exists (select 1 from vet_specialties vs where vs.id = $1::uuid and coalesce(vs.is_active, true))
-          ))
-        group by v.id, u.full_name, v.bio, v.years_experience, v.languages, av.next_available_at, av.available_slots_next_7d
-        order by active_consults asc, (av.next_available_at is null) asc, av.next_available_at asc, count(r.id) desc, coalesce(avg(r.score), 0) desc, u.full_name asc
+          and ($1::uuid is null or exists (select 1 from vet_specialties vs where vs.id = $1::uuid and coalesce(vs.is_active, true)))
+        group by v.id, u.full_name, v.bio, v.years_experience, v.languages, v.specialties, av.next_available_at, av.available_slots_next_7d
+        order by (array_position(coalesce(v.specialties, '{}'::uuid[]), $1::uuid) is not null) desc, active_consults asc, (av.next_available_at is null) asc, av.next_available_at asc, count(r.id) desc, coalesce(avg(r.score), 0) desc, u.full_name asc
         limit $2`,
       [specialtyId, limit]
     );

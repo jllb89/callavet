@@ -980,6 +980,13 @@ class _VetAgendaRevealPanel extends StatelessWidget {
             duration: const Duration(milliseconds: 320),
             switchInCurve: Curves.easeOutCubic,
             switchOutCurve: Curves.easeInCubic,
+            layoutBuilder: (currentChild, previousChildren) => Stack(
+              alignment: Alignment.topLeft,
+              children: [
+                ...previousChildren,
+                if (currentChild != null) currentChild,
+              ],
+            ),
             transitionBuilder: (child, animation) {
               final slide = Tween<Offset>(
                 begin: const Offset(0, 0.12),
@@ -1447,41 +1454,108 @@ class _WeekdaySelector extends StatelessWidget {
   final ValueChanged<DateTime> onSelected;
 
   static const _labels = ['D', 'L', 'M', 'M', 'J', 'V', 'S'];
+  static const double _itemWidth = 24;
+  static const double _gap = 12;
+  static const double _height = 30;
 
   @override
   Widget build(BuildContext context) {
     final today = _startOfLocalDay(DateTime.now());
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: List.generate(7, (index) {
-        final day = today.add(Duration(days: index));
-        final selected = _isSameLocalDay(day, selectedDay);
-        return Padding(
-          padding: const EdgeInsets.only(right: 12),
-          child: GestureDetector(
-            onTap: () => onSelected(day),
-            behavior: HitTestBehavior.opaque,
-            child: Container(
-              width: 24,
-              height: 24,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: selected ? Colors.white : Colors.transparent,
-                shape: BoxShape.circle,
-              ),
-              child: Text(
-                _labels[day.weekday % 7],
-                style: TextStyle(
-                  color: selected ? Colors.black : Colors.white,
-                  fontSize: 11,
-                  fontFamily: 'ABC Diatype',
-                  fontWeight: FontWeight.w500,
+    final selectedIndex = List.generate(7, (index) => index).firstWhere(
+      (index) => _isSameLocalDay(today.add(Duration(days: index)), selectedDay),
+      orElse: () => 0,
+    );
+    return SizedBox(
+      width: (_itemWidth * 7) + (_gap * 6),
+      height: _height,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: List.generate(7, (index) {
+              final day = today.add(Duration(days: index));
+              return Padding(
+                padding: EdgeInsets.only(right: index == 6 ? 0 : _gap),
+                child: _AnimatedWeekdayButton(
+                  index: index,
+                  label: _labels[day.weekday % 7],
+                  onTap: () => onSelected(day),
                 ),
+              );
+            }),
+          ),
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 260),
+            curve: Curves.easeOutCubic,
+            left: selectedIndex * (_itemWidth + _gap),
+            bottom: 0,
+            child: Container(
+              width: _itemWidth,
+              height: 2,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(999),
               ),
             ),
           ),
-        );
-      }),
+        ],
+      ),
+    );
+  }
+}
+
+class _AnimatedWeekdayButton extends StatefulWidget {
+  const _AnimatedWeekdayButton({
+    required this.index,
+    required this.label,
+    required this.onTap,
+  });
+
+  final int index;
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  State<_AnimatedWeekdayButton> createState() => _AnimatedWeekdayButtonState();
+}
+
+class _AnimatedWeekdayButtonState extends State<_AnimatedWeekdayButton> {
+  bool _visible = false;
+
+  @override
+  void initState() {
+    super.initState();
+    Future<void>.delayed(Duration(milliseconds: 40 * widget.index), () {
+      if (mounted) setState(() => _visible = true);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: widget.onTap,
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedOpacity(
+        duration: const Duration(milliseconds: 240),
+        curve: Curves.easeOut,
+        opacity: _visible ? 1 : 0,
+        child: SizedBox(
+          width: 24,
+          height: 24,
+          child: Center(
+            child: Text(
+              widget.label,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 11,
+                fontFamily: 'ABC Diatype',
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
