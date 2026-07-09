@@ -459,6 +459,12 @@ export class SessionsController {
               where vet_id = $1::uuid
                 and released_at is null
                 and expires_at > now()
+                and exists (
+                  select 1
+                    from chat_sessions locked_session
+                   where locked_session.id = vet_consult_locks.session_id
+                     and locked_session.status = 'active'
+                )
               limit 1
               for update`,
             [assignedVetId]
@@ -490,32 +496,21 @@ export class SessionsController {
             `insert into vet_consult_locks (vet_id, session_id, mode, expires_at, reason, created_at, updated_at)
              values ($1::uuid, $2::uuid, $3, now() + $4::interval, 'session_start', now(), now())
              on conflict (vet_id) do update
-               set session_id = case
-                     when vet_consult_locks.released_at is not null or vet_consult_locks.expires_at <= now() then excluded.session_id
-                     else vet_consult_locks.session_id
-                   end,
-                   mode = case
-                     when vet_consult_locks.released_at is not null or vet_consult_locks.expires_at <= now() then excluded.mode
-                     else vet_consult_locks.mode
-                   end,
-                   locked_at = case
-                     when vet_consult_locks.released_at is not null or vet_consult_locks.expires_at <= now() then now()
-                     else vet_consult_locks.locked_at
-                   end,
-                   expires_at = case
-                     when vet_consult_locks.released_at is not null or vet_consult_locks.expires_at <= now() then excluded.expires_at
-                     else vet_consult_locks.expires_at
-                   end,
-                   released_at = case
-                     when vet_consult_locks.released_at is not null or vet_consult_locks.expires_at <= now() then null
-                     else vet_consult_locks.released_at
-                   end,
-                   reason = case
-                     when vet_consult_locks.released_at is not null or vet_consult_locks.expires_at <= now() then excluded.reason
-                     else vet_consult_locks.reason
-                   end,
+               set session_id = excluded.session_id,
+                   mode = excluded.mode,
+                   locked_at = now(),
+                   expires_at = excluded.expires_at,
+                   released_at = null,
+                   reason = excluded.reason,
                    updated_at = now()
-             where vet_consult_locks.released_at is not null or vet_consult_locks.expires_at <= now()
+             where vet_consult_locks.released_at is not null
+                or vet_consult_locks.expires_at <= now()
+                or not exists (
+                  select 1
+                    from chat_sessions locked_session
+                   where locked_session.id = vet_consult_locks.session_id
+                     and locked_session.status = 'active'
+                )
              returning vet_id`,
             [routedVetId, dbSessionId, kind, VET_LOCK_TTL_BY_KIND[kind]]
           );
