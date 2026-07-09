@@ -2328,6 +2328,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   Future<void> _activateService(String service, _AiChatTurnResult result,
       {bool addUserBubble = true}) async {
+    if (_inlineConsultSessionId != null) {
+      _aiChatLog('activateService ignored while inline consult active service=$service');
+      return;
+    }
     if (_isScheduledService(service)) {
       final kind = _serviceKind(service);
       if (!await _hasServiceAvailability(kind)) {
@@ -2412,6 +2416,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   Future<void> _purchaseSingleSession(
       String service, _AiChatTurnResult result) async {
+    if (_inlineConsultSessionId != null) {
+      _aiChatLog('purchaseSingleSession ignored while inline consult active service=$service');
+      return;
+    }
     if (_isSending) {
       _aiChatLog('purchaseSingleSession ignored while busy service=$service');
       return;
@@ -2481,6 +2489,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   Future<void> _selectSchedulingOption(
       _AiSchedulingOption option, _AiChatTurnResult result) async {
+    if (_inlineConsultSessionId != null) {
+      _aiChatLog('selectSchedulingOption ignored while inline consult active option=${option.label}');
+      return;
+    }
     if (_isSending) return;
     if (!option.isSlot) {
       _sendUserMessage(option.label,
@@ -3145,7 +3157,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 vetName: _consultVetName,
                 sending: _isSending,
                 showMessageLog: showMessageLog,
-                canShowActions: userTurnsBeforeOrAtMessage >= 2,
+                canShowActions: userTurnsBeforeOrAtMessage >= 2 &&
+                  _inlineConsultSessionId == null,
                 onServiceSelected: _activateService,
                 onOneOffPurchaseSelected: _purchaseSingleSession,
                 onUpgradeSelected: _openSubscriptionUpgrade,
@@ -3694,7 +3707,8 @@ class _MessageBubble extends StatelessWidget {
               ],
               if (!isUser &&
                   message.result != null &&
-                  message.result!.payload.schedulingOptions.isNotEmpty) ...[
+                  message.result!.payload.schedulingOptions.isNotEmpty &&
+                  canShowActions) ...[
                 const SizedBox(height: 8),
                 _SchedulingOptionsPanel(
                   result: message.result!,

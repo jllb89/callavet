@@ -1716,24 +1716,21 @@ export class AiService {
     const slotsOutput = this.latestSlotsToolResult(toolResults);
     if (!slotsOutput || !Array.isArray(slotsOutput.slots) || slotsOutput.slots.length > 0) return null;
     const mode = state.schedulingMode === 'chat' ? 'chat' : this.schedulingModeFromContext(payload, toolResults);
-    const message = 'No encontré horarios disponibles en ese bloque. Elige otro momento del día y vuelvo a buscar.';
+    const message = 'No encontré horarios disponibles en ese bloque. Elige otra fecha y vuelvo a buscar.';
     return {
       ...payload,
       message,
       nextStep: 'interview',
       recommendedService: null,
-      actionLabel: 'Elegir otro horario',
+      actionLabel: 'Elegir fecha',
       intakeQuestions: [],
       commerceRecommendation: 'included',
-      schedulingStage: 'daypart',
+      schedulingStage: 'date_range',
       schedulingMode: mode,
-      schedulingRange: state.schedulingRange,
-      schedulingDay: state.schedulingDay,
-      schedulingOptions: [
-        { label: 'Mañana', value: 'morning', stage: 'daypart', mode },
-        { label: 'Tarde', value: 'afternoon', stage: 'daypart', mode },
-        { label: 'Noche', value: 'evening', stage: 'daypart', mode },
-      ],
+      schedulingRange: null,
+      schedulingDay: null,
+      schedulingDaypart: null,
+      schedulingOptions: this.schedulingDateRangeOptions(mode),
       displayBlocks: [{ type: 'paragraph', text: message, items: [] }],
       actionUxWarnings: Array.from(new Set([...(Array.isArray(payload?.actionUxWarnings) ? payload.actionUxWarnings : []), 'scheduled_slots_empty'])).slice(0, 12),
       actionUxRepaired: true,
@@ -1784,6 +1781,15 @@ export class AiService {
     ].filter((option) => this.schedulingWindowCanStillStart(dayValue, option.value));
   }
 
+  private schedulingDateRangeOptions(mode: string) {
+    const today = this.schedulingTodayDate();
+    return [
+      ...(this.schedulingDayHasFutureWindow(today) ? [{ label: 'Hoy', value: 'today', stage: 'date_range', mode }] : []),
+      { label: 'Esta semana', value: 'this_week', stage: 'date_range', mode },
+      { label: 'La próxima semana', value: 'next_week', stage: 'date_range', mode },
+    ];
+  }
+
   private schedulingDayOptions(range: string | null) {
     const [year, month, day] = this.schedulingTodayDate().split('-').map((part) => Number(part));
     const base = new Date(Date.UTC(year, month - 1, day, 12, 0, 0, 0));
@@ -1809,12 +1815,6 @@ export class AiService {
   private forceSchedulingChoicePrompt(payload: any, state: AiChatTurnState) {
     const mode = state.schedulingMode === 'chat' || /chat/i.test(String(payload?.recommendedService || '')) ? 'chat' : 'video';
     if (!state.schedulingStage) {
-      const today = this.schedulingTodayDate();
-      const dateRangeOptions = [
-        ...(this.schedulingDayHasFutureWindow(today) ? [{ label: 'Hoy', value: 'today', stage: 'date_range', mode }] : []),
-        { label: 'Esta semana', value: 'this_week', stage: 'date_range', mode },
-        { label: 'La próxima semana', value: 'next_week', stage: 'date_range', mode },
-      ];
       return {
         ...payload,
         message: 'Perfecto. ¿Para cuándo quieres agendar la consulta?',
@@ -1825,7 +1825,7 @@ export class AiService {
         commerceRecommendation: 'included',
         schedulingStage: 'date_range',
         schedulingMode: mode,
-        schedulingOptions: dateRangeOptions,
+        schedulingOptions: this.schedulingDateRangeOptions(mode),
         displayBlocks: [{ type: 'paragraph', text: 'Perfecto. ¿Para cuándo quieres agendar la consulta?', items: [] }],
       };
     }
