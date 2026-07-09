@@ -446,7 +446,7 @@ export class SessionsController {
                from vets
               where id = $1::uuid
               limit 1`,
-            [assignedVetId, specialtyId]
+            [assignedVetId]
           );
           const vet = vetRows[0];
           if (!vet) throw new HttpException('vet_not_found', HttpStatus.BAD_REQUEST);

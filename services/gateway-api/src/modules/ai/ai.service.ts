@@ -1960,6 +1960,16 @@ export class AiService {
     return cleaned.slice(0, Math.min(...markers)).replace(/[:：]\s*$/, '.').trim();
   }
 
+  private chatIntroWithoutInlineQuestions(text: string) {
+    const intro = this.chatIntroBeforeList(text);
+    const sentences = intro
+      .split(/(?<=[.!?])\s+/)
+      .map((sentence) => sentence.trim())
+      .filter(Boolean);
+    const withoutQuestions = sentences.filter((sentence) => !sentence.includes('?')).join(' ').trim();
+    return withoutQuestions || intro.replace(/[^.!?]*\?\s*/g, '').trim();
+  }
+
   private extractNumberedItems(text: string) {
     const cleaned = this.cleanChatDisplayText(text);
     const marker = cleaned.search(/(^|\s)\d{1,2}[.)]\s+/);
@@ -2038,7 +2048,7 @@ export class AiService {
   private deriveChatDisplayBlocks(message: unknown, questions: string[], warnings: Set<string>) {
     const cleanedMessage = this.cleanChatDisplayText(message);
     if (questions.length) {
-      const intro = this.cleanChatBlockText(this.chatIntroBeforeList(cleanedMessage)) || 'Para valorar urgencia y dejarle buen contexto al veterinario, respóndeme rápido:';
+      const intro = this.cleanChatBlockText(this.chatIntroWithoutInlineQuestions(cleanedMessage)) || 'Para valorar urgencia y dejarle buen contexto al veterinario, respóndeme rápido:';
       warnings.add('display_blocks_derived_from_intake_questions');
       return [
         { type: 'paragraph', text: intro, items: [] },
@@ -2077,7 +2087,7 @@ export class AiService {
   private enforceUrgentQuestionBlock(blocks: AiChatDisplayBlock[], questions: string[], payload: any, warnings: Set<string>) {
     if (!questions.length) return blocks;
     const firstTextBlock = blocks.find((block) => (block.type === 'paragraph' || block.type === 'safety_note') && block.text)?.text;
-    const intro = this.cleanChatBlockText(this.chatIntroBeforeList(firstTextBlock || payload?.message || ''))
+    const intro = this.cleanChatBlockText(this.chatIntroWithoutInlineQuestions(firstTextBlock || payload?.message || ''))
       || 'Para valorar urgencia y dejarle buen contexto al veterinario, respóndeme rápido:';
     warnings.add('urgent_questions_normalized');
     return [
@@ -2198,14 +2208,7 @@ export class AiService {
     normalized.intakeQuestions = questions;
     if (urgentIntake) {
       const message = String(normalized.message || '').trim();
-      const questionCount = (message.match(/\?/g) || []).length;
-      if (questionCount < 2 && questions.length >= 2) {
-        normalized.message = [
-          message || 'Esto puede requerir valoración veterinaria hoy.',
-          'Para valorar urgencia y dejarle buen contexto al veterinario, respóndeme rápido:',
-          ...questions.map((question: string, index: number) => `${index + 1}. ${question}`),
-        ].join('\n');
-      }
+      normalized.message = this.chatIntroWithoutInlineQuestions(message) || 'Esto puede requerir valoración veterinaria hoy.';
       if (!normalized.actionLabel || /resumen/i.test(String(normalized.actionLabel))) {
         normalized.actionLabel = 'Responder preguntas de urgencia';
       }
